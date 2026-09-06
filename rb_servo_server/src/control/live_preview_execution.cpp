@@ -412,7 +412,8 @@ void LivePreviewExecution::recordResult(PreviewExecutionAcceptance check,double 
   const auto& r=received_;auto& t=telemetry_;
   t.result_valid=true;t.result_solve_attempted=r.solve_attempted;
   t.last_worker_status=kPreviewWorkerStatusNames[static_cast<std::size_t>(r.status)];
-  t.last_solve_status=r.solve_attempted?kPreviewSolveStatusNames[static_cast<std::size_t>(r.diagnostics.status)]:"not_attempted";
+  t.last_solve_status=r.solve_attempted?kPreviewSolveStatusNames[static_cast<std::size_t>(r.diagnostics.status)]:
+      r.status==PreviewExecutionWorkerStatus::WorkerException?"unavailable_worker_exception":"not_attempted";
   t.last_admission_reason=kPreviewResultCheckNames[static_cast<std::size_t>(check)];
   t.result_request_id=r.identity.request_id;t.result_epoch=r.identity.epoch;
   t.result_gate_revision=r.identity.gate_revision;t.result_gauge_revision=r.gauge.revision;

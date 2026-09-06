@@ -16,8 +16,9 @@ compression, a second topic, or client-side snapshot merging.
 When a complete snapshot exceeds the soft budget, only
 `self_collision.near_pairs` is reduced. The monitor's full collision list,
 Jacobians, projection, safety verdicts, and CSV telemetry are unchanged. Every
-other existing JSON field is retained, including the geometry manifest and the
-legacy duplicate `last_cartesian_solve` block. Pose/quaternion values retain their
+other field in the current core schema is retained, including the geometry
+manifest, complete per-arm Cartesian diagnostics and fixed preview summary. The obsolete duplicate
+`last_cartesian_solve` alias is removed as documented below. Pose/quaternion values retain their
 existing numeric precision.
 
 Selection gives priority to pairs whose clearance is below **their own**
@@ -47,6 +48,39 @@ the GUI highlights all known collision groups conservatively. A surviving hard
 pair must not make an omitted arm or structure look clear. Truncating only
 non-violating witnesses preserves the existing per-group highlight behavior.
 The witness rendering itself remains a partial view of the published pairs.
+
+## Canonical Cartesian state and post-tare regression
+
+The late-evening 2026-09-06 preview diagnostic extension made the complete core
+larger than the UDP limit when force/kinematic values became populated after
+InitMotion/tare. In the 23:02:07 server recording, both arms completed InitMotion
+and accepted tare. Right force coverage became valid at tick 4067; tick 4068 was
+the first logged core overflow (66,744 bytes), and policy startup later failed
+with `startup_timeout_no_state`. No servo fault or preview execution occurred.
+The earlier budget test populated preview diagnostics while leaving most live
+force/kinematic fields at their small default values; it did not cover this case.
+
+The wire schema now serializes Cartesian solve telemetry once at the canonical
+`left.cartesian_solve` and `right.cartesian_solve` paths. The obsolete top-level
+`last_cartesian_solve` alias duplicated exactly the same objects and is removed;
+`state_publication.wire_revision=2`, `cartesian_solve_layout="per_arm"`,
+`cartesian_solve_paths` and `omitted_legacy_aliases` explicitly identify this
+layout. Every repository
+GUI, policy and controller-state reader already uses the per-arm paths. External
+readers of the old alias must use the canonical paths. This is an explicit schema
+revision, not adaptive dropping of control or safety information.
+
+The `preview_execution` UDP block is a fixed 26-field summary: the original 19
+execution/freshness/lifecycle fields, five latest worker/solve/admission/brake/
+staged-cancel reason labels, and `diagnostics_detail="summary"` /
+`diagnostics_full_source="servo_csv"`. All detailed counters, result identities
+and timing, fold transforms and cumulative gauges remain in the unchanged full
+servo CSV. Omitting these UDP diagnostic details is explicit and consistent in
+every state; missing details must not be interpreted as zero counts. Policy
+gripper gating still receives `enabled`, `active`, `status` and exact integer
+`sample_time_ns`. Capability profiles, fault/readiness, accepted tare, force
+reference reset counts, motion epochs, command/measured poses, quaternions and
+all per-arm Cartesian diagnostics retain their complete values and precision.
 
 ## Core overflow and diagnostics
 

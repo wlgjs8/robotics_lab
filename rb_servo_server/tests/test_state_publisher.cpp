@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cmath>
 #include <atomic>
 #include <cstring>
 #include <filesystem>
@@ -18,6 +19,7 @@
 
 #include "rb_servo/control/realtime_timing.hpp"
 #include "rb_servo/network/state_publisher.hpp"
+#include "state_publication_precision_fixture.hpp"
 
 namespace {
 
@@ -633,6 +635,140 @@ void populateDetailedPreviewFixture(rb_servo::PreviewExecutionTelemetry& p) {
     p.gauge_quaternion_xyzw = {0.0,0.8,0.0,0.6};
 }
 
+rb_servo::ServoSnapshot populatedTaredSnapshot(bool preview) {
+    auto snapshot = witnessStressSnapshot(0);
+    state_publication_fixture::wideSnapshot(snapshot);
+    state_publication_fixture::taredForce(snapshot.left_ft, snapshot.left_force_control);
+    state_publication_fixture::taredForce(snapshot.right_ft, snapshot.right_force_control);
+    snapshot.tick = 4068;
+    snapshot.loop_start_time_ns = 1610048494348843ULL;
+    snapshot.loop_end_time_ns = 1610048496611833ULL;
+    for (auto* p : {&snapshot.left_cartesian_solve.preview_execution,
+                   &snapshot.right_cartesian_solve.preview_execution}) {
+        populateDetailedPreviewFixture(*p);
+        p->enabled=preview;p->active=preview;p->status=preview?"active":"disabled";
+        p->sample_time_ns=snapshot.loop_start_time_ns;
+        p->backlog_sec=.012345678912345678;p->rate=1.0123456789123456;
+        p->plan_age_sec=.023456789123456789;p->solve_time_sec=.0012345678912345678;
+        p->accepted_position_error_m=.00012345678912345678;
+        p->accepted_rotation_error_rad=.00023456789123456789;
+    }
+    return snapshot;
+}
+
+bool testFullPrecisionTaredCoreFitsUdp() {
+    const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() / "config/stack_real.yaml";
+    const auto cfg = rb_servo::loadConfigFromYaml(path.string());
+    rb_servo::StatePublisher publisher(cfg);
+    for (const bool preview : {false,true}) {
+        auto snapshot=populatedTaredSnapshot(preview);
+        snapshot.self_collision_near_count=220;
+        const auto core_payload=publisher.serializeSnapshot(snapshot);
+        const auto core=nlohmann::json::parse(core_payload);
+        std::cout << "full_precision_tared_preview=" << preview << " core_bytes=" << core_payload.size() << '\n';
+        RB_CHECK(core_payload.size()<=64'000);
+        RB_CHECK(!core.contains("last_cartesian_solve"));
+        RB_CHECK(core.at("state_publication").at("wire_revision")==2);
+        RB_CHECK(core.at("state_publication").at("cartesian_solve_layout")=="per_arm");
+        RB_CHECK(core.at("state_publication").at("cartesian_solve_paths")==
+            nlohmann::json({"left.cartesian_solve","right.cartesian_solve"}));
+        RB_CHECK(core.at("state_publication").at("omitted_legacy_aliases")==
+            nlohmann::json({"last_cartesian_solve"}));
+        RB_CHECK(core.at("state_publication").at("payload_bytes")==core_payload.size());
+        RB_CHECK(core.at("loop_start_time_ns")==snapshot.loop_start_time_ns);
+        RB_CHECK(core.at("motion_epoch")==snapshot.motion_epoch);
+        RB_CHECK(core.at("left").at("cartesian_solve").at("ik_duration_us")==snapshot.left_cartesian_solve.ik_duration_us);
+        for(const char* side:{"left","right"}) {
+            const auto& tcp=core.at(side).at("tcp_command_stand");
+            const auto pose=state_publication_fixture::widePose();
+            RB_CHECK(tcp.at("x")==pose.x && tcp.at("y")==pose.y && tcp.at("z")==pose.z);
+            // Canonical normalization predates this transport fix; compare
+            // the exact normalized values, without reducing wire precision.
+            auto quaternion=*pose.quaternion_xyzw;
+            const double norm=std::sqrt(quaternion[0]*quaternion[0]+quaternion[1]*quaternion[1]+
+                quaternion[2]*quaternion[2]+quaternion[3]*quaternion[3]);
+            for(auto& component:quaternion)component/=norm;
+            RB_CHECK(tcp.at("quaternion_xyzw")==nlohmann::json(quaternion));
+            RB_CHECK(core.at(side).at("q_actual_deg").at(0)==snapshot.left_state.q_actual_deg[0]);
+            RB_CHECK(core.at(side).at("force_torque").at("bias_valid")==true);
+            RB_CHECK(core.at(side).at("force_torque").at("tare_state")=="accepted");
+            RB_CHECK(core.at(side).at("force_torque").at("bias_sensor").at(0)==snapshot.left_ft.bias.fx);
+            RB_CHECK(core.at(side).at("force_control").at("reference_deviation_stand_m").at(0)==snapshot.left_force_control.reference_deviation_m[0]);
+            RB_CHECK(core.at("preview_execution").at(side).at("enabled")==preview);
+            RB_CHECK(core.at("preview_execution").at(side).at("sample_time_ns")==snapshot.loop_start_time_ns);
+            RB_CHECK(core.at("preview_execution").at(side).at("diagnostics_detail")=="summary");
+        }
+        const auto witnesses=witnessStressSnapshot(220);
+        snapshot.self_collision_near_pairs=witnesses.self_collision_near_pairs;
+        snapshot.self_collision_near_count=witnesses.self_collision_near_count;
+        const auto payload=publisher.serializeSnapshot(snapshot);
+        auto with_witnesses=nlohmann::json::parse(payload);
+        RB_CHECK(payload.size()<=64'000);
+        RB_CHECK(with_witnesses.at("self_collision").at("near_pairs_truncated").get<bool>());
+        // Every core value, including all floating-point precision, is identical
+        // with and without optional witnesses. Only witness metadata/size change.
+        auto core_copy=core;
+        for(auto* value:{&with_witnesses,&core_copy}) {
+            value->at("state_publication").erase("payload_bytes");
+            for(const char* field:{"near_pairs","near_pairs_total","near_pairs_published",
+                "near_pairs_truncated","near_pairs_hard_total","near_pairs_hard_published",
+                "near_pairs_hard_truncated"})value->at("self_collision").erase(field);
+        }
+        RB_CHECK(with_witnesses==core_copy);
+    }
+    return true;
+}
+
+bool testFullPrecisionTaredFanout() {
+    UdpSocket recorder,gui,gripper_command_sink,feedback_port;
+    RB_CHECK(bindLoopbackUdp(&recorder));RB_CHECK(bindLoopbackUdp(&gui));
+    RB_CHECK(bindLoopbackUdp(&gripper_command_sink));RB_CHECK(bindLoopbackUdp(&feedback_port));
+    const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() / "config/stack_real.yaml";
+    auto cfg=rb_servo::loadConfigFromYaml(path.string());
+    // Test-only bridge uses ephemeral loopback sockets in both directions.
+    // It cannot connect to the configured physical gripper endpoint.
+    cfg.gripper.enable=true;
+    cfg.gripper.command_endpoint=endpointFor(gripper_command_sink);
+    cfg.gripper.feedback_bind=endpointFor(feedback_port);
+    cfg.network.state_pub_endpoint=endpointFor(recorder);
+    cfg.network.state_pub_endpoints={endpointFor(recorder),endpointFor(gui)};
+    cfg.network.state_pub_rate_hz=100;
+    ::close(feedback_port.fd);feedback_port.fd=-1;
+    const auto snapshot=populatedTaredSnapshot(true);
+    rb_servo::StatePublisher publisher(cfg);publisher.updateSnapshot(snapshot);
+    const bool started=publisher.start();
+    const auto now_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const nlohmann::json arm={{"percent",23.456789123456789},{"target_percent",34.567891234567891},
+        {"sample_age_ms",12.345678912345678},{"moving",true},{"ok",true}};
+    const nlohmann::json feedback={{"schema","robotics_lab.gripper_state.v1"},
+        {"host_time_ns",now_ns-123456789},{"left",arm},{"right",arm}};
+    const auto bytes=feedback.dump();sockaddr_in address{};
+    address.sin_family=AF_INET;address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    address.sin_port=htons(static_cast<uint16_t>(feedback_port.port));
+    const bool injected=started && ::sendto(recorder.fd,bytes.data(),bytes.size(),0,
+        reinterpret_cast<const sockaddr*>(&address),sizeof(address))==static_cast<ssize_t>(bytes.size());
+    std::string a,b;bool received=false;
+    for(int packet=0;injected&&packet<20;++packet) {
+        if(!receivePacket(recorder.fd,&a)||!receivePacket(gui.fd,&b))break;
+        const auto candidate=nlohmann::json::parse(a);
+        if(candidate.at("left").at("gripper").at("valid")==true &&
+           candidate.at("right").at("gripper").at("valid")==true) {received=true;break;}
+    }
+    publisher.stop();
+    RB_CHECK(started&&injected&&received);RB_CHECK(a==b);RB_CHECK(a.size()<=64'000);
+    const auto message=nlohmann::json::parse(a);
+    std::cout << "full_precision_tared_valid_gripper core_bytes=" << a.size() << '\n';
+    RB_CHECK(message.at("state_publication").at("oversize_dropped_total")==0);
+    RB_CHECK(message.at("state_publication").at("send_errors_total")==0);
+    RB_CHECK(message.at("left").at("force_torque").at("bias_valid")==true);
+    RB_CHECK(message.at("right").at("force_torque").at("bias_valid")==true);
+    RB_CHECK(message.at("preview_execution").at("left").at("active")==true);
+    RB_CHECK(message.at("left").at("gripper").at("percent")==arm.at("percent"));
+    RB_CHECK(message.at("right").at("gripper").at("sample_age_ms")==arm.at("sample_age_ms"));
+    return true;
+}
+
 bool testPreviewTelemetryAndCapabilitySurviveWitnessBudget() {
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() / "config/stack_real.yaml";
     const auto cfg = rb_servo::loadConfigFromYaml(path.string());
@@ -666,167 +802,27 @@ bool testPreviewTelemetryAndCapabilitySurviveWitnessBudget() {
     for (auto it = expected.begin(); it != expected.end(); ++it) RB_CHECK(left.at(it.key()) == it.value());
     RB_CHECK(left.at("sample_time_ns").is_number_unsigned());
     static_assert(std::is_trivially_copyable_v<rb_servo::PreviewExecutionTelemetry>);
+    // The new diagnostic extension is deliberately a fixed wire summary.
+    // The complete extension is tested separately against the unchanged CSV.
     const nlohmann::json detailed_expected = {
-        {"gate_revision",9007199254740993ULL},
-        {"gauge_revision",9007199254740995ULL},
-        {"parent_plan_id",9007199254740997ULL},
-        {"request_id",9007199254740999ULL},
-        {"result_valid",true},
-        {"result_solve_attempted",true},
         {"last_worker_status","fixture_last_worker_status,\"quoted\""},
         {"last_solve_status","fixture_last_solve_status,\"quoted\""},
         {"last_admission_reason","fixture_last_admission_reason,\"quoted\""},
-        {"result_request_id",9007199254741011ULL},
-        {"result_epoch",9007199254741013ULL},
-        {"result_gate_revision",9007199254741015ULL},
-        {"result_gauge_revision",9007199254741017ULL},
-        {"result_source_wire_seq",9007199254741019ULL},
-        {"result_source_recv_seq",9007199254741021ULL},
-        {"result_parent_plan_id",9007199254741023ULL},
-        {"result_gauge_transported",9007199254741025ULL},
-        {"staged_gauge_transported",9007199254741027ULL},
-        {"gauge_transport_failed",9007199254741029ULL},
-        {"result_generated_at_sec",0.002},
-        {"result_splice_at_sec",0.0021},
-        {"result_valid_until_sec",0.0022},
-        {"result_completed_at_sec",0.0023},
-        {"result_observed_at_sec",0.0024},
-        {"solve_iterations",19},
-        {"solve_contact_constrained",true},
-        {"solve_contact_decomposed",true},
-        {"solve_contact_coupled_fallback",true},
-        {"solve_max_constraint_violation",0.0029},
-        {"solve_max_contact_velocity_violation_m_s",0.003},
-        {"ready_not_staged",9007199254741053ULL},
-        {"staged_identity_rejected",9007199254741055ULL},
-        {"staged_expired",9007199254741057ULL},
-        {"staged_sample_rejected",9007199254741059ULL},
-        {"staged_contact_rejected",9007199254741061ULL},
-        {"last_staged_cancel_reason","fixture_last_staged_cancel_reason,\"quoted\""},
-        {"last_staged_cancel_time_sec",0.0037},
-        {"last_staged_cancel_request_id",9007199254741067ULL},
-        {"last_admission_time_sec",0.0039},
-        {"last_admission_gap_sec",0.004},
-        {"last_admitted_request_id",9007199254741073ULL},
-        {"last_admitted_parent_plan_id",9007199254741075ULL},
         {"last_brake_reason","fixture_last_brake_reason,\"quoted\""},
-        {"last_brake_start_time_sec",0.0044},
-        {"last_brake_origin_sec",0.0045},
-        {"angular_continuations_started",9007199254741083ULL},
-        {"angular_brakes_started",9007199254741085ULL},
-        {"last_contact_reject_time_sec",0.0048},
-        {"last_contact_reject_gate",0.0049},
-        {"last_contact_reject_closing_m_s",0.005},
-        {"last_contact_reject_allowed_m_s",0.0051},
-        {"fold_count",9007199254741095ULL},
-        {"fold_force_count",9007199254741097ULL},
-        {"fold_roi_floor_count",9007199254741099ULL},
-        {"fold_geometry_hold_count",9007199254741101ULL},
-        {"fold_unknown_count",9007199254741103ULL},
-        {"fold_booked_time_ns",9007199254741105ULL},
-        {"fold_applied_time_ns",9007199254741107ULL},
-        {"fold_revision",9007199254741109ULL},
-        {"fold_geometry_cause_mask",13},
-        {"pending_geometry_fold_valid",true},
-        {"pending_geometry_fold_time_ns",9007199254749991ULL},
-        {"pending_geometry_fold_cause_mask",6},
-        {"pending_geometry_fold_translation_m",{-0.051,0.052,-0.053}},
-        {"pending_geometry_fold_quaternion_xyzw",{0.6,0.0,0.0,0.8}},
-        {"request_invalid",9007199254741113ULL},
-        {"request_mailbox_full",9007199254741115ULL},
-        {"request_coalesced",9007199254741117ULL},
-        {"result_publish_dropped",9007199254741119ULL},
-        {"result_coalesced",9007199254741121ULL},
-        {"solve_angular_norm_coupled",true},
-        {"solve_angular_norm_cuts",9007199254748881ULL},
-        {"solve_max_angular_chart_velocity_norm",1.23},
-        {"solve_max_angular_chart_acceleration_norm",2.34},
-        {"result_initial_linear_velocity_max_m_s",0.345},
-        {"result_initial_linear_acceleration_max_m_s2",4.56},
-        {"result_initial_angular_velocity_norm_rad_s",0.789},
-        {"result_initial_angular_acceleration_norm_rad_s2",7.89},
-        {"fold_cause","geometry_hold"},
-        {"gauge_translation_m",{0.101,-0.202,0.303}},
-        {"gauge_quaternion_xyzw",{0.0,0.8,0.0,0.6}},
-        {"last_contact_reject_normal",{0.011,0.012,0.013}},
-        {"fold_translation_m",{0.021,0.022,0.023}},
-        {"fold_quaternion_xyzw",{0,0,0.6,0.8}},
-        {"fold_booked_translation_m",{0.041,0.042,0.043}},
-        {"fold_booked_quaternion_xyzw",{0,0,0.6,0.8}},
+        {"last_staged_cancel_reason","fixture_last_staged_cancel_reason,\"quoted\""},
+        {"diagnostics_detail","summary"},
+        {"diagnostics_full_source","servo_csv"},
     };
     for (const char* side : {"left", "right"}) {
         const auto& details = message.at("preview_execution").at(side);
+        RB_CHECK(details.size() == expected.size() + detailed_expected.size());
         for (auto it=detailed_expected.begin(); it!=detailed_expected.end(); ++it)
             RB_CHECK(details.at(it.key()) == it.value());
-        RB_CHECK(details.at("gate_revision").is_number_unsigned());
-        RB_CHECK(details.at("gauge_revision").is_number_unsigned());
-        RB_CHECK(details.at("parent_plan_id").is_number_unsigned());
-        RB_CHECK(details.at("request_id").is_number_unsigned());
-        RB_CHECK(details.at("result_request_id").is_number_unsigned());
-        RB_CHECK(details.at("result_epoch").is_number_unsigned());
-        RB_CHECK(details.at("result_gate_revision").is_number_unsigned());
-        RB_CHECK(details.at("result_gauge_revision").is_number_unsigned());
-        RB_CHECK(details.at("result_source_wire_seq").is_number_unsigned());
-        RB_CHECK(details.at("result_source_recv_seq").is_number_unsigned());
-        RB_CHECK(details.at("result_parent_plan_id").is_number_unsigned());
-        RB_CHECK(details.at("result_gauge_transported").is_number_unsigned());
-        RB_CHECK(details.at("staged_gauge_transported").is_number_unsigned());
-        RB_CHECK(details.at("gauge_transport_failed").is_number_unsigned());
-        RB_CHECK(details.at("solve_angular_norm_cuts").is_number_unsigned());
-        RB_CHECK(details.at("ready_not_staged").is_number_unsigned());
-        RB_CHECK(details.at("staged_identity_rejected").is_number_unsigned());
-        RB_CHECK(details.at("staged_expired").is_number_unsigned());
-        RB_CHECK(details.at("staged_sample_rejected").is_number_unsigned());
-        RB_CHECK(details.at("staged_contact_rejected").is_number_unsigned());
-        RB_CHECK(details.at("last_staged_cancel_request_id").is_number_unsigned());
-        RB_CHECK(details.at("last_admitted_request_id").is_number_unsigned());
-        RB_CHECK(details.at("last_admitted_parent_plan_id").is_number_unsigned());
-        RB_CHECK(details.at("angular_continuations_started").is_number_unsigned());
-        RB_CHECK(details.at("angular_brakes_started").is_number_unsigned());
-        RB_CHECK(details.at("fold_count").is_number_unsigned());
-        RB_CHECK(details.at("fold_force_count").is_number_unsigned());
-        RB_CHECK(details.at("fold_roi_floor_count").is_number_unsigned());
-        RB_CHECK(details.at("fold_geometry_hold_count").is_number_unsigned());
-        RB_CHECK(details.at("fold_unknown_count").is_number_unsigned());
-        RB_CHECK(details.at("fold_booked_time_ns").is_number_unsigned());
-        RB_CHECK(details.at("fold_applied_time_ns").is_number_unsigned());
-        RB_CHECK(details.at("fold_revision").is_number_unsigned());
-        RB_CHECK(details.at("fold_geometry_cause_mask").is_number_unsigned());
-        RB_CHECK(details.at("request_invalid").is_number_unsigned());
-        RB_CHECK(details.at("request_mailbox_full").is_number_unsigned());
-        RB_CHECK(details.at("request_coalesced").is_number_unsigned());
-        RB_CHECK(details.at("result_publish_dropped").is_number_unsigned());
-        RB_CHECK(details.at("result_coalesced").is_number_unsigned());
-        RB_CHECK(details.at("worker_status_counts").size() == rb_servo::kPreviewWorkerStatusNames.size());
-        for (std::size_t i=0; i<rb_servo::kPreviewWorkerStatusNames.size(); ++i) {
-            const auto& count = details.at("worker_status_counts").at(rb_servo::kPreviewWorkerStatusNames[i]);
-            RB_CHECK(count.is_number_unsigned());
-            RB_CHECK(count.get<uint64_t>() == 9007199254741993ULL + 0*100 + i*2);
-        }
-        RB_CHECK(details.at("solve_status_counts").size() == rb_servo::kPreviewSolveStatusNames.size());
-        for (std::size_t i=0; i<rb_servo::kPreviewSolveStatusNames.size(); ++i) {
-            const auto& count = details.at("solve_status_counts").at(rb_servo::kPreviewSolveStatusNames[i]);
-            RB_CHECK(count.is_number_unsigned());
-            RB_CHECK(count.get<uint64_t>() == 9007199254741993ULL + 1*100 + i*2);
-        }
-        RB_CHECK(details.at("result_checks").size() == rb_servo::kPreviewResultCheckNames.size());
-        for (std::size_t i=0; i<rb_servo::kPreviewResultCheckNames.size(); ++i) {
-            const auto& count = details.at("result_checks").at(rb_servo::kPreviewResultCheckNames[i]);
-            RB_CHECK(count.is_number_unsigned());
-            RB_CHECK(count.get<uint64_t>() == 9007199254741993ULL + 2*100 + i*2);
-        }
-        RB_CHECK(details.at("staged_cancel_counts").size() == rb_servo::kPreviewStagedCancelNames.size());
-        for (std::size_t i=0; i<rb_servo::kPreviewStagedCancelNames.size(); ++i) {
-            const auto& count = details.at("staged_cancel_counts").at(rb_servo::kPreviewStagedCancelNames[i]);
-            RB_CHECK(count.is_number_unsigned());
-            RB_CHECK(count.get<uint64_t>() == 9007199254741993ULL + 3*100 + i*2);
-        }
-        RB_CHECK(details.at("brake_counts").size() == rb_servo::kPreviewBrakeCauseNames.size());
-        for (std::size_t i=0; i<rb_servo::kPreviewBrakeCauseNames.size(); ++i) {
-            const auto& count = details.at("brake_counts").at(rb_servo::kPreviewBrakeCauseNames[i]);
-            RB_CHECK(count.is_number_unsigned());
-            RB_CHECK(count.get<uint64_t>() == 9007199254741993ULL + 4*100 + i*2);
-        }
+        for (const char* key : {"worker_status_counts","solve_status_counts","result_checks",
+                               "staged_cancel_counts","brake_counts","fold_translation_m",
+                               "gauge_quaternion_xyzw","pending_geometry_fold_translation_m",
+                               "gate_revision","request_id","result_request_id","fold_cause"})
+            RB_CHECK(!details.contains(key));
     }
 
     const auto defaults = nlohmann::json::parse(publisher.serializeSnapshot(snapshotWithTick(0)));
@@ -835,11 +831,9 @@ bool testPreviewTelemetryAndCapabilitySurviveWitnessBudget() {
     RB_CHECK(right.at("status") == "disabled");
     RB_CHECK(right.at("plan_id") == 0 && right.at("sample_time_ns") == 0);
     RB_CHECK(right.at("rate") == 1.0);
-    RB_CHECK(right.at("gate_revision") == 0 && right.at("gauge_revision") == 0);
     RB_CHECK(right.at("last_worker_status") == "not_observed");
-    RB_CHECK(!right.at("result_valid").get<bool>() && !right.at("result_solve_attempted").get<bool>());
-    RB_CHECK(right.at("fold_cause") == "unknown" && right.at("fold_count") == 0);
-    RB_CHECK(right.at("fold_quaternion_xyzw") == nlohmann::json({0.0,0.0,0.0,1.0}));
+    RB_CHECK(right.at("diagnostics_detail") == "summary");
+    RB_CHECK(right.at("diagnostics_full_source") == "servo_csv");
 
     const auto& profiles = message.at("chunk_execution_profiles");
     RB_CHECK(profiles.size() == cfg.cartesian_control.tcp_pose_target_profiles.size());
@@ -993,6 +987,8 @@ bool testOversizeDropDiagnosticAndRecovery() {
 }  // namespace
 
 int main() {
+    if (!testFullPrecisionTaredCoreFitsUdp()) return 1;
+    if (!testFullPrecisionTaredFanout()) return 1;
     if (!testPreviewTelemetryAndCapabilitySurviveWitnessBudget()) return 1;
     if (!testWitnessBudgetPreservesCoreAndUrgentPairs()) return 1;
     if (!testWitnessBudgetMarksIncompleteHardPairsAndEscapedBytes()) return 1;

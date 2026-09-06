@@ -58,6 +58,25 @@ class RecordedFollowerExportTest(unittest.TestCase):
             self.assertEqual(m['arms']['left']['consumed_frames'],1)
             self.assertEqual(e[0]['previous_emitted'][0],0.)
 
+    def test_live_spectral_comparison_includes_terminal_tail(self):
+        spec=importlib.util.spec_from_file_location('replay_analyzer',ROOT/'tools/analyze_recorded_follower_replay.py')
+        analyzer=importlib.util.module_from_spec(spec);spec.loader.exec_module(analyzer)
+        np=analyzer.np;t=np.arange(0.,11.36,.002)
+        d=pd.DataFrame({'t':t})
+        for axis in ['x','y','z','qx','qy','qz']:
+            d['stage_'+axis]=0.
+        d['stage_qw']=1.
+        quiet=analyzer.live_motion_bands(d)
+        # A normal 4096-sample Welch call on this trace drops everything after
+        # 8.19s. Only the terminal second changes, at a known in-band frequency.
+        d['stage_x']=np.where(t>=10.,.001*np.sin(2*np.pi*5*(t-10.)),0.)
+        tail=analyzer.live_motion_bands(d)
+        self.assertTrue(tail['tail_window_added'])
+        self.assertEqual(tail['window_count'],2)
+        self.assertGreater(tail['covered_end_t_sec'],11.35)
+        self.assertEqual(quiet['bands']['3-8']['linear_position_rms_mm'],0.)
+        self.assertGreater(tail['bands']['3-8']['linear_position_rms_mm'],.001)
+
     def test_current_strip_and_previous_command_rows_are_not_shifted(self):
         d,c = self.fixture()
         d.loc[2,'left_fc_reference_strip_enabled']=1

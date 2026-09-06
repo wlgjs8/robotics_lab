@@ -3,10 +3,21 @@
 ## Status and scope
 
 The September 6 late-evening repair adds rejection diagnostics, transports
-geometry-hold gauge changes through pending plans, and corrects an overly
-restrictive angular constraint. Its validation is recorded separately under
-`outputs/preview_fold_repair_20260906/`; the earlier acceptance numbers below
-refer to the pre-repair implementation until that report is complete.
+geometry-hold gauge changes through pending plans, and corrects the artificial
+1.4/√3 dominant-axis rotation ceiling. Its current validation is recorded under
+`outputs/preview_fold_repair_20260906/report.md`: all 58 regression targets pass,
+the 49-test analysis suite executes without skips, the exact real-backend build
+passes config-only preflight, and all three default fixed-input replays complete.
+The rotation replay changes observed QP failures13→0, expiry brakes2→0, and
+orientation error p953.634→0.893 degrees. The two original terminal geometry
+windows change plan admissions17→63 and0→45, with zero expiry brakes.
+
+Physical validation remains separate. One earlier free-motion interval still
+reaches95.68ms backlog under the unchanged100ms cap. Jerk1000 reduces lag/tracking
+error but raises3–8Hz nominal band RMS; jerk4000 reaches the backlog cap in that
+interval. The production weight stays2000. One1000 replay also exposes timing
+sensitivity; all attempts, including that failure, are retained. The detailed
+older acceptance section below remains evidence for the pre-repair integration.
 
 The server integration under the explicit `flow_infer_preview` profile has
 completed recorded-input replay and clean native integration checks. The exact
@@ -87,6 +98,26 @@ acceleration endpoints bound the entire interval, including between knots.
 SO(3) tangent derivative bounds are conservatively reduced to enforce physical
 angular norm bounds. These norm bounds are stricter than the legacy per-axis
 tangent bounds; results must not attribute that difference solely to smoothing.
+
+The angular velocity and acceleration certificates now constrain the complete
+three-component Bernstein controls instead of an inscribed per-axis cube.
+With the unchanged physical velocity limit V, the conservative chart
+acceleration reserve remains A = alpha_max - V²/2 and chart jerk reserve remains
+J = jerk_max - 2.5 V A - 5 V³/6. The existing J/√3 axis jerk box and jerk cost
+normalization remain unchanged. This removes the artificial V/√3 dominant-axis
+speed ceiling while preserving the physical norm envelopes.
+
+An independent-axis optimum that passes every vector-norm control is accepted.
+Otherwise a 3N-variable coupled QP adds supporting planes, retaining up to 32N
+planes within one plan. It always rechecks the original norm certificate;
+satisfying an outer polytope alone is insufficient. A common positive factor
+normalizes H and g without changing objective ratios or its minimizer. The
+original iteration/time budget still applies; the method does not promise
+convergence of every feasible request before its live splice deadline. At N=24
+its four dense angular matrices occupy about 1.62 MB per worker, excluding
+solver-internal storage and vectors. All coupled work runs outside the servo.
+A general recursive-feasibility guarantee for acceleration after changing the
+SO(3) chart has not been established.
 
 Tracking tolerances and excess-error budgets are explicit acceptance settings.
 They do not establish collision clearance, contact safety or a globally optimal
@@ -256,8 +287,12 @@ cursor. Task-level gripper timing still needs physical assessment.
 `preview_execution` state telemetry and matching CSV columns expose status,
 sample timestamp, epoch, plan/source IDs, cursor backlog/rate, plan age,
 accepted-command residuals, solve time and submit/admit/reject/expiry/contact
-counts. Rejection diagnostics additionally distinguish worker/QP failure, result
-admission refusal, and staged-plan cancellation. Worker completion counters
+counts. UDP adds five latest reason labels and explicit
+`diagnostics_detail=summary` / `diagnostics_full_source=servo_csv` markers.
+Full CSV rejection diagnostics distinguish worker/QP failure, result admission
+refusal, and staged-plan cancellation. The packet retains full canonical
+per-arm `cartesian_solve` data and removes the obsolete identical top-level
+`last_cartesian_solve` copy. Policy gripper authority fields are unchanged. Worker completion counters
 include results that the mailbox later coalesces or drops; observed-result
 counters describe only what the servo consumed. Fold cause, exact transform,
 booking/application timestamps, cumulative gauge, and plan-admission intervals
@@ -313,6 +348,7 @@ Evidence is saved under
 cmake -S rb_servo_server -B rb_servo_server/build/preview_live \
   -DCMAKE_BUILD_TYPE=Release \
   -DRB_SERVO_ENABLE_RBPODO=OFF \
+  -DPython3_EXECUTABLE="$(pwd)/.venv/bin/python" \
   -DRB_SERVO_ENABLE_PREVIEW_EXECUTION=ON \
   -DRB_SERVO_BUILD_PREVIEW_EXPERIMENTS=ON
 cmake --build rb_servo_server/build/preview_live -j2

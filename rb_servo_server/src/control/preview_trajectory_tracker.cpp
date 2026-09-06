@@ -38,6 +38,9 @@ using Matrix = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowM
 using Vector = Eigen::VectorXd;
 using Axes = Eigen::Matrix<double, 6, 1>;
 constexpr int kCapacity = static_cast<int>(PreviewTrajectoryTracker::kMaxHorizonSteps);
+// Fixed worker-owned storage for angular norm support planes. Exhaustion
+// rejects the candidate; it never discards a plane or enlarges a norm ball.
+constexpr int kAngularCutsPerInterval = 32;
 constexpr int kMaxContactRows = 3 * (static_cast<int>(PreviewContactConstraint::kCapacity) - 1 + kCapacity);
 
 bool positive(double x) { return std::isfinite(x) && x > 0.0; }
@@ -141,7 +144,7 @@ struct PreviewTrajectoryTracker::Impl {
   };
   struct ContactQp {
     Matrix H, C, previous_C, full_C;
-    Vector g, lower, upper, lower_c, upper_c, solution, row_scale, full_upper, dual;
+    Vector g, lower, upper, lower_c, upper_c, solution, row_scale, full_upper;
     std::array<int,kCapacity> endpoint_rows{};
     std::array<int,kMaxContactRows> row_interval{};
     std::unique_ptr<qpOASES::SQProblem> qp;
@@ -153,6 +156,7 @@ struct PreviewTrajectoryTracker::Impl {
   ContactQp contact;
   ContactQp normal_contact;
   ContactQp angular_norm;
+  double angular_objective_scale{1.0};
   Eigen::LLT<Matrix> translation_factor;
   Matrix unconstrained_translation;
   Axes velocity_limit, acceleration_limit, jerk_limit;
@@ -291,12 +295,11 @@ struct PreviewTrajectoryTracker::Impl {
     // Bernstein controls satisfy the norm balls. Otherwise a bounded QP
     // cutting-plane solve couples the three axes. All storage is worker-owned.
     auto& angular=angular_norm;
-    const int angular_variables=3*n, angular_constraints=15*n;
+    const int angular_variables=3*n, angular_constraints=(9+kAngularCutsPerInterval)*n;
     angular.H=Matrix::Zero(angular_variables,angular_variables);
     angular.C=Matrix::Zero(angular_constraints,angular_variables);
-    angular.full_C=Matrix::Zero(6*n,angular_variables);
-    angular.full_upper=Vector::Zero(6*n);
-    angular.dual=Vector::Zero(angular_variables+angular_constraints);
+    angular.full_C=Matrix::Zero(kAngularCutsPerInterval*n,angular_variables);
+    angular.full_upper=Vector::Zero(kAngularCutsPerInterval*n);
     angular.g=Vector::Zero(angular_variables);angular.solution=Vector::Zero(angular_variables);
     angular.lower=Vector::Constant(angular_variables,-1.0);
     angular.upper=Vector::Constant(angular_variables,1.0);
@@ -308,6 +311,11 @@ struct PreviewTrajectoryTracker::Impl {
       angular.lower_c.segment(axis*3*n,3*n)=axes[axis+3].lower_c;
       angular.upper_c.segment(axis*3*n,3*n)=axes[axis+3].upper_c;
     }
+    // Common positive objective scaling preserves the minimizer and relative
+    // tracking/jerk weights while reducing the absolute Hessian range seen by
+    // qpOASES. It is not a change to jerk normalization or physical limits.
+    angular_objective_scale=1.0/axes[3].H.cwiseAbs().maxCoeff();
+    angular.H*=angular_objective_scale;
     angular.previous_C=angular.C;
     angular.qp=std::make_unique<qpOASES::SQProblem>(angular_variables,angular_constraints,qpOASES::HST_POSDEF);
     angular.qp->setOptions(options);iterations=1000;startup_budget=1.0;
@@ -687,12 +695,13 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
   if(angular_certificate()>cfg.feasibility_tolerance) {
     result.diagnostics.angular_norm_coupled=true;
     auto& q=x.angular_norm;
-    const int base_rows=9*x.n,cut_rows=6*x.n;
+    const int base_rows=9*x.n,cut_rows=kAngularCutsPerInterval*x.n;
     // Store cuts separately from qpOASES's previous A buffer. Each plane is
     // an outer approximation of a norm ball. No plan is accepted merely for
     // satisfying these planes: the complete norm certificate is rechecked.
     auto& cuts=q.full_C;auto& cut_upper=q.full_upper;
     cuts.setZero();cut_upper.setConstant(qpOASES::INFTY);
+    q.warm=false; // each new nonlinear problem starts with its own plane set
     int retained_cuts=0;
     std::size_t cuts_added=0;
     for(;;) {
@@ -701,12 +710,12 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         const double norm=value.norm();
         const double limit=row%3==2?x.acceleration_limit[3]:x.velocity_limit[3];
         if(norm<=limit+cfg.feasibility_tolerance)continue;
-        // Preserve every supporting plane with a nonzero dual multiplier
-        // from the previous relaxation. Discarding arbitrary recent planes
-        // can remove the constraint that kept another direction bounded and
-        // create a large-amplitude two-cycle. Inactive planes can be discarded
-        // without changing that relaxation's optimum. At most 3N active planes
-        // plus 3N newly violated vectors fit this preallocated 6N capacity.
+        // Keep every support plane for this nonlinear problem. Dropping even
+        // inactive planes can revisit earlier directions, and replacing rows
+        // creates an unnecessarily ill-conditioned SQProblem homotopy. Each
+        // successful relaxation therefore retains the previous feasible set
+        // and adds only valid outer planes. The fixed storage, total NWSR and
+        // wall-time budgets all remain fail-closed limits on this iteration.
         if(retained_cuts>=cut_rows)return finish(PreviewSolveStatus::IterationLimit);
         const int cut=retained_cuts++;
         const Eigen::Vector3d normal=value/norm;
@@ -724,7 +733,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
       q.C.setZero();q.lower_c.setConstant(-qpOASES::INFTY);q.upper_c.setConstant(qpOASES::INFTY);
       for(int axis=0;axis<3;++axis) {
         const auto& aq=x.axes[axis+3];
-        q.g.segment(axis*x.n,x.n)=aq.g;
+        q.g.segment(axis*x.n,x.n)=x.angular_objective_scale*aq.g;
         q.C.block(axis*3*x.n,axis*x.n,3*x.n,x.n)=aq.C;
         q.lower_c.segment(axis*3*x.n,3*x.n)=aq.lower_c;
         q.upper_c.segment(axis*3*x.n,3*x.n)=aq.upper_c;
@@ -736,7 +745,6 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
       int iterations=std::min(3*cfg.max_working_set_recalculations,
           6*cfg.max_working_set_recalculations-result.diagnostics.working_set_recalculations);
       if(iterations<=0)return finish(PreviewSolveStatus::IterationLimit);
-      q.warm=false;
       qpOASES::returnValue status;
       if(q.warm)status=q.qp->hotstart(q.H.data(),q.g.data(),q.C.data(),q.lower.data(),q.upper.data(),
                                     q.lower_c.data(),q.upper_c.data(),iterations,&remaining);
@@ -765,19 +773,6 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
       if(violation>cfg.feasibility_tolerance)return finish(PreviewSolveStatus::NumericalFailure);
       for(int axis=0;axis<3;++axis)x.axes[axis+3].solution=q.solution.segment(axis*x.n,x.n);
       if(angular_certificate()<=cfg.feasibility_tolerance)break;
-      if(q.qp->getDualSolution(q.dual.data())!=qpOASES::SUCCESSFUL_RETURN || !q.dual.allFinite())
-        return finish(PreviewSolveStatus::NumericalFailure);
-      int kept=0;
-      for(int cut=0;cut<retained_cuts;++cut) {
-        // qpOASES writes exactly zero for an inactive constraint; use its
-        // active-set result, not an invented multiplier tolerance.
-        if(q.dual[3*x.n+base_rows+cut]==0.0)continue;
-        if(kept!=cut) {cuts.row(kept)=cuts.row(cut);cut_upper[kept]=cut_upper[cut];}
-        ++kept;
-      }
-      retained_cuts=kept;
-      cuts.bottomRows(cut_rows-kept).setZero();
-      cut_upper.tail(cut_rows-kept).setConstant(qpOASES::INFTY);
     }
     for(int axis=3;axis<6;++axis)integrate_axis(axis);
   }

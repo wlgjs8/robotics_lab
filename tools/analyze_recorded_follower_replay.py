@@ -28,11 +28,24 @@ def live_motion_bands(d):
     xyz=np.column_stack([np.interp(grid,t,p[:,k]) for k in range(3)])
     rot=Slerp(t,Rotation.from_quat(p[:,3:]))(grid)
     omega=(rot[1:]*rot[:-1].inv()).as_rotvec()*fs
-    nperseg=min(4096,len(omega));overlap=nperseg//2
-    frequency,linear=welch(xyz,fs=fs,nperseg=nperseg,noverlap=overlap,detrend='linear',axis=0)
-    _,angular=welch(omega,fs=fs,nperseg=nperseg,noverlap=overlap,detrend='linear',axis=0)
+    nperseg=min(4096,len(omega));step=nperseg//2
+    starts=list(range(0,len(omega)-nperseg+1,step))
+    # scipy's ordinary Welch drops an incomplete last segment. For the short
+    # eleven-second terminal fixture that would omit the entire repaired tail.
+    # Include one additional complete tail window; do not pad or invent motion.
+    if starts[-1]!=len(omega)-nperseg:starts.append(len(omega)-nperseg)
+    linear_windows=[];angular_windows=[]
+    for begin in starts:
+        frequency,linear=welch(xyz[begin:begin+nperseg],fs=fs,nperseg=nperseg,noverlap=0,detrend='linear',axis=0)
+        _,angular=welch(omega[begin:begin+nperseg],fs=fs,nperseg=nperseg,noverlap=0,detrend='linear',axis=0)
+        linear_windows.append(linear);angular_windows.append(angular)
+    linear=np.mean(linear_windows,axis=0);angular=np.mean(angular_windows,axis=0)
     integrate=getattr(np,'trapezoid',np.trapz)
-    out={'available':True,'fs_hz':fs,'nperseg':nperseg,'interpretation':live_motion_bands.__doc__,'bands':{}}
+    out={'available':True,'fs_hz':fs,'nperseg':nperseg,'window_count':len(starts),
+         'window_start_t_sec':[float(grid[i])for i in starts],
+         'covered_start_t_sec':float(grid[0]),'covered_end_t_sec':float(grid[len(omega)-1]),
+         'tail_window_added':len(starts)>1 and starts[-1]-starts[-2]!=step,
+         'interpretation':live_motion_bands.__doc__,'bands':{}}
     for low,high in [(0.5,3),(3,8),(8,20)]:
         take=(frequency>=low)&(frequency<=high);f=frequency[take]
         out['bands'][f'{low:g}-{high:g}']={

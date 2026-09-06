@@ -3620,11 +3620,14 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "async_supervision_degraded", "tracking_error_degraded", "latched_fault_reason", "fault_reason",
         "logger_dropped_samples", "logger_health",
         "fault_context", "mount_transform_deferred", "mounts", "tcp_fields_deferred",
-        "last_cartesian_solve"
+        "state_publication"
     };
     for (const char* key : top_keys) {
         RB_CHECK(json.contains(key));
     }
+    // Cartesian solve data has one canonical per-arm wire location. Keep the
+    // complete diagnostics there without duplicating both arms in the packet.
+    RB_CHECK(!json.contains("last_cartesian_solve"));
     const char* arm_keys[] = {
         "mode", "q_actual_deg", "q_sent_deg", "q_previous_sent_deg", "send_ok",
         "send_start_ns", "send_end_ns", "send_duration_us", "has_valid_joint_state",
@@ -3844,8 +3847,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("right").at("fk_duration_us").get<double>() == 12.0);
     RB_CHECK(json.at("right").at("cartesian_solve").at("ik_timed_out").get<bool>());
     RB_CHECK(json.at("right").at("cartesian_solve").at("ik_warn_duration_exceeded").get<bool>());
-    RB_CHECK(json.at("last_cartesian_solve").at("right").at("ik_reason").get<std::string>() == "timeout");
-    RB_CHECK(json.at("last_cartesian_solve").at("right").at("orientation_error_rad").get<double>() == 0.04);
+    RB_CHECK(json.at("right").at("cartesian_solve").at("ik_reason").get<std::string>() == "timeout");
+    RB_CHECK(json.at("right").at("cartesian_solve").at("orientation_error_rad").get<double>() == 0.04);
     RB_CHECK(!json.at("left").at("worker").at("enabled").get<bool>());
     RB_CHECK(json.at("left").at("worker").at("queue_policy").get<std::string>() == "latest_wins");
     RB_CHECK(json.at("left").at("worker").at("read_period_ns").get<uint64_t>() == 0);

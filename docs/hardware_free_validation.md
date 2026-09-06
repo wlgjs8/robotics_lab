@@ -133,6 +133,19 @@ replay. Clean native integration passes 58 tests; both full recorded streams and
 the real-backend config-only preflight also pass. Physical acceptance remains
 separate; see the
 [execution contract and current status](reference/preview_trajectory_execution.md).
+The late-evening geometry/admission/rotation repair has separate evidence in
+`outputs/preview_fold_repair_20260906/`: 56 native targets plus the GUI/tools
+regression targets pass; all49 analysis-tool tests additionally execute in the
+OpenPI analysis environment, because the repository GUI environment lacks the
+optional pandas/pyarrow dependencies. New coverage includes exact geometry
+booking/application timing through the production loop, EmergencyStop before
+application and new-source resumption, strict gauge transport of pending/staged
+plans, full angular norm certificates and nonzero-acceleration C2 rebases. The
+three recorded default candidate replays complete without expiry faults; they
+retain recorded force/geometry inputs and ideal nominal dispatch. Their success
+is not physical controller/model acceptance. All objective attempts, including
+a timing-sensitive failed1000 run and a backlog-limited4000 run, are retained.
+
 
 The fresh chunk path also has dedicated hardware-free coverage:
 `chunk_fresh_continuity` exercises C++ sampled-p/v/a splices, SO(3) derivatives,
@@ -174,3 +187,24 @@ still a fixed-model/force/actual-feedback counterfactual. Export with
 pyarrow and SciPy in the analysis interpreter. Exporter tests explicitly skip
 when pandas/pyarrow are absent from the minimal test environment; run them in
 the complete analysis environment as well, and report those skips separately.
+
+
+### Post-tare state UDP regression (2026-09-06 23:02)
+
+This communication-only repair removes the obsolete duplicate top-level
+`last_cartesian_solve` alias and explicitly summarizes the new preview diagnostics
+on UDP, preserving complete canonical per-arm state and full forensic CSV.
+The expanded finite serializer fixture includes pose/IK/force, accepted tare,
+transport/async/worker/timing/Init data and exact 64-bit IDs. Previous packets
+75,968/75,960 B become57,014/57,006 B; valid-gripper localhost fanout is57,310 B.
+These are synthetic byte-coverage fixtures, not captured dropped datagrams.
+
+Three final C++ contracts pass (`state_publisher`, `safety_policy`,
+`servo_logger_columns`,16.10 s);170 GUI/policy consumer tests and generated-packet
+parsing/gating checks pass. Two ephemeral local UDP receivers obtain identical
+packets with no overflow/send errors. Full CSV tests remain intact. The initial
+policy test environment lacked torch; the configured OpenPI environment executes
+the policy tests successfully. No physical backend is started. Motion equations,
+limits and stack configuration are unchanged; physical rollout and full dynamics
+replay are not repeated for this publication-only fix. Evidence and exact real
+binary qualification: `outputs/state_udp_repair_20260906/report.md`.

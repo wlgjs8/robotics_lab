@@ -5022,6 +5022,10 @@ bool DualArmServoLoop::isValidRobotStateForStartup(const RobotState& state) cons
 }
 
 void DualArmServoLoop::clearLatchedCartesianTargets() {
+    // A deferred geometry correction belongs to the previous Cartesian
+    // lifecycle. It must not survive a fault/read-only/freedrive reset and be
+    // applied to an unrelated future raw reference.
+    pending_collision_fold_ = {};
     resetPreviewExecution(ArmId::Left, "reset");
     resetPreviewExecution(ArmId::Right, "reset");
     left_latched_cartesian_target_ = LatchedCartesianTarget{};
@@ -5033,6 +5037,7 @@ void DualArmServoLoop::clearLatchedCartesianTargets() {
 }
 
 void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
+    pending_collision_fold_[arm_id==ArmId::Left?0:1] = PendingCollisionFold{};
     resetPreviewExecution(arm_id, "reset");
     if (arm_id == ArmId::Left) {
         left_latched_cartesian_target_ = LatchedCartesianTarget{};

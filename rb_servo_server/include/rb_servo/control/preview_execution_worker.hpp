@@ -95,6 +95,8 @@ struct PreviewExecutionResult {
   double valid_until_sec{0.0};
   double completed_at_sec{0.0};
   PreviewExecutionWorkerStatus status{PreviewExecutionWorkerStatus::InvalidRequest};
+  // WorkerException can lose in-flight diagnostics; false then means unknown,
+  // not proof the solver was never entered. Counters cover returned QP statuses.
   bool solve_attempted{false};
   PreviewSolveDiagnostics diagnostics{};
   PreviewMotionState initial{};

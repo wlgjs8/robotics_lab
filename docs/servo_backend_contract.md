@@ -1055,8 +1055,11 @@ accepted-command FK residuals, solver time and lifecycle counters. These
 residuals refer to the actually dispatched/enqueued joint target and its
 matching force gauge, not to measured robot tracking or controller ACK.
 
-The preview diagnostic extension distinguishes QP status from worker status,
-result admission and staged cancellation. Numeric status counters and static
+The full preview CSV diagnostic extension distinguishes QP status from worker
+status, result admission and staged cancellation. UDP uses a fixed 26-field
+summary marked `diagnostics_detail=summary` / `diagnostics_full_source=servo_csv`: the
+original 19 execution fields plus five latest reason labels and these two markers.
+Complete detailed counters, result identities/times and transforms remain in CSV. Numeric status counters and static
 reason labels are paired with request/source/epoch/parent IDs and original
 generation, splice, completion and expiry timestamps. Worker completion counts
 include coalesced/dropped results; the separate result-check counts describe
@@ -1071,10 +1074,16 @@ is an additive stand-frame offset, rotation is a left-applied quaternion in xyzw
 order. The cumulative gauge resets with the execution epoch; lifecycle counts
 remain cumulative for that executor. The last-fold record is not a complete
 event stream when more than one fold occurs in a tick; cumulative gauge and
-cause counts preserve that distinction. Geometry cause bits describe safety
+cause counts preserve that distinction. Latest event records persist until a new
+event; after reset, use event timestamps with the epoch transition rather than
+interpreting an old last-fold value as a fold in the new epoch. Geometry cause
+bits describe safety
 participation: collision correction=1, geometric row in-band/cutting=2,
 IK branch throttle=4, legacy collision booking=8. They do not assign each
 micrometre of correction to a particular constraint row.
+`pending_geometry_fold_*` separately records the current tick's booking and its
+validity before next-tick application; a following Hold/fault/reset can prevent
+that correction from ever appearing in the latest-applied fold record.
 
 `active` is false while waiting, braking or faulted. A braking executor may
 still send bounded stop samples through ordinary IK/safety. Policy gripper
@@ -1100,6 +1109,9 @@ current segment. They clear to 1/0 on non-follower ticks. The explicit
 replanning; the tracked real profile keeps it off after recorded joint-command
 comparisons. This option changes trajectory selection within existing bounds.
 
-UDP state publication preserves core data and sheds only optional visualization
-witnesses to keep the packet within a byte budget. Truncation and ongoing send
+UDP state publication preserves full per-arm Cartesian diagnostics and the
+explicit preview summary; full preview diagnostics remain in CSV.
+The obsolete duplicate `last_cartesian_solve` alias is removed; use
+`left.cartesian_solve` and `right.cartesian_solve`. Only optional visualization
+witnesses are adaptively reduced to meet the packet byte budget. Truncation and ongoing send
 failures are explicit; see [wire contract](reference/state_udp_payload_budget.md).

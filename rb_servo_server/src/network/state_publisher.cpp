@@ -1739,102 +1739,20 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             {"solve_time_sec",p.solve_time_sec},{"submitted",p.submitted},
             {"accepted",p.accepted},{"rejected",p.rejected},{"expired",p.expired},
             {"contact_guard_count",p.contact_guard_count}};
-        result["gate_revision"] = p.gate_revision;
-        result["gauge_revision"] = p.gauge_revision;
-        result["parent_plan_id"] = p.parent_plan_id;
-        result["request_id"] = p.request_id;
-        result["result_valid"] = p.result_valid;
-        result["result_solve_attempted"] = p.result_solve_attempted;
+        // This fixed wire summary retains execution/freshness authority and
+        // current diagnostic reasons. Full result identities, reason arrays,
+        // fold transforms and certificate details remain in the servo CSV.
+        // Publishing those unconditionally made the core UDP packet exceed
+        // 65,507 bytes as soon as both real arms became force-covered, even
+        // while preview execution was disabled. Never trade core precision or
+        // safety state for optional forensic detail.
         result["last_worker_status"] = p.last_worker_status;
         result["last_solve_status"] = p.last_solve_status;
         result["last_admission_reason"] = p.last_admission_reason;
-        result["result_request_id"] = p.result_request_id;
-        result["result_epoch"] = p.result_epoch;
-        result["result_gate_revision"] = p.result_gate_revision;
-        result["result_gauge_revision"] = p.result_gauge_revision;
-        result["result_source_wire_seq"] = p.result_source_wire_seq;
-        result["result_source_recv_seq"] = p.result_source_recv_seq;
-        result["result_parent_plan_id"] = p.result_parent_plan_id;
-        result["result_gauge_transported"] = p.result_gauge_transported;
-        result["staged_gauge_transported"] = p.staged_gauge_transported;
-        result["gauge_transport_failed"] = p.gauge_transport_failed;
-        result["result_generated_at_sec"] = p.result_generated_at_sec;
-        result["result_splice_at_sec"] = p.result_splice_at_sec;
-        result["result_valid_until_sec"] = p.result_valid_until_sec;
-        result["result_completed_at_sec"] = p.result_completed_at_sec;
-        result["result_observed_at_sec"] = p.result_observed_at_sec;
-        result["solve_iterations"] = p.solve_iterations;
-        result["solve_contact_constrained"] = p.solve_contact_constrained;
-        result["solve_contact_decomposed"] = p.solve_contact_decomposed;
-        result["solve_contact_coupled_fallback"] = p.solve_contact_coupled_fallback;
-        result["solve_max_constraint_violation"] = p.solve_max_constraint_violation;
-        result["solve_max_contact_velocity_violation_m_s"] = p.solve_max_contact_velocity_violation_m_s;
-        result["ready_not_staged"] = p.ready_not_staged;
-        result["staged_identity_rejected"] = p.staged_identity_rejected;
-        result["staged_expired"] = p.staged_expired;
-        result["staged_sample_rejected"] = p.staged_sample_rejected;
-        result["staged_contact_rejected"] = p.staged_contact_rejected;
-        result["last_staged_cancel_reason"] = p.last_staged_cancel_reason;
-        result["last_staged_cancel_time_sec"] = p.last_staged_cancel_time_sec;
-        result["last_staged_cancel_request_id"] = p.last_staged_cancel_request_id;
-        result["last_admission_time_sec"] = p.last_admission_time_sec;
-        result["last_admission_gap_sec"] = p.last_admission_gap_sec;
-        result["last_admitted_request_id"] = p.last_admitted_request_id;
-        result["last_admitted_parent_plan_id"] = p.last_admitted_parent_plan_id;
         result["last_brake_reason"] = p.last_brake_reason;
-        result["last_brake_start_time_sec"] = p.last_brake_start_time_sec;
-        result["last_brake_origin_sec"] = p.last_brake_origin_sec;
-        result["angular_continuations_started"] = p.angular_continuations_started;
-        result["angular_brakes_started"] = p.angular_brakes_started;
-        result["last_contact_reject_time_sec"] = p.last_contact_reject_time_sec;
-        result["last_contact_reject_gate"] = p.last_contact_reject_gate;
-        result["last_contact_reject_closing_m_s"] = p.last_contact_reject_closing_m_s;
-        result["last_contact_reject_allowed_m_s"] = p.last_contact_reject_allowed_m_s;
-        result["fold_count"] = p.fold_count;
-        result["fold_force_count"] = p.fold_force_count;
-        result["fold_roi_floor_count"] = p.fold_roi_floor_count;
-        result["fold_geometry_hold_count"] = p.fold_geometry_hold_count;
-        result["fold_unknown_count"] = p.fold_unknown_count;
-        result["fold_booked_time_ns"] = p.fold_booked_time_ns;
-        result["fold_applied_time_ns"] = p.fold_applied_time_ns;
-        result["fold_revision"] = p.fold_revision;
-        result["fold_geometry_cause_mask"] = p.fold_geometry_cause_mask;
-        result["request_invalid"] = p.request_invalid;
-        result["request_mailbox_full"] = p.request_mailbox_full;
-        result["request_coalesced"] = p.request_coalesced;
-        result["result_publish_dropped"] = p.result_publish_dropped;
-        result["result_coalesced"] = p.result_coalesced;
-        result["solve_angular_norm_coupled"] = p.solve_angular_norm_coupled;
-        result["solve_angular_norm_cuts"] = p.solve_angular_norm_cuts;
-        result["solve_max_angular_chart_velocity_norm"] = p.solve_max_angular_chart_velocity_norm;
-        result["solve_max_angular_chart_acceleration_norm"] = p.solve_max_angular_chart_acceleration_norm;
-        result["result_initial_linear_velocity_max_m_s"] = p.result_initial_linear_velocity_max_m_s;
-        result["result_initial_linear_acceleration_max_m_s2"] = p.result_initial_linear_acceleration_max_m_s2;
-        result["result_initial_angular_velocity_norm_rad_s"] = p.result_initial_angular_velocity_norm_rad_s;
-        result["result_initial_angular_acceleration_norm_rad_s2"] = p.result_initial_angular_acceleration_norm_rad_s2;
-        result["fold_cause"] = previewFoldCauseName(p.fold_cause);
-        for (std::size_t i=0; i<p.worker_status_counts.size(); ++i)
-            result["worker_status_counts"][kPreviewWorkerStatusNames[i]] = p.worker_status_counts[i];
-        for (std::size_t i=0; i<p.solve_status_counts.size(); ++i)
-            result["solve_status_counts"][kPreviewSolveStatusNames[i]] = p.solve_status_counts[i];
-        for (std::size_t i=0; i<p.result_checks.size(); ++i)
-            result["result_checks"][kPreviewResultCheckNames[i]] = p.result_checks[i];
-        for (std::size_t i=0; i<p.staged_cancel_counts.size(); ++i)
-            result["staged_cancel_counts"][kPreviewStagedCancelNames[i]] = p.staged_cancel_counts[i];
-        for (std::size_t i=0; i<p.brake_counts.size(); ++i)
-            result["brake_counts"][kPreviewBrakeCauseNames[i]] = p.brake_counts[i];
-        result["last_contact_reject_normal"] = p.last_contact_reject_normal;
-        result["fold_translation_m"] = p.fold_translation_m;
-        result["fold_quaternion_xyzw"] = p.fold_quaternion_xyzw;
-        result["fold_booked_translation_m"] = p.fold_booked_translation_m;
-        result["fold_booked_quaternion_xyzw"] = p.fold_booked_quaternion_xyzw;
-        result["pending_geometry_fold_valid"] = p.pending_geometry_fold_valid;
-        result["pending_geometry_fold_time_ns"] = p.pending_geometry_fold_time_ns;
-        result["pending_geometry_fold_cause_mask"] = p.pending_geometry_fold_cause_mask;
-        result["pending_geometry_fold_translation_m"] = p.pending_geometry_fold_translation_m;
-        result["pending_geometry_fold_quaternion_xyzw"] = p.pending_geometry_fold_quaternion_xyzw;
-        result["gauge_translation_m"] = p.gauge_translation_m;
-        result["gauge_quaternion_xyzw"] = p.gauge_quaternion_xyzw;
+        result["last_staged_cancel_reason"] = p.last_staged_cancel_reason;
+        result["diagnostics_detail"] = "summary";
+        result["diagnostics_full_source"] = "servo_csv";
         return result;
     };
     message["preview_execution"]={
@@ -1921,10 +1839,10 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["right"]["force_torque"] = ftJson(snapshot.right_ft);
     message["left"]["force_control"] = forceControlJson(snapshot.left_force_control);
     message["right"]["force_control"] = forceControlJson(snapshot.right_force_control);
-    message["last_cartesian_solve"] = {
-        {"left", cartesianSolveJson(snapshot.left_cartesian_solve)},
-        {"right", cartesianSolveJson(snapshot.right_cartesian_solve)},
-    };
+    // Each arm already contains this exact Cartesian diagnostic object. The
+    // former top-level duplicate consumed enough space to prevent all state
+    // delivery after InitMotion/tare on a fully populated real snapshot.
+    // Publish its canonical paths below; never round or drop diagnostic values.
     message["init_motion"] = {
         {"status", snapshot.init_motion.status},
         {"fail_mode", snapshot.init_motion.fail_mode},
@@ -2373,6 +2291,10 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["tcp_fields_deferred"] =
         snapshot.left_state.tcp_deferred || snapshot.right_state.tcp_deferred;
     message["state_publication"] = {
+        {"wire_revision", 2},
+        {"cartesian_solve_layout", "per_arm"},
+        {"cartesian_solve_paths", {"left.cartesian_solve", "right.cartesian_solve"}},
+        {"omitted_legacy_aliases", {"last_cartesian_solve"}},
         {"payload_budget_bytes", kStatePayloadBudgetBytes},
         {"udp_max_payload_bytes", kIpv4UdpPayloadMaxBytes},
         {"oversize_dropped_total", publication_oversize_dropped_total_.load()},

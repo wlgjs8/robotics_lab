@@ -208,6 +208,10 @@ bool testFailClosedAndOldPlanPreserved() {
 
 bool testAngularNormAuthorityAndRebasedSplice() {
   auto cfg=config();cfg.jerk_weight=2000.;
+  // Match the tracked preview profile, including its actual solve budget.
+  // These near-limit constant rotations previously failed the inscribed cube.
+  cfg.max_working_set_recalculations=200;cfg.max_solve_time_sec=.05;
+  cfg.max_linear_tracking_slack_m=.06;cfg.max_angular_tracking_slack_rad=.27;
   for(const Eigen::Vector3d velocity : {Eigen::Vector3d(0.,0.,1.2),Eigen::Vector3d(.95,.95,0.)}) {
     PreviewTrajectoryTracker tracker(cfg);
     PreviewMotionState initial;initial.pose=pose({0.,0.,0.},{.2,-.1,.3});
@@ -230,7 +234,7 @@ bool testAngularNormAuthorityAndRebasedSplice() {
   // Simultaneous-axis demand must satisfy one physical norm ball even though
   // each component separately fits its outer box. Verify every Bernstein
   // control, not just dense samples that might miss an intersample overshoot.
-  cfg.jerk_weight=.001;PreviewTrajectoryTracker coupled(cfg);
+  cfg=config();cfg.jerk_weight=.001;PreviewTrajectoryTracker coupled(cfg);
   PreviewMotionState initial;initial.pose=pose({0.,0.,0.});
   const auto ref=reference([](double t){return pose({0.,0.,0.},{1.1*t,1.1*t,.2*t});});
   const auto solved=coupled.plan(ref,initial);CHECK(accepted(solved));
@@ -250,7 +254,7 @@ bool testAngularNormAuthorityAndRebasedSplice() {
     CHECK(sample.angular_acceleration_body.norm()<=cfg.max_angular_acceleration_rad_s2+cfg.feasibility_tolerance);
     CHECK(sample.angular_jerk_stand.norm()<=cfg.max_angular_jerk_rad_s3+cfg.feasibility_tolerance);
   }
-  // Exercise changed constraints through SQProblem hotstarts and preserve
+  // Exercise fresh per-plan cut sets and within-plan SQProblem hotstarts; preserve
   // nonzero accepted angular acceleration when the exponential chart rebases.
   for(const Eigen::Vector3d demand : {Eigen::Vector3d(1.15,.9,.3),Eigen::Vector3d(1.,1.12,.15)}) {
     PreviewMotionSample splice,at_zero;CHECK(coupled.sample(.017,splice));
@@ -259,7 +263,11 @@ bool testAngularNormAuthorityAndRebasedSplice() {
     const auto next=reference([&](double t) {
       return math::poseFromSe3(pinocchio::SE3(R0*math::exp3(demand*t),Eigen::Vector3d::Zero()));
     });
-    CHECK(accepted(coupled.plan(next,splice)));CHECK(coupled.sample(0.,at_zero));
+    const auto replanned=coupled.plan(next,splice);CHECK(accepted(replanned));
+    CHECK(replanned.diagnostics.angular_norm_coupled);
+    CHECK(replanned.diagnostics.angular_norm_cuts>0);
+    CHECK(replanned.diagnostics.working_set_recalculations<=6*cfg.max_working_set_recalculations);
+    CHECK(coupled.sample(0.,at_zero));
     CHECK(sameState(splice,at_zero,1e-9));
     CHECK(coupled.exportTrajectory(p));
     for(std::size_t k=0;k<p.count;++k) {

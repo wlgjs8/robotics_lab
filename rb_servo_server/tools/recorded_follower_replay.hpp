@@ -106,9 +106,11 @@ struct ReconstructedHoldFold {
     Eigen::Vector3d translation{Eigen::Vector3d::Zero()};
     Eigen::Quaterniond rotation{Eigen::Quaterniond::Identity()};
     std::uint64_t booked_tick{0};
+    std::uint64_t booked_time_ns{0};
     double magnitude_residual_m{0};
 };
-inline ReconstructedHoldFold readReconstructedHoldFold(const json& j, std::uint64_t tick) {
+inline ReconstructedHoldFold readReconstructedHoldFold(const json& j, std::uint64_t tick,
+                                                      std::uint64_t booked_time_ns) {
     if(j.at("provenance")!="reconstructed_same_tick_stage_to_overlay_stripped_command_fk" ||
        j.at("apply_order")!="next_tick_after_raw_before_preview" ||
        j.at("booked_tick").get<std::uint64_t>()!=tick ||
@@ -117,6 +119,8 @@ inline ReconstructedHoldFold readReconstructedHoldFold(const json& j, std::uint6
     const auto dp=finiteArray<3>(j.at("translation_m"));
     const auto q=finiteArray<4>(j.at("rotation_xyzw"));
     ReconstructedHoldFold f;f.translation={dp[0],dp[1],dp[2]};f.rotation={q[3],q[0],q[1],q[2]};f.booked_tick=tick;
+    if(!booked_time_ns)throw std::runtime_error("recorded fold requires its monotonic booking clock");
+    f.booked_time_ns=booked_time_ns;
     const double magnitude=finiteNumber(j.at("recorded_magnitude_m"));
     f.magnitude_residual_m=finiteNumber(j.at("magnitude_residual_m"));
     if(magnitude<=0 || std::abs(f.rotation.norm()-1)>1e-9 ||
@@ -130,12 +134,13 @@ template<class T,class=void> struct HasLiveAudit:std::false_type {};
 template<class T> struct HasLiveAudit<T,std::void_t<decltype(std::declval<T>().fold_cause),
     decltype(std::declval<T>().staged_cancel_counts),decltype(std::declval<T>().result_gauge_transported)>>:std::true_type {};
 template<class Live> void applyReconstructedHoldFold(Live& live,const ReconstructedHoldFold& f,
-                                                    std::uint64_t applied,bool transport) {
+                                                    std::uint64_t applied_time_ns,bool transport) {
+    if(applied_time_ns<=f.booked_time_ns)throw std::runtime_error("fold application must follow its monotonic booking clock");
     if constexpr(HasLiveAudit<std::decay_t<decltype(live.telemetry())>>::value) {
         using Cause=std::decay_t<decltype(live.telemetry().fold_cause)>;
         // No per-row cause mask is recoverable from the original CSV.
         live.shiftCommonFrame(f.translation,f.rotation,transport?Cause::GeometryHold:Cause::Unknown,
-                              f.booked_tick,applied,0);
+                              f.booked_time_ns,applied_time_ns,0);
     } else {
         if(transport)throw std::runtime_error("geometry transport unavailable in archived coordinator");
         live.shiftCommonFrame(f.translation,f.rotation);

@@ -152,7 +152,8 @@ int run(const char* stack,const char* profile,const char* events,const char* con
     if(!live)live=std::make_unique<LivePreviewExecution>(*c,raw_config,dt_contract);
     ++input_rows;if(contact_stream_armed)++stream_armed_input_rows;
     previous_tick=tick;previous_mono=mono;previous_t=t;
-    setExternalSteadyNs(static_cast<std::uint64_t>(std::llround(mono*1e9)));
+    const auto recorded_time_ns=static_cast<std::uint64_t>(std::llround(mono*1e9));
+    setExternalSteadyNs(recorded_time_ns);
     const double execution_mono=PreviewExecutionWorker::monotonicNowSec();
     if(!recorded_active) {
       follower.deactivate();live->reset("recorded_inactive");accepted.reset();previous_accepted_motion.reset();previous_recv=0;
@@ -186,8 +187,9 @@ int run(const char* stack,const char* profile,const char* events,const char* con
     if(pending_fold) {
       if(pending_fold->booked_tick>=tick)throw std::runtime_error("fold must be booked before application tick");
       if(!follower.absorbOffset(pending_fold->translation,pending_fold->rotation))throw std::runtime_error("recorded fold rejected by active raw follower");
-      rr::applyReconstructedHoldFold(*live,*pending_fold,tick,transport_geometry);
+      rr::applyReconstructedHoldFold(*live,*pending_fold,recorded_time_ns,transport_geometry);
       applied_fold_json={{"booked_tick",pending_fold->booked_tick},{"applied_tick",tick},
+        {"booked_time_ns",pending_fold->booked_time_ns},{"applied_time_ns",recorded_time_ns},
         {"translation_m",{pending_fold->translation.x(),pending_fold->translation.y(),pending_fold->translation.z()}},
         {"rotation_xyzw",{pending_fold->rotation.x(),pending_fold->rotation.y(),pending_fold->rotation.z(),pending_fold->rotation.w()}},
         {"magnitude_residual_m",pending_fold->magnitude_residual_m}};
@@ -297,7 +299,7 @@ int run(const char* stack,const char* profile,const char* events,const char* con
     audit["applied_reconstructed_fold"]=applied_fold_json;audit["observed_stage_valid"]=observed_stage_valid;
     if(j.contains("recorded_geometry"))audit["recorded_geometry"]=j.at("recorded_geometry");
     audit_output<<audit.dump()<<'\n';
-    if(j.contains("booked_hold_fold"))pending_fold=rr::readReconstructedHoldFold(j.at("booked_hold_fold"),tick);
+    if(j.contains("booked_hold_fold"))pending_fold=rr::readReconstructedHoldFold(j.at("booked_hold_fold"),tick,recorded_time_ns);
     if(current.fault) {
       failed=true;summary["termination_reason"]=current.reason;summary["termination_t"]=t;
       summary["termination_tick"]=tick;
