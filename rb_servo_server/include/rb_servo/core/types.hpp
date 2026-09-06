@@ -458,6 +458,14 @@ struct CartesianSolveTelemetry {
     int follower_step = -1;             // absolute chunk index of the segment target
     double follower_t_in_seg_sec = 0.0; // time into the current 33ms segment
     double follower_duration_sec = 0.0; // ruckig T_opt of the segment (>= policy_dt)
+    std::array<double, 6> follower_axis_duration_sec{};
+    std::array<double, 6> follower_target_velocity{};
+    std::array<double, 6> follower_target_acceleration{};
+    int follower_segments = 0;
+    double follower_advance_gate = 1.0;
+    double follower_plan_rate_gate = 1.0;
+    std::array<double, 3> follower_advance_direction{};
+    bool follower_output_smd_reseeded = false;
     double follower_alpha = 1.0;        // sacrifice-ladder time dilation applied
     bool follower_converged = false;    // duration ≈ policy_dt (in-regime)
     bool follower_stall = false;        // ring-down (window exhausted, no fresh chunk)
@@ -759,6 +767,8 @@ struct ArmCommand {
 
     JointArray q_target_deg{};
     JointTargetProfile joint_target_profile = JointTargetProfile::Direct;
+    // Stable across retransmitted packets; zero retains legacy seq/goal semantics.
+    uint64_t init_motion_request_id = 0;
 
     // Final-stop joint pose for the JointTarget arrival-decel taper. InitMotion pursuit
     // sets this to the terminal waypoint while q_target_deg leads by the pursuit
@@ -1265,6 +1275,7 @@ struct InitMotionDiag {
 };
 
 struct InitMotionArmDiag {
+    uint64_t request_id = 0;
     std::string status = "idle";
     std::string fail_mode = "none";
     std::string message;

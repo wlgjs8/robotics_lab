@@ -414,6 +414,11 @@ struct KinematicsCalibrationConfig {
     // (robot_urdf_left/right), so the viewer draws the calibrated chains; a set path
     // that is missing is fatal. Empty -> the viewer keeps its nominal asset.
     std::string gui_arm_urdf;
+    // Cells the box reports but this URDF must NOT adopt (kept nominal, logged).
+    // "J1.d" measured 2026-09-06: adopting it moved our FK away from the box's own
+    // TCP report by exactly the delta (5.3 mm on both arms) - the box states that
+    // cell in a convention the URDF chain does not share.
+    std::vector<std::string> skip_cells;
 };
 
 struct KinematicsConfig {
@@ -878,7 +883,12 @@ struct HoldFoldConfig {
     double min_step_rad = 1e-5;
     double max_step_m = 0.03;      // above: not a hold, a snap - declined and logged
     double max_step_rad = 0.2;
-    bool on_ik_throttle = true;    // also fold while the IK branch-jump throttle holds
+    // Fold while the IK branch-jump throttle holds? DEFAULT OFF (2026-09-06 12:09 run):
+    // the throttle is not a wall. Mid branch-flip the sent joints are 13 mm off the
+    // target for ~6 ticks; folding the plan to that transient pose and then having the
+    // follower re-anchor when the flip completes made a 0.21 s limit cycle of 13 mm
+    // plan jumps at 8.7-10.7k deg/s^2 (five in 1 s, left arm, servo_log_20260906_120943).
+    bool on_ik_throttle = false;
 };
 
 // Stand-frame USER-defined tilted floor plane (half-space): the TCP of either arm

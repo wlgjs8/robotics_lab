@@ -48,6 +48,9 @@ from rb_servo_gui.app import (
     _update_gripper_feedback,
     _viser_keyboard_patch_script,
     _send_gripper_command,
+    _send_gripper_preset,
+    _GRIPPER_OPEN_PERCENT,
+    _GRIPPER_CLOSED_PERCENT,
     _user_floor_display_points,
     _apply_init_joints_live,
     build_gui,
@@ -2407,6 +2410,165 @@ class GuiContractsTest(unittest.TestCase):
         }
         _send_gripper_command(handles)
         self.assertEqual(sock.sent, [])  # pre-sync: no startup-open command
+
+    def test_gripper_both_arm_preset_buttons_are_built_and_wired(self):
+        # End-to-end wiring: the two operator buttons exist in the gripper panel and
+        # a click actually puts one both-arm gripper_cmd.v1 on the wire.
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+
+        store = StateStore(stale_after_sec=0.5)
+        safety = OperatorSafety(
+            store,
+            RecordingClient(),
+            desired_mode="mock",
+            observed_server_mode="mock",
+            observed_backend="mock",
+        )
+        server = RecordingServer(scene=ShapeCheckingScene())
+        with mock.patch("rb_servo_gui.app.load_T_stand_cam", return_value=np.eye(4)), \
+                mock.patch("rb_servo_gui.app.load_T_tcp_cam", return_value=np.eye(4)):
+            handles = build_gui(server, safety, store)
+
+        buttons = {label: handle for label, _kwargs, handle in server.gui.buttons}
+        self.assertIn("양팔 그리퍼 열기", buttons)
+        self.assertIn("양팔 그리퍼 닫기", buttons)
+
+        sock = _Sock()
+        real_sock = handles.get("gripper_cmd_sock")
+        if real_sock is not None:
+            real_sock.close()  # build_gui opens a real UDP socket; don't leak it
+        handles["gripper_cmd_sock"] = sock  # don't emit real UDP from a unit test
+        buttons["양팔 그리퍼 닫기"].callback(None)
+        buttons["양팔 그리퍼 열기"].callback(None)
+        self.assertEqual(len(sock.sent), 2)
+        closed, _ = sock.sent[0]
+        opened, _ = sock.sent[1]
+        self.assertEqual(closed["left"], {"percent": 0.0, "valid": True})
+        self.assertEqual(closed["right"], {"percent": 0.0, "valid": True})
+        self.assertEqual(opened["left"], {"percent": 100.0, "valid": True})
+        self.assertEqual(opened["right"], {"percent": 100.0, "valid": True})
+        self.assertGreater(opened["seq"], closed["seq"])
+        self.assertIn("열기", handles["last_action"].value)
+
+    def test_send_gripper_preset_commands_both_arms_at_the_end_stops(self):
+        class _Slider:
+            def __init__(self, v):
+                self.value = v
+
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+
+        sock = _Sock()
+        handles = {
+            "gripper_slider_left": _Slider(37.0),
+            "gripper_slider_right": _Slider(62.0),
+            "gripper_cmd_sock": sock,
+            "gripper_cmd_endpoint": ("127.0.0.1", 50410),
+            "gripper_cmd_seq": 4,
+            "gripper_manual_hold_sec": 1.0,
+        }
+        # Close: one packet, both arms at 0, seq advances, sliders show the setpoint.
+        self.assertTrue(_send_gripper_preset(handles, _GRIPPER_CLOSED_PERCENT))
+        self.assertEqual(len(sock.sent), 1)
+        msg, endpoint = sock.sent[0]
+        self.assertEqual(endpoint, ("127.0.0.1", 50410))
+        self.assertEqual(msg["schema"], "robotics_lab.gripper_cmd.v1")
+        self.assertTrue(msg["deadman"])
+        self.assertEqual(msg["seq"], 5)
+        self.assertEqual(msg["left"], {"percent": 0.0, "valid": True})
+        self.assertEqual(msg["right"], {"percent": 0.0, "valid": True})
+        self.assertAlmostEqual(handles["gripper_slider_left"].value, 0.0)
+        self.assertAlmostEqual(handles["gripper_slider_right"].value, 0.0)
+        # Open: the other end stop.
+        self.assertTrue(_send_gripper_preset(handles, _GRIPPER_OPEN_PERCENT))
+        msg, _ = sock.sent[1]
+        self.assertEqual(msg["seq"], 6)
+        self.assertEqual(msg["left"], {"percent": 100.0, "valid": True})
+        self.assertEqual(msg["right"], {"percent": 100.0, "valid": True})
+
+    def test_send_gripper_preset_slider_write_does_not_emit_a_second_packet(self):
+        # The buttons drive the sliders, whose on_update calls _send_gripper_command.
+        # That echo must be suppressed (synced value recorded before the write), or
+        # every click would put two setpoints on the wire.
+        class _Slider:
+            def __init__(self, v):
+                self.value = v
+
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+
+        sock = _Sock()
+        handles = {
+            "gripper_slider_left": _Slider(100.0),
+            "gripper_slider_right": _Slider(100.0),
+            "gripper_cmd_sock": sock,
+            "gripper_cmd_endpoint": ("127.0.0.1", 50410),
+            "gripper_cmd_seq": 0,
+            "gripper_manual_hold_sec": 1.0,
+        }
+        _send_gripper_preset(handles, _GRIPPER_CLOSED_PERCENT)
+        _send_gripper_command(handles)  # the slider on_update the preset triggered
+        self.assertEqual(len(sock.sent), 1)
+        # The hold window keeps feedback from yanking the sliders off the setpoint.
+        for side in ("left", "right"):
+            self.assertIn(f"gripper_manual_hold_until_{side}", handles)
+
+    def test_send_gripper_preset_commands_before_any_hardware_sync(self):
+        # _send_gripper_command holds until the sliders have tracked hardware once
+        # (so a client-connect echo can't command OPEN at startup). A button click
+        # is unambiguous and must command anyway.
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+
+        sock = _Sock()
+        handles = {
+            "gripper_cmd_sock": sock,
+            "gripper_cmd_endpoint": ("127.0.0.1", 50410),
+            "gripper_cmd_seq": 0,
+        }
+        self.assertNotIn("gripper_synced_value_left", handles)
+        self.assertTrue(_send_gripper_preset(handles, _GRIPPER_OPEN_PERCENT))
+        self.assertEqual(len(sock.sent), 1)
+        self.assertEqual(sock.sent[0][0]["left"], {"percent": 100.0, "valid": True})
+
+    def test_send_gripper_preset_without_a_socket_reports_not_sent(self):
+        # No socket/endpoint (gripper controls never built) -> report failure so the
+        # operator sees BLOCKED instead of a button that silently does nothing.
+        self.assertFalse(_send_gripper_preset({}, _GRIPPER_OPEN_PERCENT))
+
+    def test_send_gripper_preset_send_failure_leaves_sliders_alone(self):
+        class _Slider:
+            def __init__(self, v):
+                self.value = v
+
+        class _Sock:
+            def sendto(self, data, endpoint):
+                raise OSError("network unreachable")
+
+        handles = {
+            "gripper_slider_left": _Slider(55.0),
+            "gripper_slider_right": _Slider(55.0),
+            "gripper_cmd_sock": _Sock(),
+            "gripper_cmd_endpoint": ("127.0.0.1", 50410),
+            "gripper_cmd_seq": 0,
+        }
+        self.assertFalse(_send_gripper_preset(handles, _GRIPPER_CLOSED_PERCENT))
+        # Nothing reached the gripper, so the panel must not claim it did.
+        self.assertAlmostEqual(handles["gripper_slider_left"].value, 55.0)
+        self.assertAlmostEqual(handles["gripper_slider_right"].value, 55.0)
 
     def test_arm_snapshot_parses_gripper_feedback_block(self):
         from rb_servo_gui.models import StateSnapshot

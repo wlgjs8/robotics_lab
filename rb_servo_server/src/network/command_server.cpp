@@ -442,6 +442,7 @@ bool parseArmObject(
         if (!joint_target_profile.empty()) {
             out->joint_target_profile = jointTargetProfileFromString(joint_target_profile);
         }
+        if (!readOptionalUint64(object, "init_motion_request_id", &out->init_motion_request_id)) return false;
         if (!readOptionalPose6D(object, "tcp_target_stand", &out->tcp_target_stand, &present)) return false;
         out->has_tcp_target = present;
         bool alias_present = false;

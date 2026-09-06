@@ -307,6 +307,9 @@ class FlowMatchingActionSource:
     validation and SafetyGate still decides whether the intent may be sent.
     """
 
+    # Canonical 14D action layout: each arm has six pose deltas and one grip.
+    _CHUNK_POSE_DIMS = tuple(range(6)) + tuple(range(7, 13))
+
     def __init__(
         self,
         checkpoint_path: str | Path,
@@ -1575,6 +1578,12 @@ class FlowMatchingActionSource:
                 speed_scale=getattr(self, "speed_scale", None),
                 projected=projected,
                 projected_delta=projected_delta,
+                active_model_horizon=(
+                    np.asarray(self._chunk, dtype=np.float64).tolist()
+                    if getattr(self, "_chunk", None) is not None else None
+                ),
+                chunk_metadata=dict(getattr(self, "_active_chunk_metadata", None) or {}),
+                rtc_enabled=bool(getattr(self, "rtc_enabled", False)),
             )
         except Exception as exc:  # noqa: BLE001 - telemetry must never break a rollout.
             # SAY SO. The first version of this swallowed silently, and when the

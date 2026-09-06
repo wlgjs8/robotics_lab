@@ -245,11 +245,13 @@ bool testKinematicsCalibrationConfigParses() {
         "    box_tool_offset_mm:\n"
         "      left: [3.0, -249.7, -251.5]\n"
         "    gui_arm_urdf: urdf/arm_gui.urdf\n"
+        "    skip_cells: [J1.d, J4.d]\n"
     );
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
     ::unlink(path.c_str());
     const auto& k = cfg.kinematics.calibration;
     RB_CHECK(k.source == "nominal");
+    RB_CHECK(k.skip_cells.size() == 2 && k.skip_cells[0] == "J1.d" && k.skip_cells[1] == "J4.d");
     RB_CHECK(k.gui_arm_urdf.size() > std::string("urdf/arm_gui.urdf").size());   // resolved against the config dir
     RB_CHECK(k.gui_arm_urdf.find("urdf/arm_gui.urdf") != std::string::npos);
     RB_CHECK(k.output_dir == "/tmp/rb-servo-runtime-urdf");

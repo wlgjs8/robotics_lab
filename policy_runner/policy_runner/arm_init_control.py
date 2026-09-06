@@ -81,30 +81,41 @@ class _ArmRuntime:
     # Monotonic time at which the arm reached "done" but its F/T auto-tare was still
     # pending; None when not waiting.
     tare_wait_started: float | None = None
+    request_id: int = 0
+    motion_done: bool = False
+    ft_required: bool = False
+    tare_timed_out: bool = False
+    tare_wait_elapsed: float = 0.0
 
 
-def _ft_tare_pending(payload: Any, arm: str) -> tuple[bool, str]:
+def _ft_tare_pending(payload: Any, arm: str, *, required: bool = False) -> tuple[bool, str]:
     """Is the server's post-InitMotion F/T auto-tare still in flight for `arm`?
 
     Reads the state fanout's ``<arm>.force_torque`` block. Pending while the
     auto-tare is armed or settling, or while the bias is invalid with a live
-    sensor. Not pending (no wait) when the sensor is disabled, disconnected, or
-    the block is absent -- there is nothing to wait for then."""
+    sensor. Disabled F/T needs no tare. Missing telemetry stays pending once
+    enabled F/T was observed; legacy/mock states may omit it.
+    An enabled but disconnected sensor must not release the latch."""
     if not isinstance(payload, dict):
-        return False, "no payload"
+        return required, "no payload"
     arm_block = payload.get(arm)
     if not isinstance(arm_block, dict):
-        return False, "no arm block"
+        return required, "no arm block"
     ft = arm_block.get("force_torque")
     if not isinstance(ft, dict):
-        return False, "no force_torque block"
-    if ft.get("enabled") is False or ft.get("connected") is False:
-        return False, "ft disabled or disconnected"
+        return required, "no force_torque block"
+    if ft.get("enabled") is False:
+        return False, "ft disabled"
+    required = required or ft.get("enabled") is True
+    if required and ft.get("connected") is not True:
+        return True, "ft disconnected or unavailable"
     stage = str(ft.get("auto_tare_stage", "") or "").strip().lower()
     if stage in {"awaiting_init", "settling"}:
         return True, f"auto_tare_stage={stage}"
-    if ft.get("bias_valid") is False:
-        return True, "bias_valid=false"
+    if str(ft.get("tare_state", "")).lower() == "settling":
+        return True, "tare samples accumulating"
+    if ft.get("bias_valid") is False or (required and ft.get("bias_valid") is not True):
+        return True, "bias invalid or unavailable"
     return False, f"auto_tare_stage={stage or 'idle'} bias_valid={ft.get('bias_valid')}"
 
 
@@ -286,6 +297,17 @@ class ArmInitOverrideController:
             if not isinstance(arm_block, dict):
                 arm_block = block
             status = _norm_status(arm_block.get("status"))
+            ft_arm = payload.get(arm)
+            ft = ft_arm.get("force_torque") if isinstance(ft_arm, dict) else None
+            if isinstance(ft, dict) and ft.get("enabled") is True:
+                runtime.ft_required = True
+            elif isinstance(ft, dict) and ft.get("enabled") is False:
+                runtime.ft_required = False
+            # Do not consume a previous request's Done before this request lands.
+            # Legacy/mock snapshots without an acknowledgement remain compatible.
+            ack = arm_block.get("request_id")
+            if runtime.on and not runtime.motion_done and ack is not None and ack != runtime.request_id:
+                continue
             fail_mode = str(arm_block.get("fail_mode", "") or "")
             nearest_a = str(arm_block.get("goal_nearest_pair_name_a", "") or "")
             nearest_b = str(arm_block.get("goal_nearest_pair_name_b", "") or "")
@@ -309,6 +331,8 @@ class ArmInitOverrideController:
                 message = str(arm_block.get("message", "") or "")
             prev_status = runtime.server_status
             if status and status != runtime.server_status:
+                if runtime.on:
+                    self._event(arm, "server_status", status=status, snapshot_mono=_snapshot_monotonic(snapshot))
                 _dbg(
                     f"{arm} server_status {runtime.server_status or 'none'} -> {status} "
                     f"(latch on={runtime.on} msg={message!r})"
@@ -328,46 +352,60 @@ class ArmInitOverrideController:
                     self._pending["done"].add(arm)
                     changed = True
                 continue
-            if status in {"planning", "executing"}:
+            # A delayed Done after Failed cannot revive a failed request. Only
+            # an explicit start/retry clears this latch and assigns a new ID.
+            if runtime.fail and status != "failed":
+                continue
+            if status in {"planning", "executing"} and not runtime.motion_done:
                 runtime.tare_wait_started = None
                 next_state = f"init {status}"
                 if runtime.state != next_state:
                     runtime.state = next_state
                     changed = True
                 continue
-            if status == "done":
-                # F/T TARE GATE. The server arms an automatic tare on every InitMotion
-                # and fires it only after the arm has been parked 0.5 s at the init
-                # pose. Releasing the latch the moment the server says "done" put the
-                # policy's first TcpPoseTarget on the wire 80 ms later, the settle
-                # never completed, and the arm ran the rest of the episode with force
-                # control OFF. Keep the latch (the sequencer holds the arm at the init
-                # pose while it is re-emitted) until the tare has landed, bounded by
-                # ft_tare_wait_sec so a sensor that never settles cannot park the arm.
-                pending, why = _ft_tare_pending(payload, arm)
+            if status == "failed":
+                self._mark_failed(arm, message or fail_mode or "init_failed")
+                changed = True
+                continue
+            if status == "done" or runtime.motion_done:
+                # Done is latched locally: emit Hold while the server settles/tare
+                # completes, even after its sequencer returns Idle. Re-emitting
+                # InitMotion here used to invalidate the bias every packet.
+                runtime.motion_done = True
+                pending, why = _ft_tare_pending(payload, arm, required=runtime.ft_required)
                 if pending and self.ft_tare_wait_sec > 0.0:
                     now = _snapshot_monotonic(snapshot)
                     if runtime.tare_wait_started is None:
                         runtime.tare_wait_started = now
+                        self._event(arm, "tare_wait", reason=why, snapshot_mono=now)
                         _dbg(f"{arm} done; holding for the F/T auto-tare ({why})")
                     waited = now - runtime.tare_wait_started
+                    runtime.tare_wait_elapsed = max(0.0, waited)
                     if waited < self.ft_tare_wait_sec:
                         if runtime.state != "init tare":
                             runtime.state = "init tare"
                             changed = True
                         runtime.message = f"waiting for F/T tare ({why})"
                         continue
-                    self.error = (
-                        f"{arm} F/T tare did not land within {self.ft_tare_wait_sec:.2f} s "
-                        f"({why}); resuming without it"
-                    )
+                    if not runtime.tare_timed_out:
+                        runtime.tare_timed_out = True
+                        self._event(arm, "tare_timeout_hold", reason=why, waited_sec=waited)
+                        changed = True
+                    self.error = f"{arm} F/T tare did not land within {self.ft_tare_wait_sec:.2f} s ({why}); holding"
+                    runtime.state = "init tare blocked"
+                    runtime.message = self.error
+                    continue
+                if pending:
+                    self._event(arm, "tare_wait_disabled", reason=why)
+                elif runtime.tare_wait_started is not None:
+                    runtime.tare_wait_elapsed = max(0., _snapshot_monotonic(snapshot)-runtime.tare_wait_started)
+                    self._event(arm, "tare_ready", waited_sec=runtime.tare_wait_elapsed)
+                if self.error.startswith(f"{arm} F/T tare"):
+                    self.error = ""
                 runtime.tare_wait_started = None
                 self._mark_done(arm)
                 changed = True
                 continue
-            if status == "failed":
-                self._mark_failed(arm, message or fail_mode or "init_failed")
-                changed = True
         self.changed = self.changed or changed
         return changed
 
@@ -401,21 +439,21 @@ class ArmInitOverrideController:
         timeout_sec = intent.timeout_sec if intent is not None else self.timeout_sec
         coupled_timeout = intent.coupled_timeout if intent is not None else True
         if self.left_on:
-            if self._left.fail:
+            if self._left.fail or self._left.motion_done:
                 left = {"mode": "Hold"}
             elif self.left_q_deg is None:
                 self.error = "missing_left_init_q_deg"
                 return intent
             else:
-                left = _init_arm_payload(self.left_q_deg)
+                left = _init_arm_payload(self.left_q_deg, self._left.request_id)
         if self.right_on:
-            if self._right.fail:
+            if self._right.fail or self._right.motion_done:
                 right = {"mode": "Hold"}
             elif self.right_q_deg is None:
                 self.error = "missing_right_init_q_deg"
                 return intent
             else:
-                right = _init_arm_payload(self.right_q_deg)
+                right = _init_arm_payload(self.right_q_deg, self._right.request_id)
         # Carry the top-level fields through. `tcp_target_profile` selects the
         # server profile for BOTH arms' TcpPoseTarget; dropping it made the packet
         # fall back to the server default (`umi_large_smooth`, no chunk follower),
@@ -444,6 +482,12 @@ class ArmInitOverrideController:
     def status_block(self) -> dict[str, Any]:
         return {
             "schema": ARM_INIT_STATE_SCHEMA,
+            "left_request_id": self._left.request_id,
+            "right_request_id": self._right.request_id,
+            "left_tare_wait_elapsed_sec": self._left.tare_wait_elapsed,
+            "right_tare_wait_elapsed_sec": self._right.tare_wait_elapsed,
+            "left_tare_timed_out": self._left.tare_timed_out,
+            "right_tare_timed_out": self._right.tare_timed_out,
             "init_override_left": bool(self.left_on),
             "init_override_right": bool(self.right_on),
             "left_state": self._state_for("left"),
@@ -496,6 +540,17 @@ class ArmInitOverrideController:
     def _runtime(self, arm: str) -> _ArmRuntime:
         return self._left if arm == "left" else self._right
 
+    def _event(self, arm: str, event: str, **fields: Any) -> None:
+        # Edge-only events land in the existing captured console, never per tick.
+        try:
+            print("[arm_init_event] " + json.dumps({
+                "schema": "robotics_lab.arm_init_event.v1", "t_mono": time.monotonic(),
+                "t_wall": time.time(), "arm": arm, "request_id": self._runtime(arm).request_id,
+                "event": event, **fields,
+            }, sort_keys=True), flush=True)
+        except (OSError, ValueError):
+            pass  # Telemetry failure must not change the latch or command path.
+
     def _start_arms(self, arms: tuple[str, ...]) -> bool:
         missing = [
             arm
@@ -509,9 +564,17 @@ class ArmInitOverrideController:
         for arm in arms:
             runtime = self._runtime(arm)
             was_on = runtime.on
-            if not runtime.on or runtime.fail:
-                self._pending["started"].add(arm)
-                changed = True
+            self._pending["started"].add(arm)
+            changed = True
+            runtime.request_id = max(time.monotonic_ns(), runtime.request_id + 1)
+            runtime.motion_done = False
+            # Keep the known F/T prerequisite across requests. A missing block
+            # on the new request must not turn a previously enabled sensor into
+            # the legacy/no-F/T path; explicit disabled telemetry clears it.
+            runtime.tare_wait_started = None
+            runtime.tare_timed_out = False
+            runtime.tare_wait_elapsed = 0.0
+            self._event(arm, "start")
             if not was_on:
                 _dbg(f"{arm} latch SET cause=start")
             runtime.on = True
@@ -536,6 +599,7 @@ class ArmInitOverrideController:
             if runtime.on or runtime.state.startswith("init"):
                 self._pending["cancelled"].add(arm)
                 changed = True
+                self._event(arm, "cancel", state=runtime.state, tare_timed_out=runtime.tare_timed_out)
                 _dbg(
                     f"{arm} latch CLEAR cause=cancel "
                     f"(prev on={runtime.on} server_status={runtime.server_status} state={runtime.state})"
@@ -557,6 +621,8 @@ class ArmInitOverrideController:
 
     def _mark_done(self, arm: str) -> None:
         runtime = self._runtime(arm)
+        if runtime.state != "init done":
+            self._event(arm, "resume" if self.auto_clear_on_done and self.resume_flow_on_done else "done_hold")
         _cleared = self.auto_clear_on_done and self.resume_flow_on_done
         _dbg(
             f"{arm} server reported DONE while latch on={runtime.on} "
@@ -583,6 +649,7 @@ class ArmInitOverrideController:
 
     def _mark_failed(self, arm: str, message: str) -> None:
         runtime = self._runtime(arm)
+        runtime.motion_done = False
         _cleared = self.auto_clear_on_failed or self.resume_flow_on_failed
         _dbg(
             f"{arm} server reported FAILED while latch on={runtime.on} "
@@ -590,6 +657,7 @@ class ArmInitOverrideController:
             f"latch {'CLEAR->flow' if _cleared else 'HOLD(fail-closed)'} cause=failed"
         )
         if not runtime.fail:
+            self._event(arm, "failed", reason=message, resume_enabled=_cleared)
             self._pending["failed"].add(arm)
         runtime.fail = True
         runtime.message = message
@@ -805,11 +873,12 @@ def _arm_payload(value: dict[str, Any] | None) -> dict[str, Any]:
     return payload
 
 
-def _init_arm_payload(q_deg: tuple[float, ...]) -> dict[str, Any]:
+def _init_arm_payload(q_deg: tuple[float, ...], request_id: int) -> dict[str, Any]:
     return {
         "mode": "JointTarget",
         "q_target_deg": [float(value) for value in q_deg],
         "joint_target_profile": "init_motion",
+        "init_motion_request_id": request_id,
     }
 
 

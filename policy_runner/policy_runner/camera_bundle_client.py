@@ -133,8 +133,20 @@ class CameraBundleClient:
             ) from exc
         import zmq
 
+        import threading
+
         self._zmq = zmq
-        self._ctx = zmq.Context.instance()
+        # A DEDICATED context (2026-09-06). These two SUB sockets used to sit on
+        # zmq.Context.instance(), shared with whatever else in the process touches
+        # pyzmq. One flow-infer run died in libzmq's command mailbox ("Assertion
+        # failed: ok (src/mailbox.cpp:72)") after 211 s of healthy ticks, with the
+        # camera server, the servo server and every Python-side state normal; that
+        # assertion only arises from a context torn down or a socket closed under the
+        # I/O thread, an fd stolen by foreign code, or a fork with a live context.
+        # Owning the context, touching the sockets only under one lock and terminating
+        # the context ourselves removes the paths this client can be part of.
+        self._ctx = zmq.Context()
+        self._lock = threading.Lock()
         self._sock = self._ctx.socket(zmq.SUB)
         self._sock.setsockopt_string(zmq.SUBSCRIBE, topic)
         # Receive buffer depth. ZMQ SUB drops the NEWEST bundles when the queue is
@@ -188,6 +200,10 @@ class CameraBundleClient:
                 self._latest_health = decoded
 
     def poll(self, timeout_ms: int = 0) -> CameraBundle | None:
+        with self._lock:
+            return self._poll_locked(timeout_ms)
+
+    def _poll_locked(self, timeout_ms: int = 0) -> CameraBundle | None:
         """Receive and decode the latest complete camera bundle if available."""
 
         if self._closed:
@@ -316,12 +332,17 @@ class CameraBundleClient:
         }
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._sock.close(linger=0)
-        self._health_sock.close(linger=0)
-        self._shm_cache.close()
-        self._closed = True
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._sock.close(linger=0)
+            self._health_sock.close(linger=0)
+            self._shm_cache.close()
+            try:
+                self._ctx.term()
+            except Exception:  # pragma: no cover - libzmq refused; nothing else to release
+                pass
 
     def _decode_message(self, parts: list[bytes]) -> dict[str, Any] | None:
         return self._decode_message_for_topic(parts, self._topic)

@@ -109,7 +109,8 @@ BoxDhCalibrationResult runBoxDhCalibration(DualArmConfig& config) {
         std::cerr << "[INFO] box DH calibration: " << names[i] << " link_parameter (" << values.size()
                   << " values): " << jsonArray(values) << "\n";
         const std::string adopt_err = adoptLinkParameter(values, nominal, layout, cal.max_abs_delta_mm,
-                                                         cal.max_abs_delta_deg, &adopted[static_cast<std::size_t>(i)]);
+                                                         cal.max_abs_delta_deg, &adopted[static_cast<std::size_t>(i)],
+                                                         cal.skip_cells);
         if (!adopt_err.empty()) {
             r.error = std::string(names[i]) + " box: " + adopt_err + " (raw reply: \"" + raw + "\")";
             return r;
@@ -119,6 +120,9 @@ BoxDhCalibrationResult runBoxDhCalibration(DualArmConfig& config) {
         std::cerr << "[INFO] box DH calibration: " << names[i] << " adopted "
                   << adopted[static_cast<std::size_t>(i)].changed_cells << " cell(s) off nominal: "
                   << formatDhDelta(nominal, adopted[static_cast<std::size_t>(i)].table) << "\n";
+        for (const std::string& sk : adopted[static_cast<std::size_t>(i)].skipped) {
+            std::cerr << "[INFO] box DH calibration: " << names[i] << " skipped by config: " << sk << "\n";
+        }
     }
 
     // ---- write the runtime URDFs --------------------------------------------

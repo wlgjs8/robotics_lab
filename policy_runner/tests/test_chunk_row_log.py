@@ -87,6 +87,17 @@ class ChunkRowLoggingTest(unittest.TestCase):
             self.assertIsNotNone(rec["left"])
             self.assertIsNone(rec["right"])
 
+    def test_full_horizon_and_alignment_are_distinct_from_published_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            horizon=[[float(i)]*14 for i in range(24)]
+            metadata={"observation_step":100,"activation_step":102,"source_start_index":2}
+            path=self._write_one(tmp,active_model_horizon=horizon,chunk_metadata=metadata,rtc_enabled=True)
+            rec=json.loads(path.read_text())
+            self.assertEqual(rec["active_model_horizon"],horizon)
+            self.assertEqual(rec["chunk_metadata"],metadata)
+            self.assertTrue(rec["rtc_enabled"])
+            self.assertEqual(len(rec["left_delta"]),6)
+
     def test_a_writer_that_cannot_start_disables_itself_quietly(self):
         """Telemetry must never take a rollout down with it."""
         def boom(_path):

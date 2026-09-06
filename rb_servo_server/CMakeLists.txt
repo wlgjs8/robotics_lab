@@ -146,6 +146,8 @@ target_link_libraries(ik_feasibility_grid PRIVATE rb_servo_core)
 # budget can be characterised without hardware.
 add_executable(follower_replay tools/follower_replay.cpp)
 target_link_libraries(follower_replay PRIVATE rb_servo_core)
+add_executable(delta_follower_replay tools/delta_follower_replay.cpp)
+target_link_libraries(delta_follower_replay PRIVATE rb_servo_core)
 
 if(RB_SERVO_ENABLE_RBPODO)
     # READ-ONLY controller state reader, for hand-parked geometry checks (stand and
@@ -364,6 +366,8 @@ if(BUILD_TESTING)
                 -s ${CMAKE_CURRENT_SOURCE_DIR}/tests
                 -p test_*.py
         )
+        set_tests_properties(rb_servo_tools_unittest PROPERTIES
+            ENVIRONMENT "RB_DELTA_REPLAY_BINARY=$<TARGET_FILE:delta_follower_replay>")
     else()
         message(WARNING "Python3 interpreter not found; rb_servo Python unittests will not be registered")
     endif()

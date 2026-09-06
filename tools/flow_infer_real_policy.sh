@@ -247,6 +247,14 @@ if [[ "$PROPRIO_MODE_FROM_ARGS" == velocity* ]]; then
   echo "[flow-infer] velproprio_source=$VELPROPRIO_SOURCE"
 fi
 
+# CRASH DIAGNOSTICS (2026-09-06). A run died with libzmq's "Assertion failed: ok
+# (src/mailbox.cpp:72)" after 211 s of healthy ticks, with no Python traceback and no
+# core (apport ignores uv's python). faulthandler prints every Python thread's stack
+# on SIGABRT, which is what names the thread that was inside ZeroMQ; the core limit
+# lets a configured core_pattern keep the native stack too.
+export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
+ulimit -c unlimited 2>/dev/null || true
+
 exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --checkpoint "$CHECKPOINT" \
   --config "$CONFIG" \

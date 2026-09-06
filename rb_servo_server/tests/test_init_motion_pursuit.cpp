@@ -362,6 +362,17 @@ bool test_request_freshness() {
     const JointArray zero = q_of(0.0);
     const double tol = 0.5;
 
+    // Streaming Done/tare wait: new transport sequences still belong to one
+    // logical request. A genuine same-goal retry must remain possible.
+    for (bool active : {false, true}) {
+        auto ex = streaming_exec(100, active);
+        ex.request_id_right = 9001;
+        for (uint64_t seq = 101; seq < 1200; ++seq) {
+            RB_CHECK(!initMotionRequestIsFresh(ex, seq, false, true, zero, same_goal, tol, 0, 9001));
+        }
+        RB_CHECK(initMotionRequestIsFresh(ex, 1200, false, true, zero, same_goal, tol, 0, 9002));
+    }
+
     // First request ever seen -> fresh (plan must launch).
     {
         InitMotionRequestView ex;  // request_seen = false
@@ -549,6 +560,17 @@ bool test_auto_tare_after_init() {
         RB_CHECK(r.stage == AutoTareStage::Idle);
         RB_CHECK(!r.dropped);
         const AutoTareTickResult again = tick(r.stage, AutoTareInitPhase::Reached, 0.0, 10.0);
+        RB_CHECK(!again.fire_tare);
+    }
+    // The runner emits Hold after observing Done. The exec then returns Idle,
+    // but the already-armed settling phase must survive until the tare fires.
+    {
+        const auto reached = tick(AutoTareStage::AwaitingInit, AutoTareInitPhase::Reached, 0.0, 0.0);
+        const auto holding = tick(reached.stage, AutoTareInitPhase::None, 0.0, 0.4);
+        RB_CHECK(holding.stage == AutoTareStage::Settling && !holding.fire_tare && !holding.dropped);
+        const auto settled = tick(holding.stage, AutoTareInitPhase::None, 0.0, 0.5);
+        RB_CHECK(settled.fire_tare && !settled.dropped);
+        const auto again = tick(settled.stage, AutoTareInitPhase::None, 0.0, 1.0);
         RB_CHECK(!again.fire_tare);
     }
     // A failed InitMotion has no init pose to tare at: drop, never fire.

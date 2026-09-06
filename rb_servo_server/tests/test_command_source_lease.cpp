@@ -60,6 +60,22 @@ bool testAcquireLeaseAndExpiration() {
     return true;
 }
 
+bool testInitMotionLogicalRequestIdParsing() {
+    rb_servo::NetworkConfig network;
+    network.command_source_enforce_lease = false;
+    rb_servo::CommandBuffer buffer;
+    rb_servo::CommandServer server(network, &buffer);
+    rb_servo::DualArmCommand out;
+    const auto now = rb_servo::nowSteadyNs();
+    RB_CHECK(server.parseMessage(
+        R"({"seq":1,"mode":"Hold","right":{"mode":"JointTarget","q_target_deg":[0,0,0,0,0,0],"joint_target_profile":"init_motion","init_motion_request_id":1571000000000001}})", now, &out));
+    RB_CHECK(out.right.init_motion_request_id == 1571000000000001ULL);
+    RB_CHECK(out.left.init_motion_request_id == 0);
+    RB_CHECK(!server.parseMessage(
+        R"({"seq":2,"mode":"Hold","right":{"mode":"JointTarget","q_target_deg":[0,0,0,0,0,0],"joint_target_profile":"init_motion","init_motion_request_id":-1}})", now+1, &out));
+    return true;
+}
+
 bool testWrongTokenRejected() {
     rb_servo::NetworkConfig network;
     network.command_source_enforce_lease = true;
@@ -303,6 +319,7 @@ bool testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion() {
 }  // namespace
 
 int main() {
+    if (!testInitMotionLogicalRequestIdParsing()) return 1;
     if (!testAcquireLeaseAndExpiration()) return 1;
     if (!testWrongTokenRejected()) return 1;
     if (!testDefaultOffAndEmergencyOverride()) return 1;

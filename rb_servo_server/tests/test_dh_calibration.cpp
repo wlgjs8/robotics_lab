@@ -82,6 +82,10 @@ bool testNominalTableAndLayout() {
 bool testParsePayload() {
     const auto v = rb_servo::parseLinkParameterPayload("link_parameter = [0.01, -0.02, 165.5, 425.1, 391.9, -110.6, 0, 0]");
     RB_CHECK(v.size() == 8 && near(v[2], 165.5) && near(v[5], -110.6));
+    // THE REAL BOX (2026-09-06, left arm): the key is bracketed too.
+    const auto box = rb_servo::parseLinkParameterPayload(
+        "info[link_parameter][-0.0582, -0.0449, 163.9439, 425.5847, 392.3901, -111.2781, 0.0000, 0.0000]");
+    RB_CHECK(box.size() == 8 && near(box[0], -0.0582) && near(box[2], 163.9439) && near(box[5], -111.2781) && near(box[7], 0.0));
     const auto w = rb_servo::parseLinkParameterPayload("link_parameter 1 2 3");
     RB_CHECK(w.size() == 3 && near(w[2], 3.0));
     RB_CHECK(rb_servo::parseLinkParameterPayload("link_parameter = []").empty());
@@ -100,10 +104,26 @@ bool testAdoptionAcceptsAndRefuses() {
     RB_CHECK(a.changed_cells == 1 && near(a.table[0].d_mm, 165.5) && near(a.max_abs_delta_mm, 3.7, 1e-9));
     RB_CHECK(near(a.table[1].a_mm, 425.0));                       // untouched cells stay nominal
     RB_CHECK(near(a.table[1].d_mm, -148.4));                      // cells outside the layout untouched
+    // The real left box of 2026-09-06: six calibrated cells, all inside the limits.
+    RB_CHECK(rb_servo::adoptLinkParameter({-0.0582, -0.0449, 163.9439, 425.5847, 392.3901, -111.2781, 0.0, 0.0},
+                                          nom, L, 10.0, 2.0, &a).empty());
+    RB_CHECK(a.changed_cells == 6 && near(a.table[0].d_mm, 163.9439) && near(a.table[1].alpha_deg, -0.0582) &&
+             near(a.table[3].d_mm, -111.2781) && near(a.max_abs_delta_mm, 5.2561, 1e-6));
+    // skip_cells keeps a reported cell nominal, logs it, still validates the rest.
+    RB_CHECK(rb_servo::adoptLinkParameter({-0.0582, -0.0449, 163.9439, 425.5847, 392.3901, -111.2781, 0.0, 0.0},
+                                          nom, L, 10.0, 2.0, &a, {"J1.d"}).empty());
+    RB_CHECK(a.changed_cells == 5 && near(a.table[0].d_mm, 169.2) && near(a.table[1].a_mm, 425.5847));
+    RB_CHECK(a.skipped.size() == 1 && a.skipped[0].find("J1.d") == 0);
+    RB_CHECK(!rb_servo::adoptLinkParameter(nominalRaw(), nom, L, 10.0, 2.0, &a, {"J9.d"}).empty());   // bad name
+    int j = 0;
+    rb_servo::DhField f = rb_servo::DhField::D;
+    RB_CHECK(rb_servo::parseDhCellName("J3.alpha", &j, &f) && j == 3 && f == rb_servo::DhField::Alpha);
+    RB_CHECK(!rb_servo::parseDhCellName("J3.beta", &j, &f));
     // Exactly nominal: adopted, nothing changed.
     RB_CHECK(rb_servo::adoptLinkParameter(nominalRaw(), nom, L, 10.0, 2.0, &a).empty() && a.changed_cells == 0);
     // Six values: an unknown layout.
-    std::vector<double> six(nominalRaw().begin(), nominalRaw().begin() + 6);
+    const std::vector<double> full = nominalRaw();
+    std::vector<double> six(full.begin(), full.begin() + 6);
     RB_CHECK(!rb_servo::adoptLinkParameter(six, nom, L, 10.0, 2.0, &a).empty());
     // A nonzero unmapped slot: an unknown calibration.
     raw = nominalRaw();

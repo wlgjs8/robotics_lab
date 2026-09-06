@@ -82,6 +82,14 @@ void writeDeltaTwistVecHeader(std::ostream& os, const char* side, const char* na
 }
 
 void writeArmProfilingHeader(std::ostream& os, const char* side) {
+    writeJointArrayHeader(os, side, "follower_axis_duration_sec");
+    writeJointArrayHeader(os, side, "follower_target_velocity");
+    writeJointArrayHeader(os, side, "follower_target_acceleration");
+    os << ',' << side << "_follower_segments"
+       << ',' << side << "_follower_advance_gate"
+       << ',' << side << "_follower_plan_rate_gate";
+    for (const char* axis : {"x", "y", "z"}) os << ',' << side << "_follower_advance_dir_" << axis;
+    os << ',' << side << "_follower_output_smd_reseeded";
     writePoseHeader(os, side, "command_tcp_target_stand");
     writePoseHeader(os, side, "smd_goal_stand");
     writePoseHeader(os, side, "smd_ref_stand");
@@ -246,6 +254,8 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",right_joint_target_profile_after_init_sequencer"
        << ",init_motion_left_status"
        << ",init_motion_right_status"
+       << ",init_motion_left_request_id"
+       << ",init_motion_right_request_id"
        << ",init_motion_aggregate_status"
        << ",init_motion_left_fail_mode"
        << ",init_motion_right_fail_mode"
@@ -950,6 +960,14 @@ void writeArmProfilingColumns(
     const RobotState& state,
     const CartesianSolveTelemetry& telemetry,
     const ArmJointDerivatives& derivatives) {
+    writeJointArrayColumns(os, telemetry.follower_axis_duration_sec);
+    writeJointArrayColumns(os, telemetry.follower_target_velocity);
+    writeJointArrayColumns(os, telemetry.follower_target_acceleration);
+    os << ',' << telemetry.follower_segments
+       << ',' << telemetry.follower_advance_gate
+       << ',' << telemetry.follower_plan_rate_gate;
+    for (double value : telemetry.follower_advance_direction) os << ',' << value;
+    os << ',' << telemetry.follower_output_smd_reseeded;
     writePoseColumns(os, commandTcpTargetStand(command));
     writePoseColumns(os, telemetry.smd_goal_stand);
     writePoseColumns(os, telemetry.smd_ref_stand);
@@ -1134,6 +1152,8 @@ void writeInitMotionColumns(std::ostream& os, const ServoSample& sample) {
        << ',' << csvEscape(sample.right_joint_target_profile_after_init_sequencer)
        << ',' << csvEscape(sample.init_motion_left.status)
        << ',' << csvEscape(sample.init_motion_right.status)
+       << ',' << sample.init_motion_left.request_id
+       << ',' << sample.init_motion_right.request_id
        << ',' << csvEscape(sample.init_motion.status)
        << ',' << csvEscape(sample.init_motion_left.fail_mode)
        << ',' << csvEscape(sample.init_motion_right.fail_mode)

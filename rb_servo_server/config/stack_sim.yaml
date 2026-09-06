@@ -265,7 +265,7 @@ safety:
     min_step_rad: 1.0e-5
     max_step_m: 0.03
     max_step_rad: 0.2
-    on_ik_throttle: true
+    on_ik_throttle: false   # see stack_real.yaml (2026-09-06)
   user_floor_constraint:
     # DISABLED TO MATCH stack_real.yaml (operator, 2026-09-03), together with the stand
     # floor above. This is the viser-fitted TILTED plane; it is independent of and

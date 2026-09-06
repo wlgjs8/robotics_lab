@@ -723,7 +723,12 @@ safety:
     min_step_rad: 1.0e-5
     max_step_m: 0.03
     max_step_rad: 0.2
-    on_ik_throttle: true
+    # OFF (2026-09-06 12:09 run): the IK branch-jump throttle is not a wall. During a
+    # wrist branch flip the sent joints sit ~13 mm off the target for ~6 ticks; folding
+    # the plan to that transient pose, then the follower re-anchoring when the flip
+    # completed, made a 0.21 s limit cycle of 13 mm plan jumps at 8.7-10.7k deg/s^2.
+    # The ROI/collision holds (the real walls) stayed at <= 2 mm gap and <= 1.6k.
+    on_ik_throttle: false
   user_floor_constraint:
     # 2026-07-09 (ft branch): DISABLED — floor_constraint와 같은 이유(모델 관측
     # velocity 훼손 방지, FT 센서로 대체). viser Fit & Apply Send는 거부된다.
@@ -1710,6 +1715,13 @@ kinematics:
     # The GUI draws its arms from calibrated copies of this file (published in the
     # state manifest as robot_urdf_left/right); missing = fatal, like everything above.
     gui_arm_urdf: "descriptions/urdf/rb5_850e_pika_articulated.urdf"
+    # J1.d is reported (163.94 / 163.70 vs 169.2 nominal) but NOT adopted. Oracle,
+    # 2026-09-06 11:43 run: adopting all six cells moved our FK away from the box's
+    # own TCP report by 5.34 / 5.09 mm - exactly the J1.d delta, along base z - while
+    # the nominal chain sat 0.6-1.2 mm from it. The box states that cell in a
+    # convention this URDF chain (base_joint z 0.1692) does not share; the other five
+    # cells (<= 0.7 mm / 0.06 deg) are adopted. Revisit if the box's convention is learned.
+    skip_cells: ["J1.d"]
   base_link: "world"
   tip_link: "tcp"
   joint_names:

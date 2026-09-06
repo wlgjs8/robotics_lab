@@ -1,4 +1,5 @@
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/kinematics/dh_calibration.hpp"
 
 #include <arpa/inet.h>
 
@@ -4632,8 +4633,21 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             const YAML::Node c = sec["calibration"];
             validateAllowedKeys(c, {
                 "source", "output_dir", "probe_timeout_sec", "max_abs_delta_mm", "max_abs_delta_deg",
-                "oracle_max_mm", "oracle_fatal", "box_tool_offset_mm", "gui_arm_urdf",
+                "oracle_max_mm", "oracle_fatal", "box_tool_offset_mm", "gui_arm_urdf", "skip_cells",
             }, "kinematics.calibration");
+            if (has(c, "skip_cells")) {
+                const YAML::Node sk = c["skip_cells"];
+                if (!sk.IsSequence()) throw std::runtime_error("kinematics.calibration.skip_cells must be a sequence");
+                cfg.kinematics.calibration.skip_cells.clear();
+                for (std::size_t i = 0; i < sk.size(); ++i) {
+                    const std::string name = asString(sk[i], "kinematics.calibration.skip_cells");
+                    if (!parseDhCellName(name, nullptr, nullptr)) {
+                        throw std::runtime_error("kinematics.calibration.skip_cells: \"" + name +
+                                                 "\" is not a DH cell name (J<1-6>.<d|a|alpha|theta_offset>)");
+                    }
+                    cfg.kinematics.calibration.skip_cells.push_back(name);
+                }
+            }
             if (has(c, "gui_arm_urdf")) {
                 cfg.kinematics.calibration.gui_arm_urdf =
                     resolvePathForConfig(asString(c["gui_arm_urdf"], "kinematics.calibration.gui_arm_urdf"), path);

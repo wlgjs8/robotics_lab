@@ -125,6 +125,8 @@ class CartesianChunkFollower {
 
   // The accumulated plan shift [m] — how far the gate has held this plan back.
   double planShift() const { return plan_shift_.norm(); }
+  double advanceGate() const { return advance_gate_; }
+  const Eigen::Vector3d& advanceDirection() const { return into_contact_dir_; }
 
   // THE FORCE OVERLAY'S FOLD (ported from controller-manager's
   // `ITask::absorb_force_offset` / `Arm::absorb_overlay_offset`). Take the

@@ -2203,7 +2203,18 @@ def _remove_arm_urdfs(handles: dict[str, Any]) -> None:
         if handle is None:
             continue
         try:
-            handle.remove()
+            # Remove the URDF's root frames only: viser removes a node's children
+            # with it, and ViserUrdf.remove() then re-removes every child and warns
+            # once per node (336 warnings per swap, measured 2026-09-06). The root
+            # frames are viser-private attributes; fall back to remove() without them.
+            roots = [getattr(handle, "_visual_root_frame", None),
+                     getattr(handle, "_collision_root_frame", None)]
+            roots = [r for r in roots if r is not None]
+            if roots:
+                for root in roots:
+                    root.remove()
+            else:
+                handle.remove()
         except Exception as exc:  # pragma: no cover - viser handle already gone
             handles["urdf_remove_error"] = f"{type(exc).__name__}: {exc}"
 

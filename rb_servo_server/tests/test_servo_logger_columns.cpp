@@ -133,6 +133,13 @@ int main() {
         return 1;
     }
     const char* required[] = {
+        "init_motion_left_request_id",
+        "init_motion_right_request_id",
+        "left_follower_axis_duration_sec_2",
+        "right_follower_target_velocity_5",
+        "left_follower_target_acceleration_0",
+        "left_follower_advance_dir_z",
+        "right_follower_output_smd_reseeded",
         "left_worker_pending_overwrites_total",
         "left_worker_repeated_sends_total",
         "left_worker_wire_dispatches_total",

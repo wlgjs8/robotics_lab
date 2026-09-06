@@ -20,6 +20,7 @@ policy_runner/gripper_server.py
 policy_runner/hdf5_audit.py
 policy_runner/hdf5_viewer.py
 policy_runner/imitation_experiments.py
+policy_runner/isaac_transport.py
 policy_runner/main.py
 policy_runner/ml_preflight.py
 policy_runner/openpi_remote.py
@@ -89,6 +90,7 @@ tests/test_gripper_startup_open_config.py
 tests/test_hdf5_audit.py
 tests/test_hdf5_recording.py
 tests/test_hdf5_viewer.py
+tests/test_isaac_transport.py
 tests/test_joint_limit_stall_abort.py
 tests/test_openpi_remote_blank_depth.py
 tests/test_openpi_remote_fisheye.py

@@ -19,6 +19,28 @@ GUI TCP nudge controls move the visible target marker and send absolute
 `TcpPoseTarget` commands. Linear moves send `TcpLinearMove` with explicit timing
 and orientation mode.
 
+## Gripper Controls
+
+The `그리퍼` operator tab drives the Pika grippers through `gripper_server`
+(`robotics_lab.gripper_cmd.v1` on UDP `127.0.0.1:50410`, overridable with
+`RB_GUI_GRIPPER_CMD_ENDPOINT=udp://host:port`). Percent is `100` = open,
+`0` = closed.
+
+- Per-arm sliders (`Left/Right gripper %`) are both setpoint and live readout:
+  `gripper_state.v1` feedback is written back into them, so only a genuine
+  operator move emits a command, and a move holds auto-sync briefly so the
+  operator's value is not overwritten before the jaws react.
+- `양팔 그리퍼 열기` / `양팔 그리퍼 닫기` send one both-arm setpoint at the
+  slider end stops (100 / 0). Same wire path, schema and authority as a slider
+  move — one packet is enough because `gripper_server` holds the last setpoint
+  (`on_stale: hold`). Unlike the sliders they command unconditionally: a click is
+  unambiguous, so it works before the sliders have ever synced to hardware. The
+  result is reported in `Last action`.
+
+This is a gripper-only path; it carries no arm motion and takes no arm command
+lease. Real gripper actuation still needs `gripper_server` running against the
+pika backend.
+
 ## Safety And Lease Behavior
 
 The GUI derives button disabled state from live server state: stale/missing

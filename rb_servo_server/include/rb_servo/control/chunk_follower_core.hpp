@@ -115,6 +115,12 @@ struct SegmentSolve {
   double alpha{1.0};              // telemetry-compatible; predictive alpha is disabled
   bool   converged{false};       // duration ≈ dt (within tol) → in converging regime
   bool   corner{false};          // any axis rang down af→0 this segment
+  // Ruckig's independent axis times and guarded boundary conditions, copied
+  // from this solve without additional OTG calls. Axes 0..2 stand translation;
+  // 3..5 the current R0_ref-local rotation tangent, not Euler angles.
+  std::array<double, 6> axis_duration_sec{};
+  std::array<double, 6> target_velocity{};
+  std::array<double, 6> target_acceleration{};
 };
 
 template <std::size_t N>
@@ -213,6 +219,12 @@ class ChunkFollowerSegment {
     if (out.result != ruckig::Result::Working) return out;
 
     out.duration = traj.get_duration();
+    const auto independent = traj.get_independent_min_durations();
+    for (std::size_t d = 0; d < std::min<std::size_t>(N, 6); ++d) {
+      out.axis_duration_sec[d] = independent[d];
+      out.target_velocity[d] = in.target_velocity[d];
+      out.target_acceleration[d] = in.target_acceleration[d];
+    }
     out.alpha = alpha;
     out.corner = corner;
     out.converged = out.duration <= dt_ * 1.001 + 1e-9;

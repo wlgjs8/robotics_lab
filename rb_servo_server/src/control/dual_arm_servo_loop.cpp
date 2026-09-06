@@ -4076,6 +4076,7 @@ void DualArmServoLoop::loopMain() {
                         ? right_state.q_actual_deg
                         : right_prev_sent_q_deg_;
                 auto fill_arm = [&](InitMotionArmDiag& arm, const InitMotionExec& ex, bool left_arm) {
+                    arm.request_id = left_arm ? ex.request_id_left : ex.request_id_right;
                     arm.status = status_string(ex.status);
                     arm.fail_mode = fail_mode_string(ex);
                     arm.message = ex.message;
@@ -4913,6 +4914,14 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_step = abc.follower_step;
     solve.follower_t_in_seg_sec = abc.follower_t_in_seg_sec;
     solve.follower_duration_sec = abc.follower_duration_sec;
+    solve.follower_axis_duration_sec = abc.follower_axis_duration_sec;
+    solve.follower_target_velocity = abc.follower_target_velocity;
+    solve.follower_target_acceleration = abc.follower_target_acceleration;
+    solve.follower_segments = abc.follower_segments;
+    solve.follower_advance_gate = abc.follower_advance_gate;
+    solve.follower_plan_rate_gate = abc.follower_plan_rate_gate;
+    solve.follower_advance_direction = abc.follower_advance_direction;
+    solve.follower_output_smd_reseeded = abc.follower_output_smd_reseeded;
     solve.follower_alpha = abc.follower_alpha;
     solve.follower_converged = abc.follower_converged;
     solve.follower_stall = abc.follower_stall;
@@ -5216,6 +5225,14 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_step = -1;
     abc.follower_t_in_seg_sec = 0.0;
     abc.follower_duration_sec = 0.0;
+    abc.follower_axis_duration_sec = {};
+    abc.follower_target_velocity = {};
+    abc.follower_target_acceleration = {};
+    abc.follower_segments = 0;
+    abc.follower_advance_gate = 1.0;
+    abc.follower_plan_rate_gate = 1.0;
+    abc.follower_advance_direction = {};
+    abc.follower_output_smd_reseeded = false;
     abc.follower_alpha = 1.0;
     abc.follower_converged = false;
     abc.follower_stall = false;
@@ -5656,6 +5673,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             // `reference` is FK of the previous sent target, i.e. the last pose
             // this stage emitted. Never cold-seed from an older filter state.
             output_smd->reset(reference, follower_velocity);
+            abc.follower_output_smd_reseeded = true;
         }
         smoothed.tcp_target_stand =
             output_smd->step(pre_filter, follower_velocity, dt_sec);
@@ -5716,14 +5734,49 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // layer that caused it, so a pinned or throttled arm recovers indefinitely). An
     // UNEXPLAINED one spends budget, and the latch only fires once the budget is gone --
     // i.e. once re-anchoring has demonstrably stopped helping.
-    const bool lead_breach = delta_preview && diag.actual_lead_fault && !diag.infeasible_fault;
+    // (2026-09-06, servo_log_20260906_122520.csv 111.87 s) TWO GAPS CLOSED HERE:
+    //  1. `!diag.infeasible_fault` used to gate this excuse. With
+    //     preview_projection_fault_policy=warn the infeasible flag is advisory (a plan
+    //     the follower's own dynamics cannot realize, 23 consecutive here during a
+    //     55 deg/s policy wrist turn), yet it silently disabled the lead excuse and
+    //     re-anchor, so the else-branch latched the lead fault outright. Only a
+    //     LATCHING projection fault may pre-empt the lead path.
+    //  2. THE ROBOT TRACKING ITS COMMAND is the strongest excuse of all and was not
+    //     one. At that fault the emitted target and the measured pose agreed to
+    //     0.03 deg while the plan sat 5.4 deg ahead: the whole lead was the lag of our
+    //     own chain (follower core angular limits + output SMD), not the arm. That is
+    //     not a runaway and re-anchoring would only discard rotation the chain is
+    //     about to deliver; so it neither re-anchors nor spends budget.
+    const bool lead_breach =
+        delta_preview && diag.actual_lead_fault && !(diag.infeasible_fault && projection_latches);
+    const bool robot_tracks_command =
+        math::positionDistance(reference, actual_feedback_pose) <= 0.5 * rf.preview_max_actual_lead_m &&
+        math::orientationDistanceRad(reference, actual_feedback_pose) <= 0.5 * rf.preview_max_actual_lead_rad;
+    if (lead_breach && robot_tracks_command) {
+        uint64_t& lead_log_ns = arm_id == ArmId::Left
+            ? left_chunk_follower_reanchor_log_ns_
+            : right_chunk_follower_reanchor_log_ns_;
+        if (lead_log_ns == 0 || now_ns < lead_log_ns ||
+            now_ns - lead_log_ns >= kFollowerDivergenceReanchorLogPeriodNs) {
+            std::cout << "[chunk_follower] " << toString(arm_id)
+                      << " actual-lead breach excused: the robot tracks its command (cmd-vs-actual "
+                      << math::positionDistance(reference, actual_feedback_pose) * 1000.0 << " mm / "
+                      << math::orientationDistanceRad(reference, actual_feedback_pose) * 180.0 / M_PI
+                      << " deg); the lead is this chain's own lag, no re-anchor"
+                      << " actual_lead_m=" << diag.actual_lead_m
+                      << " actual_lead_rad=" << diag.actual_lead_rad
+                      << " count=" << diag.consecutive_actual_lead_errors
+                      << " " << diag_seq_labels(diag) << "\n";
+            lead_log_ns = now_ns;
+        }
+    }
     const bool lead_budget_spent =
-        lead_breach && !divergence_explained_recent &&
+        lead_breach && !robot_tracks_command && !divergence_explained_recent &&
         recordLeadReanchorAndCheckExhausted(
             arm_id, now_ns,
             rf.preview_lead_reanchor_window_sec,
             rf.preview_max_lead_reanchors_in_window);
-    if (lead_breach && !lead_budget_spent) {
+    if (lead_breach && !robot_tracks_command && !lead_budget_spent) {
         follower->reanchor(reference);
         output_smd->deactivate();
         ++reanchor_count;
@@ -5758,7 +5811,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             lead_log_ns = now_ns;
         }
     } else if (delta_preview &&
-        ((diag.infeasible_fault && projection_latches) || diag.actual_lead_fault)) {
+        ((diag.infeasible_fault && projection_latches) ||
+         (diag.actual_lead_fault && !robot_tracks_command))) {
         std::ostringstream reason;
         reason << toString(arm_id)
                << (diag.infeasible_fault && projection_latches
@@ -5779,6 +5833,14 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_step = diag.seg_step_index;
     abc.follower_t_in_seg_sec = follower->tInSegment();
     abc.follower_duration_sec = diag.last_solve.duration;
+    abc.follower_axis_duration_sec = diag.last_solve.axis_duration_sec;
+    abc.follower_target_velocity = diag.last_solve.target_velocity;
+    abc.follower_target_acceleration = diag.last_solve.target_acceleration;
+    abc.follower_segments = diag.segments;
+    abc.follower_advance_gate = follower->advanceGate();
+    abc.follower_plan_rate_gate = follower->planRateGate();
+    const auto& advance_dir = follower->advanceDirection();
+    abc.follower_advance_direction = {advance_dir.x(), advance_dir.y(), advance_dir.z()};
     abc.follower_alpha = diag.last_solve.alpha;
     abc.follower_converged = diag.last_solve.converged;
     abc.follower_stall = diag.stall;
@@ -6217,6 +6279,16 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     ++cross_arm_tick_;
     for (ArmControlContext& ctx : arm_ctx) {
         AbcTelemetry& abc = ctx.abc_telemetry;
+        // These diagnostics are valid only on a follower-driven tick. Clear
+        // them across Hold/InitMotion and controller changes as well.
+        abc.follower_axis_duration_sec = {};
+        abc.follower_target_velocity = {};
+        abc.follower_target_acceleration = {};
+        abc.follower_segments = 0;
+        abc.follower_advance_gate = 1.0;
+        abc.follower_plan_rate_gate = 1.0;
+        abc.follower_advance_direction = {};
+        abc.follower_output_smd_reseeded = false;
         abc.follower_output_smd_active = false;
         abc.follower_output_smd_lag_m = 0.0;
         abc.follower_output_smd_lag_rad = 0.0;
@@ -10780,6 +10852,12 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         if (fresh_request && (request_left || request_right)) {
             ex.request_seen = true;
             ex.request_seq = command.seq;
+            ex.request_id_left = request_left ? command.left.init_motion_request_id : 0;
+            ex.request_id_right = request_right ? command.right.init_motion_request_id : 0;
+            std::cout << "[init_motion_request] mono_ns=" << nowSteadyNs()
+                      << " packet_seq=" << command.seq
+                      << " left_request_id=" << ex.request_id_left
+                      << " right_request_id=" << ex.request_id_right << '\n';
             // THIS IS "INIT MOTION STARTS" for the automatic F/T tare
             // (force_torque.auto_tare_after_init_motion). It only ARMS here - see
             // armAutoTareAfterInit for why the samples cannot be taken yet.
@@ -11040,8 +11118,9 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     // (2026-08-13, servo_log_20260813_155705): 1722 "planning collision-free path" vs 2
     // "plan found"; the right arm was pinned in `planning` for ~3.7k ticks and reached the
     // init pose 118 ticks after flow-infer was killed. A committed sequence therefore
-    // relaunches only on a materially different goal; an idle/done/failed exec still
-    // replans on the next distinct seq, so pressing again after completion still works.
+    // uses the logical request ID when supplied: repeated packets, including after
+    // Done, do not restart it; a fresh user action carries a new ID. Legacy clients
+    // retain the goal/sequence rule below.
     const double init_request_tol_deg = std::max(
         0.0,
         std::max(config_.safety.init_motion_planner.noop_tol_deg,
@@ -11052,6 +11131,8 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         InitMotionRequestView view;
         view.request_seen = ex.request_seen;
         view.request_seq = ex.request_seq;
+        view.request_id_left = ex.request_id_left;
+        view.request_id_right = ex.request_id_right;
         view.sequence_active = sequence_active(ex);
         view.has_target = ex.has_target;
         view.left_active = ex.left_active;
@@ -11060,7 +11141,8 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         view.target_right = ex.target_right;
         return initMotionRequestIsFresh(
             view, command.seq, request_left, request_right,
-            command.left.q_target_deg, command.right.q_target_deg, init_request_tol_deg);
+            command.left.q_target_deg, command.right.q_target_deg, init_request_tol_deg,
+            command.left.init_motion_request_id, command.right.init_motion_request_id);
     };
     const bool left_exec_fresh =
         exec_is_fresh(left_init_motion_exec_, left_exec_requested, true, right_init);
@@ -11094,9 +11176,20 @@ bool initMotionRequestIsFresh(
     bool request_right,
     const JointArray& command_target_left,
     const JointArray& command_target_right,
-    double tol_deg) {
+    double tol_deg,
+    uint64_t request_id_left,
+    uint64_t request_id_right) {
     // First request this exec has ever seen.
     if (!ex.request_seen) return true;
+    // A logical ID survives streaming retransmission and Done. A new user
+    // request uses a new ID, including a same-goal retry. Untagged clients keep
+    // the existing sequence/goal behavior below.
+    if ((!request_left || request_id_left != 0) &&
+        (!request_right || request_id_right != 0)) {
+        return ex.left_active != request_left || ex.right_active != request_right ||
+            (request_left && ex.request_id_left != request_id_left) ||
+            (request_right && ex.request_id_right != request_id_right);
+    }
     // Same packet re-served from the command buffer (one-shot GUI command held across
     // ticks) — already handled on the tick it arrived.
     if (ex.request_seq == command_seq) return false;

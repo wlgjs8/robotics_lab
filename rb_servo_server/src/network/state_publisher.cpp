@@ -1692,6 +1692,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         {"nearest_pair_external", snapshot.init_motion.nearest_pair_external},
         {"left", {
             {"status", snapshot.init_motion_left.status},
+            {"request_id", snapshot.init_motion_left.request_id},
             {"fail_mode", snapshot.init_motion_left.fail_mode},
             {"message", snapshot.init_motion_left.message},
             {"goal_self_min_clearance_m", finiteDoubleJson(snapshot.init_motion_left.goal_self_min_clearance_m)},
@@ -1716,6 +1717,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         }},
         {"right", {
             {"status", snapshot.init_motion_right.status},
+            {"request_id", snapshot.init_motion_right.request_id},
             {"fail_mode", snapshot.init_motion_right.fail_mode},
             {"message", snapshot.init_motion_right.message},
             {"goal_self_min_clearance_m", finiteDoubleJson(snapshot.init_motion_right.goal_self_min_clearance_m)},

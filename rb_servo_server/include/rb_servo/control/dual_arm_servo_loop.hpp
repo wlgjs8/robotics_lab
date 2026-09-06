@@ -647,6 +647,8 @@ private:
         // same cached packet cannot repeatedly re-anchor Hold to q_actual.
         bool request_seen = false;
         uint64_t request_seq = 0;
+        uint64_t request_id_left = 0;
+        uint64_t request_id_right = 0;
         bool has_target = false;
         bool left_active = false;
         bool right_active = false;
@@ -1133,6 +1135,14 @@ private:
         int follower_step = -1;
         double follower_t_in_seg_sec = 0.0;
         double follower_duration_sec = 0.0;
+        std::array<double, 6> follower_axis_duration_sec{};
+        std::array<double, 6> follower_target_velocity{};
+        std::array<double, 6> follower_target_acceleration{};
+        int follower_segments = 0;
+        double follower_advance_gate = 1.0;
+        double follower_plan_rate_gate = 1.0;
+        std::array<double, 3> follower_advance_direction{};
+        bool follower_output_smd_reseeded = false;
         double follower_alpha = 1.0;
         bool follower_converged = false;
         bool follower_stall = false;
@@ -1352,6 +1362,8 @@ PursuitStep pursueWaypointsStep(
 struct InitMotionRequestView {
     bool request_seen = false;
     uint64_t request_seq = 0;
+    uint64_t request_id_left = 0;
+    uint64_t request_id_right = 0;
     bool sequence_active = false;  // status is Planning or Executing
     bool has_target = false;
     bool left_active = false;
@@ -1375,7 +1387,9 @@ bool initMotionRequestIsFresh(
     bool request_right,
     const JointArray& command_target_left,
     const JointArray& command_target_right,
-    double tol_deg);
+    double tol_deg,
+    uint64_t request_id_left = 0,
+    uint64_t request_id_right = 0);
 
 // Brake-before-plan helpers (see InitMotionPlannerConfig::brake_before_plan). Stateless so
 // they are unit-testable in isolation (test_init_motion_pursuit).

@@ -4137,6 +4137,32 @@ def build_gui(
                         disabled=True,
                     )
 
+                    # Both-arm one-click presets. Same wire path and authority as a
+                    # slider move (one gripper_cmd.v1 to gripper_server, which holds
+                    # the setpoint until the next command) — just both arms at the
+                    # slider's own end stops, which is the pair of motions operators
+                    # repeat between episodes. 100 = open, 0 = closed.
+                    open_both_button = server.gui.add_button("양팔 그리퍼 열기")
+                    close_both_button = server.gui.add_button("양팔 그리퍼 닫기")
+                    handles["gripper_open_both_button"] = open_both_button
+                    handles["gripper_close_both_button"] = close_both_button
+
+                    def _gripper_preset(percent: float, label: str) -> None:
+                        sent = _send_gripper_preset(handles, percent)
+                        what = f"양팔 그리퍼 {label} ({percent:.0f}%)"
+                        handles["last_action"].value = (
+                            f"OK: {what}" if sent
+                            else f"BLOCKED: {what} — gripper_server 전송 실패"
+                        )
+
+                    @open_both_button.on_click
+                    def _(_: Any) -> None:
+                        _gripper_preset(_GRIPPER_OPEN_PERCENT, "열기")
+
+                    @close_both_button.on_click
+                    def _(_: Any) -> None:
+                        _gripper_preset(_GRIPPER_CLOSED_PERCENT, "닫기")
+
         with _op_tabs.add_tab("SpaceMouse"):
             handles["spacemouse_summary"] = server.gui.add_text(
                 "감지 장치", initial_value="policy_runner 상태 대기 중", disabled=True
@@ -5133,6 +5159,10 @@ def _gripper_cmd_endpoint() -> tuple[str, int]:
 
 
 _GRIPPER_SYNC_EPS = 0.5  # % tolerance to tell our own feedback write from an operator move
+# gripper_cmd.v1 percent end stops, shared by the sliders and the both-arm
+# preset buttons. Same range gripper_server clamps to (0..100).
+_GRIPPER_OPEN_PERCENT = 100.0
+_GRIPPER_CLOSED_PERCENT = 0.0
 
 
 def _send_gripper_command(handles: dict[str, Any]) -> None:
@@ -5186,6 +5216,58 @@ def _send_gripper_command(handles: dict[str, Any]) -> None:
         sock.sendto(json.dumps(msg).encode("utf-8"), endpoint)
     except OSError:
         pass
+
+
+def _send_gripper_preset(handles: dict[str, Any], percent: float) -> bool:
+    """Command BOTH grippers to one fixed opening (100 = open, 0 = closed).
+
+    Same wire path, schema and authority as an operator slider move: a single
+    gripper_cmd.v1 setpoint to gripper_server, which holds it (`on_stale: hold`)
+    until the next command — so one packet is enough, exactly as for the sliders.
+
+    A button has no "was that an operator move or our own feedback write?"
+    ambiguity, so it commands unconditionally rather than going through the
+    echo-suppression in _send_gripper_command: the click IS the operator move,
+    including before the sliders have ever synced to hardware feedback.
+
+    Both sliders are then driven to the commanded value so the panel shows the
+    setpoint. The synced-value bookkeeping is updated BEFORE that write so the
+    on_update it triggers is recognised as an echo and does not emit a second
+    packet, and the manual-hold window keeps _update_gripper_feedback from yanking
+    the sliders back before the jaws have had time to move.
+
+    Returns True when the packet was sent."""
+    sock = handles.get("gripper_cmd_sock")
+    endpoint = handles.get("gripper_cmd_endpoint")
+    if sock is None or endpoint is None:
+        return False
+    value = max(0.0, min(100.0, float(percent)))
+    seq = int(handles.get("gripper_cmd_seq", 0)) + 1
+    handles["gripper_cmd_seq"] = seq
+    msg = {
+        "schema": "robotics_lab.gripper_cmd.v1",
+        "seq": seq,
+        "deadman": True,
+        "left": {"percent": value, "valid": True},
+        "right": {"percent": value, "valid": True},
+    }
+    try:
+        sock.sendto(json.dumps(msg).encode("utf-8"), endpoint)
+    except OSError:
+        return False  # leave the sliders showing the last known state, not a lie
+    hold_until = time.monotonic() + float(handles.get("gripper_manual_hold_sec", 1.0))
+    for side in ("left", "right"):
+        handles[f"gripper_manual_hold_until_{side}"] = hold_until
+        # Record BEFORE writing so the resulting on_update sees value == synced.
+        handles[f"gripper_synced_value_{side}"] = value
+        slider = handles.get(f"gripper_slider_{side}")
+        if slider is None:
+            continue
+        try:
+            slider.value = value
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return True
 
 
 def _push_gripper_percent(handles: dict[str, Any], latest: StateSnapshot | None = None) -> None:

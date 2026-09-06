@@ -52,15 +52,23 @@ struct DhAdoption {
     int changed_cells = 0;
     double max_abs_delta_mm = 0.0;
     double max_abs_delta_deg = 0.0;
+    std::vector<std::string> skipped;   // "J1.d (box 163.944, kept nominal 169.2)"
 };
+// Cell names as "J<joint>.<field>" with field in {theta_offset, d, a, alpha}.
+std::string dhCellName(int joint, DhField field);
+bool parseDhCellName(const std::string& name, int* joint, DhField* field);
 // Adopt a reply into a table. Returns an empty string on success, otherwise the
 // refusal: wrong value count (an unknown layout - a prefix guess once wrote RB5 cells
 // over an RB3 table, 600 mm of FK corruption), a nonzero UNMAPPED slot (an unknown
 // calibration arrived), or a cell farther from nominal than the limits (a box that
-// answered garbage). Nothing is adopted on refusal.
+// answered garbage). Nothing is adopted on refusal. Cells named in `skip_cells` are
+// validated and logged but KEPT NOMINAL: the box may state a cell in a convention
+// this URDF does not share (measured 2026-09-06: adopting J1.d moved our FK away
+// from the box's own TCP report by exactly the J1.d delta, 5.3 mm).
 std::string adoptLinkParameter(const std::vector<double>& raw, const DhTable& nominal,
                                const DhSlotLayout& layout, double max_abs_delta_mm,
-                               double max_abs_delta_deg, DhAdoption* out);
+                               double max_abs_delta_deg, DhAdoption* out,
+                               const std::vector<std::string>& skip_cells = {});
 
 // Rewrite the joint origins of ONE RB5-850E arm chain in a URDF text so the chain
 // carries `calibrated` instead of `nominal`. This URDF keeps joint axes along +y and

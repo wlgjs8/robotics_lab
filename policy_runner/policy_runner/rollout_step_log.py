@@ -179,6 +179,9 @@ class ChunkRowLogger:
         speed_scale: float | None,
         projected: Mapping[str, Any],
         projected_delta: Mapping[str, Any],
+        active_model_horizon: Any = None,
+        chunk_metadata: Mapping[str, Any] | None = None,
+        rtc_enabled: bool = False,
     ) -> bool:
         """One record per published chunk. `projected` rows are ABSOLUTE stand-frame
         poses (x,y,z,qx,qy,qz,qw,grip); `projected_delta` are the per-step deltas
@@ -196,6 +199,11 @@ class ChunkRowLogger:
             "anchor_mode": str(anchor_mode),
             "stitch_mode": str(stitch_mode),
             "speed_scale": _finite_float(speed_scale),
+            # Full activated model output BEFORE per-arm conditioning. Published
+            # *_delta remains the authority for what the server actually consumed.
+            "active_model_horizon": active_model_horizon,
+            "chunk_metadata": dict(chunk_metadata or {}),
+            "rtc_enabled": bool(rtc_enabled),
         }
         for arm in _ARMS:
             record[arm] = projected.get(arm)

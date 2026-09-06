@@ -35,13 +35,21 @@ const DhSlotLayout& rb5850eLinkParameterLayout() {
 
 std::vector<double> parseLinkParameterPayload(const std::string& payload) {
     std::vector<double> values;
-    const std::size_t lb = payload.find('[');
-    const std::size_t rb = payload.find(']', lb == std::string::npos ? 0 : lb);
+    // The RB5-850E box answers `info[link_parameter][v0, v1, ...]` (measured
+    // 2026-09-06): the key itself sits in a bracket pair, the numbers in the NEXT one.
+    // Take the first '[' AFTER the key; fall back to the first bracket pair (the
+    // `link_parameter = [...]` form) and then to everything after the key.
+    const std::size_t k = payload.find("link_parameter");
+    std::size_t lb = std::string::npos;
+    if (k != std::string::npos) {
+        lb = payload.find('[', k + std::strlen("link_parameter"));
+    }
+    if (lb == std::string::npos) lb = payload.find('[');
+    const std::size_t rb = lb == std::string::npos ? std::string::npos : payload.find(']', lb);
     std::string body;
     if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
         body = payload.substr(lb + 1, rb - lb - 1);
     } else {
-        const std::size_t k = payload.find("link_parameter");
         body = k == std::string::npos ? payload : payload.substr(k + std::strlen("link_parameter"));
     }
     const char* c = body.c_str();
@@ -91,10 +99,36 @@ std::string fmt(double v) {
 }
 }  // namespace
 
+std::string dhCellName(int joint, DhField field) {
+    return "J" + std::to_string(joint) + "." + fieldName(field);
+}
+
+bool parseDhCellName(const std::string& name, int* joint, DhField* field) {
+    if (name.size() < 4 || name[0] != 'J' || name[2] != '.') return false;
+    const int j = name[1] - '0';
+    if (j < 1 || j > 6) return false;
+    const std::string f = name.substr(3);
+    DhField ff;
+    if (f == "d") ff = DhField::D;
+    else if (f == "a") ff = DhField::A;
+    else if (f == "alpha") ff = DhField::Alpha;
+    else if (f == "theta_offset") ff = DhField::ThetaOffset;
+    else return false;
+    if (joint) *joint = j;
+    if (field) *field = ff;
+    return true;
+}
+
 std::string adoptLinkParameter(const std::vector<double>& raw, const DhTable& nominal,
                                const DhSlotLayout& layout, double max_abs_delta_mm,
-                               double max_abs_delta_deg, DhAdoption* out) {
+                               double max_abs_delta_deg, DhAdoption* out,
+                               const std::vector<std::string>& skip_cells) {
     if (out == nullptr) return "adoptLinkParameter: no output";
+    for (const std::string& name : skip_cells) {
+        if (!parseDhCellName(name, nullptr, nullptr)) {
+            return "skip_cells entry \"" + name + "\" is not a DH cell name (J<1-6>.<d|a|alpha|theta_offset>)";
+        }
+    }
     if (static_cast<int>(raw.size()) != layout.count) {
         return "link_parameter has " + std::to_string(raw.size()) + " values but the RB5-850E layout is " +
                std::to_string(layout.count) + " values - unknown firmware layout, nothing adopted";
@@ -120,6 +154,13 @@ std::string adoptLinkParameter(const std::vector<double>& raw, const DhTable& no
                    "." + fieldName(s.field) + ") = " + fmt(target) + " is " + fmt(delta) +
                    (isAngle(s.field) ? " deg" : " mm") + " from nominal " + fmt(nom) + ", beyond the " +
                    fmt(limit) + " limit - refusing the whole table";
+        }
+        const std::string name = dhCellName(s.joint, s.field);
+        bool skip = false;
+        for (const std::string& sk : skip_cells) if (sk == name) skip = true;
+        if (skip) {
+            a.skipped.push_back(name + " (box " + fmt(target) + ", kept nominal " + fmt(nom) + ")");
+            continue;
         }
         cell(a.table[static_cast<std::size_t>(s.joint - 1)], s.field) = target;
         if (std::fabs(delta) > 1e-9) ++a.changed_cells;

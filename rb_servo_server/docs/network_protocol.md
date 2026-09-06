@@ -55,17 +55,37 @@ Collision-free init profile:
   "left": {
     "mode": "JointTarget",
     "q_target_deg": [0, -30, 80, 0, 60, 0],
-    "joint_target_profile": "init_motion"
+    "joint_target_profile": "init_motion",
+    "init_motion_request_id": 1700000000000001
   },
   "right": {
     "mode": "JointTarget",
     "q_target_deg": [0, -30, 80, 0, 60, 0],
-    "joint_target_profile": "init_motion"
+    "joint_target_profile": "init_motion",
+    "init_motion_request_id": 1700000000000002
   }
 }
 ```
 
 If `joint_target_profile` is omitted, the profile is direct.
+
+`init_motion_request_id` is an optional per-arm unsigned integer. Streaming
+clients use a nonzero ID that stays constant for retransmissions of one logical
+request; every new user start/retry gets a new ID, including a retry to the same
+pose. All selected arms must carry nonzero IDs to use ID-based deduplication.
+The ID is scoped to the current sequencer execution, not a durable transaction
+across cancellation, process restart or a different command owner. Reusing it
+with a changed goal does not constitute a new request. Omitted/zero IDs retain
+the legacy packet-sequence/goal comparison behavior. Command-source leases and
+ownership checks remain authoritative.
+
+State acknowledges the ID as `init_motion.left.request_id` and
+`init_motion.right.request_id`; CSV adds `init_motion_left_request_id` and
+`init_motion_right_request_id`. Schema version remains 1 (additive fields).
+The policy runner rejects a stale completion acknowledgment from another ID.
+After matching Done, it sends Hold while waiting for F/T tare. Settling already
+armed by Done survives the sequencer returning to Idle; the normal stillness,
+fault and tare-sampling rules continue to apply.
 
 ### TcpPoseTarget
 

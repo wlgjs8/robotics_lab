@@ -161,6 +161,49 @@ operator stack uses GUI-enabled `opencv-python`; do not install
 
 ## Flow/OpenPI Rollout
 
+### InitMotion and tare completion
+
+The arm-init override assigns a per-arm `init_motion_request_id` for every new
+start/retry and reuses it while streaming that request. A matching Done latches
+motion completion and changes the override to Hold until the enabled F/T
+sensor is connected, its bias is valid, and auto-tare/sample settling is over.
+Missing telemetry remains pending once enabled F/T was observed. A positive
+`arm_init_override.ft_tare_wait_sec` is now a warning deadline: expiry displays
+`init tare blocked` and continues Hold; a subsequently accepted tare releases
+the latch. It does **not** time out into uncovered policy motion.
+
+Explicit `ft_tare_wait_sec: 0` preserves the wait opt-out; disabled F/T and legacy
+states that never report F/T have no tare prerequisite in this client. Manual
+cancel, configured resume-on-failure, and InitMotion sent directly to the server
+outside this override retain their existing semantics. These paths do not
+create a bias; the server still refuses force coverage without a valid bias.
+`[arm_init_event]` console JSON records request IDs, start/status changes,
+tare wait/timeout/ready, resume, cancel and failure. The `arm_init` state block
+also exposes each request ID, elapsed tare wait, and timeout flag.
+
+### Offline delta diagnostics
+
+When chunk-row JSONL logging is enabled, each record now includes
+`active_model_horizon` (the entire activated model chunk before per-arm
+conditioning), `chunk_metadata`, and `rtc_enabled`. The activated chunk may
+already have expired observation rows removed; it is not a fresh raw model
+response. `left_delta`/`right_delta` remain the actual published, conditioned
+inputs to `delta_preview`. These are additive fields under the existing schema.
+
+The server CSV adds per-axis independent Ruckig minimum durations and guarded
+target velocity/acceleration, segment count, the force advance gate/direction
+and plan-rate gate actually used, and the output-SMD reseed flag. Axes 0–2 are
+stand-frame translation; axes 3–5 are rotation tangent coordinates relative to
+the segment reference. They are not joint indices or Euler-angle limits.
+
+`tools/prepare_delta_replay.py`, the C++ `delta_follower_replay` executable, and
+`tools/analyze_delta_replay.py` reproduce the follower/output-SMD reference path
+without creating a backend or connecting to a robot. See
+[the September 6 analysis](../docs/reports/griponly_replay_20260906.md) for
+commands, reproduction accuracy, counterfactual limits, and results.
+
+### Live rollout
+
 `flow-infer` and OpenPI remote rollout always compose ee_local policy deltas into
 absolute `TcpPoseTarget` setpoints. There is no public command-family selection
 or opt-in flag for target-pose rollout.

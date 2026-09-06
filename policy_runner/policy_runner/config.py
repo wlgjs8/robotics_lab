@@ -125,8 +125,9 @@ class ArmInitOverrideConfig:
     # After the server reports an InitMotion done, keep the arm parked until its
     # F/T auto-tare has fired and been accepted (the tare needs the arm held 0.5 s
     # at zero sent speed; resuming the policy at once starved it, and the rest of
-    # the episode ran without force control -- 2026-09-04). Upper bound on that
-    # wait; 0 disables it. Arms whose F/T is disabled or disconnected do not wait.
+    # the episode ran without force control -- 2026-09-04). Deadline for reporting
+    # a blocked tare; expiry keeps Hold until a valid bias arrives. Zero is an
+    # explicit legacy opt-out. Disabled F/T does not wait; disconnected F/T does.
     ft_tare_wait_sec: float = 2.0
 
 
