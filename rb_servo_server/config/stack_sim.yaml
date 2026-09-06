@@ -1011,8 +1011,9 @@ force_torque:
     # MEASURED, not CAD-nominal. CM `ft identify` 2026-08-17 14:08, residual 0.62 N.
     # The pika CAD's own +90 deg yaw is baked into the exported meshes, not the TCP
     # frame, so it does not appear here.
-    tool_mass_kg: 0.7912
-    tool_com_mm: [-0.02, 3.24, 25.34]   # SENSOR frame, from the SRO
+    # Parity with stack_real: re-identified 2026-09-06 (see the real file's note).
+    tool_mass_kg: 0.8137
+    tool_com_mm: [0.32, 1.88, 27.84]    # SENSOR frame, from the SRO
 
     # The point the applied-force torque is referenced to. A two-finger gripper
     # applies its force AT THE FINGERTIPS. It lands on the same 202.642 as the TCP
@@ -1049,8 +1050,8 @@ force_torque:
     # CM `ft identify` 2026-08-17 14:10, residual 0.59 N. 1.1 % from the left arm's
     # mass and under 1.5 mm in CoM — two units of one product, measured separately
     # and kept separately, because each arm compensates with its OWN sensor.
-    tool_mass_kg: 0.7822
-    tool_com_mm: [-1.24, 4.03, 26.56]
+    tool_mass_kg: 0.8139
+    tool_com_mm: [-1.00, 3.02, 26.62]
     applied_force_mm: [0.0, 0.0, 202.642]
 
 # =============================================================================
