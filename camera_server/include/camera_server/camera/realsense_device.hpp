@@ -58,6 +58,10 @@ class ICameraDevice {
   virtual void start(FrameCallback cb) = 0;
   virtual void stop() = 0;
   virtual CameraCaptureStats capture_stats() const { return {}; }
+  // Snapshot of the device actually opened by the current successful start().
+  // No device discovery/I/O here. Unstarted/stopped devices and backends without
+  // RealSense identity return nullopt; never reuse metadata from an older session.
+  virtual std::optional<RealSenseDeviceInfo> active_device_info() const { return std::nullopt; }
 };
 
 std::unique_ptr<ICameraDevice> make_realsense_device(const CameraConfig& cfg, ClockKind clock);

@@ -237,6 +237,8 @@ void parseFollowerOutputSmdConfig(
         "damping_ratio",
         "velocity_ff",
         "velocity_ff_lpf_hz",
+        "velocity_ff_linear_gain",
+        "profile_feedforward",
     }, path);
     if (has(node, "enable")) {
         out->enable = asBool(node["enable"], path + ".enable");
@@ -253,9 +255,16 @@ void parseFollowerOutputSmdConfig(
     if (has(node, "velocity_ff")) {
         out->velocity_ff = asBool(node["velocity_ff"], path + ".velocity_ff");
     }
+    if (has(node, "profile_feedforward")) {
+        out->profile_feedforward = asBool(node["profile_feedforward"], path + ".profile_feedforward");
+    }
     if (has(node, "velocity_ff_lpf_hz")) {
         out->velocity_ff_lpf_hz =
             asDouble(node["velocity_ff_lpf_hz"], path + ".velocity_ff_lpf_hz");
+    }
+    if (has(node, "velocity_ff_linear_gain")) {
+        out->velocity_ff_linear_gain =
+            asDouble(node["velocity_ff_linear_gain"], path + ".velocity_ff_linear_gain");
     }
 }
 
@@ -298,6 +307,16 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
                 "preview_lead_reanchor_window_sec",
                 "preview_max_lead_reanchors_in_window",
         "preview_projection_fault_policy",
+        "core_time_stretch_enable",
+        "core_time_stretch_max_ratio",
+        "fresh_chunk_replan",
+        "continuous_hold_resume",
+        "plan_leash_enable",
+        "plan_leash_start_m",
+        "plan_leash_start_rad",
+        "plan_leash_full_m",
+        "plan_leash_full_rad",
+        "plan_leash_min_gate",
         "corner_deadband_lin_m",
         "corner_deadband_ang_rad",
         "corner_velocity_scale",
@@ -481,6 +500,36 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     }
     if (has(node, "chunk_feed_timeout_sec")) {
         out->chunk_feed_timeout_sec = asDouble(node["chunk_feed_timeout_sec"], path + ".chunk_feed_timeout_sec");
+    }
+    if (has(node, "core_time_stretch_enable")) {
+        out->core_time_stretch_enable = asBool(node["core_time_stretch_enable"], path + ".core_time_stretch_enable");
+    }
+    if (has(node, "core_time_stretch_max_ratio")) {
+        out->core_time_stretch_max_ratio = asDouble(node["core_time_stretch_max_ratio"], path + ".core_time_stretch_max_ratio");
+    }
+    if (has(node, "fresh_chunk_replan")) {
+        out->fresh_chunk_replan = asBool(node["fresh_chunk_replan"], path + ".fresh_chunk_replan");
+    }
+    if (has(node, "continuous_hold_resume")) {
+        out->continuous_hold_resume = asBool(node["continuous_hold_resume"], path + ".continuous_hold_resume");
+    }
+    if (has(node, "plan_leash_enable")) {
+        out->plan_leash_enable = asBool(node["plan_leash_enable"], path + ".plan_leash_enable");
+    }
+    if (has(node, "plan_leash_start_m")) {
+        out->plan_leash_start_m = asDouble(node["plan_leash_start_m"], path + ".plan_leash_start_m");
+    }
+    if (has(node, "plan_leash_start_rad")) {
+        out->plan_leash_start_rad = asDouble(node["plan_leash_start_rad"], path + ".plan_leash_start_rad");
+    }
+    if (has(node, "plan_leash_full_m")) {
+        out->plan_leash_full_m = asDouble(node["plan_leash_full_m"], path + ".plan_leash_full_m");
+    }
+    if (has(node, "plan_leash_full_rad")) {
+        out->plan_leash_full_rad = asDouble(node["plan_leash_full_rad"], path + ".plan_leash_full_rad");
+    }
+    if (has(node, "plan_leash_min_gate")) {
+        out->plan_leash_min_gate = asDouble(node["plan_leash_min_gate"], path + ".plan_leash_min_gate");
     }
 }
 
@@ -1241,6 +1290,40 @@ double workerReadPeriodFromRate(double rate_hz, const std::string& name) {
     return 1.0 / rate_hz;
 }
 
+// Plan-clock pacing keys (core time-stretch + divergence leash), fail-closed: an
+// enabled gate with an unusable parameter is a configuration error, not a default.
+void validateRuckigFollowerPacing(const RuckigFollowerConfig& rf, const std::string& path) {
+    if ((rf.fresh_chunk_replan || rf.continuous_hold_resume) &&
+        (!rf.enable || rf.controller != RuckigFollowerController::DeltaPreview)) {
+        throw std::runtime_error(
+            path + ": fresh_chunk_replan and continuous_hold_resume require "
+            "enable=true and controller=delta_preview");
+    }
+    if (rf.core_time_stretch_enable) {
+        if (!std::isfinite(rf.core_time_stretch_max_ratio) || rf.core_time_stretch_max_ratio < 1.0) {
+            throw std::runtime_error(
+                path + ".core_time_stretch_max_ratio must be a finite value >= 1.0 when "
+                "core_time_stretch_enable is true");
+        }
+    }
+    if (rf.plan_leash_enable) {
+        validatePositiveFinite(rf.plan_leash_start_m, path + ".plan_leash_start_m");
+        validatePositiveFinite(rf.plan_leash_start_rad, path + ".plan_leash_start_rad");
+        validatePositiveFinite(rf.plan_leash_full_m, path + ".plan_leash_full_m");
+        validatePositiveFinite(rf.plan_leash_full_rad, path + ".plan_leash_full_rad");
+        if (!(rf.plan_leash_full_m > rf.plan_leash_start_m) ||
+            !(rf.plan_leash_full_rad > rf.plan_leash_start_rad)) {
+            throw std::runtime_error(
+                path + ": plan_leash_full_{m,rad} must exceed plan_leash_start_{m,rad}");
+        }
+        if (!std::isfinite(rf.plan_leash_min_gate) || rf.plan_leash_min_gate < 0.0 ||
+            rf.plan_leash_min_gate >= 1.0) {
+            throw std::runtime_error(
+                path + ".plan_leash_min_gate must be in [0, 1) when plan_leash_enable is true");
+        }
+    }
+}
+
 void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(static_cast<double>(cfg.servo.rate_hz), "servo.rate_hz");
     validatePositiveFinite(cfg.servo.command_timeout_sec, "servo.command_timeout_sec");
@@ -1256,8 +1339,12 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.safety.decel_overshoot_budget_deg, "safety.decel_overshoot_budget_deg");
     validateNonNegativeFinite(
         cfg.safety.throttle_intervention_deg_s, "safety.throttle_intervention_deg_s");
+    validateRuckigFollowerPacing(
+        cfg.cartesian_control.ruckig_follower, "cartesian_control.ruckig_follower");
     for (const TcpPoseTargetProfileConfig& profile : cfg.cartesian_control.tcp_pose_target_profiles) {
         const RuckigFollowerConfig& rf = profile.ruckig_follower;
+        validateRuckigFollowerPacing(
+            rf, "cartesian_control.tcp_pose_target_profiles." + profile.name + ".ruckig_follower");
         validateNonNegativeFinite(
             rf.preview_lead_reanchor_window_sec,
             "cartesian_control.tcp_pose_target_profiles." + profile.name +
@@ -1472,6 +1559,23 @@ void validateConfig(const DualArmConfig& cfg) {
                     ") cannot brake the commanded TCP ceiling " + std::to_string(v_max) +
                     " m/s before its d_hard_m: need >= " + std::to_string(need(gg_hard, gg_a)));
             }
+            // Cell structure (env_* geometry). Same two invariants as the self set: a
+            // barrier that cannot brake the commanded ceiling before its own floor is
+            // not a barrier, and this class IS approached at TCP speed (the arms work
+            // down at table level, 35.7 mm from the riser measured 2026-09-06).
+            const double ev_hard = m.environment.d_hard_m > 0.0 ? m.environment.d_hard_m : m.d_hard_m;
+            const double ev_slow = m.environment.d_slow_m > 0.0 ? m.environment.d_slow_m : m.d_slow_m;
+            const double ev_a = m.environment.a_brake_m_s2 > 0.0 ? m.environment.a_brake_m_s2 : m.a_brake_m_s2;
+            if (ev_slow < ev_hard) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.environment.d_slow_m must be >= d_hard_m");
+            }
+            if (v_max > 0.0 && ev_slow + 1e-9 < need(ev_hard, ev_a)) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.environment.d_slow_m (" + std::to_string(ev_slow) +
+                    ") cannot brake the commanded TCP ceiling " + std::to_string(v_max) +
+                    " m/s before its d_hard_m: need >= " + std::to_string(need(ev_hard, ev_a)));
+            }
             // Intra-arm keeps a deliberately tight zone (structural pairs sit at
             // 22.5 mm all run); its closing speeds are joint-bounded, not TCP-bounded,
             // so this is reported, not refused.
@@ -1490,7 +1594,13 @@ void validateConfig(const DualArmConfig& cfg) {
                  std::pair<double, const char*>{m.gripper_gripper.d_slow_m, "safety.self_collision.mesh.gripper_gripper.d_slow_m"},
                  std::pair<double, const char*>{m.gripper_gripper.a_brake_m_s2, "safety.self_collision.mesh.gripper_gripper.a_brake_m_s2"},
                  std::pair<double, const char*>{m.gripper_gripper.hyst_m, "safety.self_collision.mesh.gripper_gripper.hyst_m"},
-                 std::pair<double, const char*>{m.gripper_gripper.recover_speed_m_s, "safety.self_collision.mesh.gripper_gripper.recover_speed_m_s"}}) {
+                 std::pair<double, const char*>{m.gripper_gripper.recover_speed_m_s, "safety.self_collision.mesh.gripper_gripper.recover_speed_m_s"},
+                 std::pair<double, const char*>{m.environment.d_hard_m, "safety.self_collision.mesh.environment.d_hard_m"},
+                 std::pair<double, const char*>{m.environment.d_slow_m, "safety.self_collision.mesh.environment.d_slow_m"},
+                 std::pair<double, const char*>{m.environment.a_brake_m_s2, "safety.self_collision.mesh.environment.a_brake_m_s2"},
+                 std::pair<double, const char*>{m.environment.hyst_m, "safety.self_collision.mesh.environment.hyst_m"},
+                 std::pair<double, const char*>{m.environment.recover_speed_m_s, "safety.self_collision.mesh.environment.recover_speed_m_s"},
+                 std::pair<double, const char*>{m.environment.latency_s, "safety.self_collision.mesh.environment.latency_s"}}) {
             if (!std::isfinite(v)) throw std::runtime_error(std::string(name) + " must be finite");
         }
         if (m.monitor_realtime_priority < 0 || m.monitor_realtime_priority > 99) {
@@ -2438,6 +2548,15 @@ void validateConfig(const DualArmConfig& cfg) {
         };
         validate_output_nf(rf.output_smd.nf_linear_hz, "nf_linear_hz");
         validate_output_nf(rf.output_smd.nf_angular_hz, "nf_angular_hz");
+        if (!std::isfinite(rf.output_smd.velocity_ff_linear_gain) ||
+            rf.output_smd.velocity_ff_linear_gain < 0.0 ||
+            rf.output_smd.velocity_ff_linear_gain > 1.0) {
+            throw std::runtime_error(path + ".output_smd.velocity_ff_linear_gain must be in [0, 1]");
+        }
+        if (rf.output_smd.velocity_ff_linear_gain != 1.0 &&
+            (!rf.output_smd.velocity_ff || rf.output_smd.profile_feedforward)) {
+            throw std::runtime_error(path + ".output_smd.velocity_ff_linear_gain requires velocity_ff=true and profile_feedforward=false");
+        }
         if (!std::isfinite(rf.output_smd.damping_ratio) ||
             rf.output_smd.damping_ratio < 0.7 || rf.output_smd.damping_ratio > 2.0) {
             throw std::runtime_error(
@@ -3372,6 +3491,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "projection_max_sweeps",
                     "projection_tol_rad_s",
                     "gripper_gripper",
+                    "environment",
                     "viz_near_pairs_m",
                     "extra_collision",
                     "ground_plane",
@@ -3481,6 +3601,21 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     if (has(g, "a_brake_m_s2")) gg.a_brake_m_s2 = asDouble(g["a_brake_m_s2"], "safety.self_collision.mesh.gripper_gripper.a_brake_m_s2");
                     if (has(g, "hyst_m")) gg.hyst_m = asDouble(g["hyst_m"], "safety.self_collision.mesh.gripper_gripper.hyst_m");
                     if (has(g, "recover_speed_m_s")) gg.recover_speed_m_s = asDouble(g["recover_speed_m_s"], "safety.self_collision.mesh.gripper_gripper.recover_speed_m_s");
+                }
+                if (has(m, "environment")) {
+                    const YAML::Node e = m["environment"];
+                    if (!e.IsMap()) fail("safety.self_collision.mesh.environment must be a map", e);
+                    validateAllowedKeys(e, {
+                        "d_hard_m", "d_slow_m", "a_brake_m_s2",
+                        "hyst_m", "recover_speed_m_s", "latency_s",
+                    }, "safety.self_collision.mesh.environment");
+                    auto& ev = mc.environment;
+                    if (has(e, "d_hard_m")) ev.d_hard_m = asDouble(e["d_hard_m"], "safety.self_collision.mesh.environment.d_hard_m");
+                    if (has(e, "d_slow_m")) ev.d_slow_m = asDouble(e["d_slow_m"], "safety.self_collision.mesh.environment.d_slow_m");
+                    if (has(e, "a_brake_m_s2")) ev.a_brake_m_s2 = asDouble(e["a_brake_m_s2"], "safety.self_collision.mesh.environment.a_brake_m_s2");
+                    if (has(e, "hyst_m")) ev.hyst_m = asDouble(e["hyst_m"], "safety.self_collision.mesh.environment.hyst_m");
+                    if (has(e, "recover_speed_m_s")) ev.recover_speed_m_s = asDouble(e["recover_speed_m_s"], "safety.self_collision.mesh.environment.recover_speed_m_s");
+                    if (has(e, "latency_s")) ev.latency_s = asDouble(e["latency_s"], "safety.self_collision.mesh.environment.latency_s");
                 }
                 if (has(m, "viz_near_pairs_m")) mc.viz_near_pairs_m = asDouble(m["viz_near_pairs_m"], "safety.self_collision.mesh.viz_near_pairs_m");
                 if (has(m, "extra_collision")) {

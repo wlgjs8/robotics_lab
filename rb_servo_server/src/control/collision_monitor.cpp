@@ -177,6 +177,24 @@ double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorC
     return scale < 0.0 ? 0.0 : (scale > 1.0 ? 1.0 : scale);
 }
 
+double nearPairHardFloorM(const CollisionMonitorConfig& cfg, const CollisionNearPair& p) {
+    return p.external_box     ? cfg.external_box_d_hard_m
+         : p.external         ? cfg.external_d_hard_m
+         : p.intra_arm        ? cfg.intra_arm_d_hard_m
+         : p.gripper_gripper  ? cfg.gripper_gripper_d_hard_m
+         : p.environment      ? cfg.environment_d_hard_m
+                              : cfg.d_hard_m;
+}
+
+double nearPairSlowBandM(const CollisionMonitorConfig& cfg, const CollisionNearPair& p) {
+    return p.external_box     ? cfg.external_box_d_slow_m
+         : p.external         ? cfg.external_d_slow_m
+         : p.intra_arm        ? cfg.intra_arm_d_slow_m
+         : p.gripper_gripper  ? cfg.gripper_gripper_d_slow_m
+         : p.environment      ? cfg.environment_d_slow_m
+                              : cfg.d_slow_m;
+}
+
 void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
                                double verdict_age_s, std::vector<VelocityConstraint>& out,
                                std::unordered_set<std::uint64_t>* engaged_pairs) {
@@ -221,30 +239,27 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
             if (engaged_pairs) engaged_pairs->erase(pair_key);
             continue;
         }
-        const double d_hard = p.external_box ? cfg.external_box_d_hard_m
-                            : p.external     ? cfg.external_d_hard_m
-                            : p.intra_arm    ? cfg.intra_arm_d_hard_m
-                            : grip           ? cfg.gripper_gripper_d_hard_m
-                                             : cfg.d_hard_m;
-        const double d_slow = p.external_box ? cfg.external_box_d_slow_m
-                            : p.external     ? cfg.external_d_slow_m
-                            : p.intra_arm    ? cfg.intra_arm_d_slow_m
-                            : grip           ? cfg.gripper_gripper_d_slow_m
-                                             : cfg.d_slow_m;
+        // Shared with the near-pair telemetry (nearPairHardFloorM/SlowBandM) so a
+        // viewer bands each pair against the SAME floor the barrier enforces here.
+        const double d_hard = nearPairHardFloorM(cfg, p);
+        const double d_slow = nearPairSlowBandM(cfg, p);
         const double a_brake = p.external_box ? cfg.external_box_a_brake_m_s2
                              : p.external     ? cfg.external_a_brake_m_s2
                              : p.intra_arm    ? cfg.intra_arm_a_brake_m_s2
                              : grip           ? cfg.gripper_gripper_a_brake_m_s2
+                             : p.environment   ? cfg.environment_a_brake_m_s2
                                               : cfg.a_brake_m_s2;
         const double recover = p.external_box ? cfg.external_box_recover_speed_m_s
                              : p.external     ? cfg.external_recover_speed_m_s
                              : p.intra_arm    ? cfg.intra_arm_recover_speed_m_s
                              : grip           ? cfg.gripper_gripper_recover_speed_m_s
+                             : p.environment   ? cfg.environment_recover_speed_m_s
                                               : cfg.recover_speed_m_s;
         const double hyst = p.external_box ? cfg.external_box_hyst_m
                           : p.external     ? cfg.external_hyst_m
                           : p.intra_arm    ? cfg.intra_arm_hyst_m
                           : grip           ? cfg.gripper_gripper_hyst_m
+                          : p.environment   ? cfg.environment_hyst_m
                                            : cfg.hyst_m;
         double d_now;
         if (extrapolate_by_q) {
@@ -480,6 +495,8 @@ struct CollisionMonitor::Impl {
     std::vector<char> pair_right_;
     // cross-arm gripper-hull pairs (gripper_gripper_* barrier class)
     std::vector<char> pair_gripper_;
+    // arm<->cell-structure pairs (env_* geometry; environment_* barrier class)
+    std::vector<char> pair_environment_;
 
     // True if the pair at index k should be considered for the given active-arm set.
     // Both-included is the unmasked fast path; otherwise keep only pairs that touch an
@@ -963,7 +980,7 @@ struct CollisionMonitor::Impl {
 
     void curatePairs() {
         enum class PairCategory {
-            LeftRight, ArmStand, IntraArm, External, ExternalBox, GripperGripper
+            LeftRight, ArmStand, IntraArm, External, ExternalBox, GripperGripper, Environment
         };
         const auto sideString = [](Side side) {
             switch (side) {
@@ -981,6 +998,7 @@ struct CollisionMonitor::Impl {
                 case PairCategory::External: return "external";
                 case PairCategory::ExternalBox: return "external-box";
                 case PairCategory::GripperGripper: return "gripper-gripper";
+                case PairCategory::Environment: return "environment";
             }
             return "unknown";
         };
@@ -988,6 +1006,12 @@ struct CollisionMonitor::Impl {
         // "<prefix>pika_finger_left/right", or the legacy single "<prefix>pika_gripper".
         const auto isGripperGeometry = [&](std::size_t i) {
             return geom.geometryObjects[i].name.find("pika_") != std::string::npos;
+        };
+        // Cell structure: the env_* links the URDF generator emits with a <collision>
+        // (the riser today). The env_ prefix is a contract -- make_rb5_850e_urdfs.py
+        // refuses any ENVIRONMENT entry that is not named env_*.
+        const auto isEnvironmentGeometry = [&](std::size_t i) {
+            return nameStartsWith(geom.geometryObjects[i].name, "env_");
         };
         const auto isExternalGeometry = [&](std::size_t i) {
             // External barrier category is currently reserved for the injected
@@ -1053,8 +1077,9 @@ struct CollisionMonitor::Impl {
         pair_left_.clear();
         pair_right_.clear();
         pair_gripper_.clear();
+        pair_environment_.clear();
         std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0, n_external = 0;
-        std::size_t n_external_box = 0, n_disabled = 0, n_gripper = 0;
+        std::size_t n_external_box = 0, n_disabled = 0, n_gripper = 0, n_environment = 0;
         const auto tryAddPair = [&](std::size_t a, std::size_t b, PairCategory category) {
             if (const CollisionPairPattern* rule = disabledRule(a, b)) {
                 ++n_disabled;
@@ -1073,6 +1098,7 @@ struct CollisionMonitor::Impl {
             pair_external_box_.push_back(category == PairCategory::ExternalBox ? 1 : 0);
             pair_intra_.push_back(category == PairCategory::IntraArm ? 1 : 0);
             pair_gripper_.push_back(category == PairCategory::GripperGripper ? 1 : 0);
+            pair_environment_.push_back(category == PairCategory::Environment ? 1 : 0);
             pair_category_.push_back(categoryString(category));
             const Side sa = classify(a);
             const Side sb = classify(b);
@@ -1085,6 +1111,7 @@ struct CollisionMonitor::Impl {
                 case PairCategory::External: ++n_external; break;
                 case PairCategory::ExternalBox: ++n_external_box; break;
                 case PairCategory::GripperGripper: ++n_gripper; break;
+                case PairCategory::Environment: ++n_environment; break;
             }
         };
         // left <-> right (whole arms); the two grippers' hulls against each other
@@ -1106,7 +1133,9 @@ struct CollisionMonitor::Impl {
                     }
                     const PairCategory category = isExternalGeometry(b)
                         ? PairCategory::External
-                        : (box ? PairCategory::ExternalBox : PairCategory::ArmStand);
+                        : (box ? PairCategory::ExternalBox
+                               : (isEnvironmentGeometry(b) ? PairCategory::Environment
+                                                           : PairCategory::ArmStand));
                     tryAddPair(a, b, category);
                 }
             }
@@ -1131,6 +1160,7 @@ struct CollisionMonitor::Impl {
                   << ") pairs=" << geom.collisionPairs.size()
                   << " [left-right=" << n_lr << " arm-stand=" << n_arm_stand
                   << " intra-arm=" << n_intra << " gripper-gripper=" << n_gripper
+                  << " environment=" << n_environment
                   << " external=" << n_external
                   << " external-box=" << n_external_box
                   << " disabled=" << n_disabled << "]"
@@ -1173,6 +1203,7 @@ struct CollisionMonitor::Impl {
         double ext_min = std::numeric_limits<double>::infinity();
         double ext_box_min = std::numeric_limits<double>::infinity();
         double grip_min = std::numeric_limits<double>::infinity();
+        double env_min = std::numeric_limits<double>::infinity();
         std::vector<double> ext_box_clearance(
             external_box_indices_.size(), std::numeric_limits<double>::infinity());
         bool hard = false;
@@ -1189,6 +1220,7 @@ struct CollisionMonitor::Impl {
             const bool ext_box = k < pair_external_box_.size() && pair_external_box_[k];
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
             const bool grip = k < pair_gripper_.size() && pair_gripper_[k];
+            const bool env = k < pair_environment_.size() && pair_environment_[k];
             if (ext_box) {
                 if (d < ext_box_min) ext_box_min = d;
                 const auto& cp = geom.collisionPairs[k];
@@ -1226,6 +1258,10 @@ struct CollisionMonitor::Impl {
                 if (d < grip_min) grip_min = d;
                 if (d < cfg.gripper_gripper_d_hard_m) { hard = true; hard_gripper = true; }
                 in_band[k] = d < cfg.gripper_gripper_d_slow_m + cfg.gripper_gripper_hyst_m;
+            } else if (env) {
+                if (d < env_min) env_min = d;
+                if (d < cfg.environment_d_hard_m) { hard = true; hard_non_gripper = true; }
+                in_band[k] = d < cfg.environment_d_slow_m + cfg.environment_hyst_m;
             } else {
                 if (d < self_min) self_min = d;
                 if (d < cfg.d_hard_m) { hard = true; hard_non_gripper = true; }
@@ -1238,6 +1274,7 @@ struct CollisionMonitor::Impl {
         v.external_min_clearance_m = ext_min;
         v.external_box_min_clearance_m = ext_box_min;
         v.gripper_gripper_min_clearance_m = grip_min;
+        v.environment_min_clearance_m = env_min;
         v.external_box_clearance_m = std::move(ext_box_clearance);
         v.hard_violation = hard;
         v.hard_violation_non_gripper = hard_non_gripper;
@@ -1305,6 +1342,7 @@ struct CollisionMonitor::Impl {
             p.external_box = k < pair_external_box_.size() && pair_external_box_[k];
             p.intra_arm = k < pair_intra_.size() && pair_intra_[k];
             p.gripper_gripper = k < pair_gripper_.size() && pair_gripper_[k];
+            p.environment = k < pair_environment_.size() && pair_environment_[k];
             // d_dot = n^T (v_b - v_a) = J_n * qdot. Slice into command left/right cols.
             const pinocchio::JointIndex ja = geom.geometryObjects[cp.first].parentJoint;
             const pinocchio::JointIndex jb = geom.geometryObjects[cp.second].parentJoint;
@@ -1380,6 +1418,7 @@ struct CollisionMonitor::Impl {
             const bool ext = k < pair_external_.size() && pair_external_[k];
             const bool ext_box = k < pair_external_box_.size() && pair_external_box_[k];
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
+            const bool env = k < pair_environment_.size() && pair_environment_[k];
             if (ext_box && cfg.external_boxes.monitor_only) continue;
             if (d < s.min_clearance_m) {
                 s.min_clearance_m = d;
@@ -1403,6 +1442,9 @@ struct CollisionMonitor::Impl {
             } else if (intra) {
                 if (d < s.intra_arm_min_clearance_m) s.intra_arm_min_clearance_m = d;
                 if (d < cfg.intra_arm_d_hard_m) s.hard_violation = true;
+            } else if (env) {
+                if (d < s.environment_min_clearance_m) s.environment_min_clearance_m = d;
+                if (d < cfg.environment_d_hard_m) s.hard_violation = true;
             } else {
                 if (d < s.self_min_clearance_m) s.self_min_clearance_m = d;
                 if (d < cfg.d_hard_m) s.hard_violation = true;
@@ -1425,10 +1467,10 @@ struct CollisionMonitor::Impl {
 
     bool clearsThresholds(const JointArray& l, const JointArray& r,
                           double self_thresh_m, double external_thresh_m,
-                          double intra_arm_thresh_m,
+                          double intra_arm_thresh_m, double environment_thresh_m,
                           bool include_left = true, bool include_right = true) {
         if (!(std::isfinite(self_thresh_m) && std::isfinite(external_thresh_m) &&
-              std::isfinite(intra_arm_thresh_m))) {
+              std::isfinite(intra_arm_thresh_m) && std::isfinite(environment_thresh_m))) {
             return false;
         }
         setQ(l, r);
@@ -1452,11 +1494,13 @@ struct CollisionMonitor::Impl {
             const bool ext = k < pair_external_.size() && pair_external_[k];
             const bool ext_box = k < pair_external_box_.size() && pair_external_box_[k];
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
+            const bool env = k < pair_environment_.size() && pair_environment_[k];
             if (ext_box && cfg.external_boxes.monitor_only) continue;
             const double threshold =
                   ext_box ? std::max(external_thresh_m, cfg.external_box_d_hard_m)
                 : ext     ? std::max(external_thresh_m, cfg.external_d_hard_m)
                 : intra   ? std::max(intra_arm_thresh_m, cfg.intra_arm_d_hard_m)
+                : env     ? std::max(environment_thresh_m, cfg.environment_d_hard_m)
                           : std::max(self_thresh_m, cfg.d_hard_m);
             if (d <= threshold) return false;
         }
@@ -1601,21 +1645,21 @@ CollisionDistanceSummary CollisionMonitor::evalDistancesOnly(const JointArray& l
 bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
                                         double self_thresh_m, double external_thresh_m) {
     return impl_->clearsThresholds(left_deg, right_deg, self_thresh_m, external_thresh_m,
-                                   self_thresh_m);
+                                   self_thresh_m, self_thresh_m);
 }
 
 bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
                                         double self_thresh_m, double external_thresh_m,
                                         double intra_arm_thresh_m) {
     return impl_->clearsThresholds(left_deg, right_deg, self_thresh_m, external_thresh_m,
-                                   intra_arm_thresh_m);
+                                   intra_arm_thresh_m, self_thresh_m);
 }
 
 bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
                                         double self_thresh_m, double external_thresh_m,
                                         bool include_left, bool include_right) {
     return impl_->clearsThresholds(left_deg, right_deg, self_thresh_m, external_thresh_m,
-                                   self_thresh_m, include_left, include_right);
+                                   self_thresh_m, self_thresh_m, include_left, include_right);
 }
 
 bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
@@ -1623,7 +1667,17 @@ bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointA
                                         double intra_arm_thresh_m,
                                         bool include_left, bool include_right) {
     return impl_->clearsThresholds(left_deg, right_deg, self_thresh_m, external_thresh_m,
-                                   intra_arm_thresh_m, include_left, include_right);
+                                   intra_arm_thresh_m, self_thresh_m,
+                                   include_left, include_right);
+}
+
+bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
+                                        double self_thresh_m, double external_thresh_m,
+                                        double intra_arm_thresh_m, double environment_thresh_m,
+                                        bool include_left, bool include_right) {
+    return impl_->clearsThresholds(left_deg, right_deg, self_thresh_m, external_thresh_m,
+                                   intra_arm_thresh_m, environment_thresh_m,
+                                   include_left, include_right);
 }
 
 void CollisionMonitor::start() {

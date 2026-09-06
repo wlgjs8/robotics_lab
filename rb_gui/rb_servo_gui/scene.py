@@ -9,11 +9,14 @@ from typing import Any, Mapping
 from .geometry import (
     _matrix_to_wxyz,
     _mount_pose_from_mounts,
+    _multiply_transform,
     _normalize_wxyz,
     _pose6_from_transform,
     _pose_orientation_wxyz,
     _pose_position,
+    _pose_transform,
     _pose_wxyz,
+    _rpy_to_wxyz,
 )
 from .models import EXTERNAL_BOX_COLLISION_M, ChunkOverlaySnapshot, CircleOverlaySnapshot
 
@@ -446,6 +449,33 @@ _SELF_COLLISION_STAND_OPACITY = 0.6
 _RB3_DARK_GRAY_RGB = (90, 90, 90)
 # Translucent blue overlay of the checked collision hulls (URDF <collision> meshes).
 _SELF_COLLISION_CHECK_RGBA = (0.27, 0.62, 1.0, 0.38)
+
+# THE FIVE BODY GROUPS OF THE COLLISION MODEL. The monitor checks one geometry set
+# but an operator reads the scene in parts, so the red violation overlay lights up
+# only the groups the violating pair actually names — an arm folding onto the stand
+# must not look the same as two grippers touching. The split is the server's own:
+# collision_monitor.cpp attaches the Pika hulls by name ("<prefix>pika_gripper_base",
+# "<prefix>pika_finger_left/right", legacy single "<prefix>pika_gripper") on top of
+# the prefixed arm links, and everything without an arm prefix is stand/world
+# geometry (stand hulls, ground_plane, external_box_*).
+_SELF_COLLISION_GROUPS = (
+    "left_arm", "right_arm", "left_gripper", "right_gripper", "stand", "environment",
+)
+# Cell structure drawn from the unified URDF's env_* links. The ones that carry a
+# <collision> are checked geometry in the server's own `environment` barrier class
+# (25/67 mm, not the 40/90 self set) -- today that is the riser under the stand base
+# plate. They share ONE group here because the server gives them one class, and only
+# geometry that is actually in the collision model can ever be named by a violating
+# pair, so an env_* box that is drawn but never checked cannot light up.
+_ENVIRONMENT_GEOM_PREFIX = "env_"
+# Geometry-name marker for the Pika hulls, mirroring collision_monitor.cpp's
+# isGripperGeometry (name contains "pika_").
+_GRIPPER_GEOM_MARKER = "pika_"
+# The GUI arm URDF's gripper links (rb5_850e_pika_articulated.urdf): the tool body
+# plus the two prismatic fingers. viser names each mesh node ".../<link>/<geometry>",
+# so a node belongs to the gripper iff one of these is a path segment. Keep in sync
+# with rb_servo_server/tools/make_rb5_850e_urdfs.py.
+_GRIPPER_URDF_LINKS = frozenset({"tool", "finger_left", "finger_right"})
 
 
 def _reference_ghost_enabled() -> bool:
@@ -1549,64 +1579,279 @@ def update_roi_box(
     )
 
 
-def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:
-    """Paint the colliding PAIR translucent red while self_collision.violated.
+def _self_collision_geom_group(
+    name: Any, left_prefix: str, right_prefix: str
+) -> str | None:
+    """Map ONE monitor geometry name onto its body group (one of
+    _SELF_COLLISION_GROUPS), or None when the name is unusable.
 
-    Driven by the server's self_collision telemetry, so monitor_only runs show
-    the overlay too. Only the members of the reported pair turn red
-    ("left_right" -> both arms, "left_stand"/"right_stand" -> that arm + the
-    stand); a violated state without a recognizable pair falls back to all-red
-    (conservative). pgmode real (physical_motion_expected=True): the ACTUAL
-    robot (q_actual) turns red. pgmode simulation: the commanded ghost (q_sent)
-    turns red while the solid robot keeps showing the true (stationary) state.
-    External-box collision telemetry is per-box only in this first pass, so any
-    box collision turns both arms red."""
+    Side comes from the manifest's arm prefixes, which is exact and is why the
+    manifest is preferred: the unified collision URDF also has STAND links named
+    "stand_left_arm_base" / "stand_right_arm_base", so a name merely CONTAINING
+    "left" is not an arm. Once the prefixes are known, matching neither of them is
+    conclusive — that geometry is stand/world (stand hulls, ground_plane,
+    external_box_*). env_* is taken out FIRST: it is cell structure the server checks
+    in its own barrier class, and calling it "stand" would redden the stand mesh while
+    leaving the box the arm actually reached untouched.
+
+    Only a manifest-less state falls back to a word search, and then on the EARLIEST
+    of "left"/"right" rather than the first one tested: the articulated gripper
+    geometry "<right_prefix>pika_finger_left" contains both words, and testing "left"
+    first (as the server's own side() lambda does) files the right arm's finger under
+    the left arm."""
+    if not isinstance(name, str) or not name:
+        return None
+    if name.startswith(_ENVIRONMENT_GEOM_PREFIX):
+        return "environment"   # checked cell structure, not the stand itself
+    side: str | None = None
+    if left_prefix and name.startswith(left_prefix):
+        side = "left"
+    elif right_prefix and name.startswith(right_prefix):
+        side = "right"
+    elif not left_prefix and not right_prefix:
+        i_left = name.find("left")
+        i_right = name.find("right")
+        if i_left >= 0 and (i_right < 0 or i_left < i_right):
+            side = "left"
+        elif i_right >= 0:
+            side = "right"
+    if side is None:
+        return "stand"
+    return f"{side}_gripper" if _GRIPPER_GEOM_MARKER in name else f"{side}_arm"
+
+
+def _self_collision_red_groups(
+    sc: Mapping[str, Any] | None, violated: bool, box_collision: bool
+) -> set[str]:
+    """Which of _SELF_COLLISION_GROUPS the red overlay must light up.
+
+    Named from the geometry names of the near pairs that are IN HARD VIOLATION —
+    `clearance_m < d_hard_m`, each pair against its own published floor. That per-pair
+    floor is why the server sends it: the near list is ordered by RAW clearance while
+    the floors differ per category (RB5: self/arm-stand 40 mm, gripper<->gripper 25 mm,
+    intra-arm 5 mm), so "nearest" is not "violating". Measured 2026-09-06: the
+    structural intra-arm link3<->link5 pair sits at ~23 mm — never violating its own
+    5 mm floor — yet is the nearest pair on 99.4% of ticks, so keying the highlight off
+    near_pairs[0] named that one arm and left an arm<->stand pair breaching its 40 mm
+    floor (anywhere in 40..23 mm) completely unmarked.
+
+    Fallbacks, each strictly more conservative than the last: no pair carries a usable
+    d_hard_m (older server) -> near_pairs[0], the previous behavior; no near_pairs ->
+    the coarse `pair` category, where the arm groups include their gripper; unknown
+    `pair` -> all red."""
+    if violated and isinstance(sc, Mapping) and sc.get("near_pairs_hard_truncated") is True:
+        # Some breaching pairs could not fit in the state datagram. A surviving
+        # pair must not make an omitted arm/structure look clear.
+        return set(_SELF_COLLISION_GROUPS)
+    if box_collision:
+        # External-box telemetry is per-box, not per-geometry, so it cannot name a
+        # side: keep both arms (and their grippers) red, as before.
+        return {"left_arm", "right_arm", "left_gripper", "right_gripper"}
+    if not violated:
+        return set()
+    manifest = sc.get("manifest") if isinstance(sc, Mapping) else None
+    if not isinstance(manifest, Mapping):
+        manifest = {}
+    left_prefix = str(manifest.get("left_prefix") or "")
+    right_prefix = str(manifest.get("right_prefix") or "")
+    pairs = sc.get("near_pairs") if isinstance(sc, Mapping) else None
+    if not isinstance(pairs, (list, tuple)):
+        pairs = ()
+    pairs = [p for p in pairs if isinstance(p, Mapping)]
+
+    def _groups_of(pair: Mapping[str, Any]) -> set[str]:
+        return {
+            group
+            for group in (
+                _self_collision_geom_group(pair.get("name_a"), left_prefix, right_prefix),
+                _self_collision_geom_group(pair.get("name_b"), left_prefix, right_prefix),
+            )
+            if group is not None
+        }
+
+    groups: set[str] = set()
+    graded = False
+    for entry in pairs:
+        clearance = entry.get("clearance_m")
+        d_hard = entry.get("d_hard_m")
+        if not _is_finite(clearance) or not _is_finite(d_hard):
+            continue
+        graded = True  # this server publishes per-pair floors; trust them alone
+        if float(clearance) < float(d_hard):
+            groups |= _groups_of(entry)
+    if graded:
+        # A violated verdict whose breaching pair fell outside the published near list
+        # (viz_near_pairs_m truncation) must not silently highlight nothing.
+        return groups if groups else set(_SELF_COLLISION_GROUPS)
+    if pairs:
+        groups = _groups_of(pairs[0])
+        if groups:
+            return groups
+    pair = sc.get("pair") if isinstance(sc, Mapping) else None
+    if pair == "left_right":
+        return {"left_arm", "left_gripper", "right_arm", "right_gripper"}
+    if pair == "left_stand":
+        return {"left_arm", "left_gripper", "stand"}
+    if pair == "right_stand":
+        return {"right_arm", "right_gripper", "stand"}
+    return set(_SELF_COLLISION_GROUPS)  # unknown/legacy: conservative all-red
+
+
+def _urdf_part_meshes(
+    scene_handles: dict[str, Any], cache_key: str, urdf_handle: Any
+) -> dict[str, list[Any]] | None:
+    """Split one ViserUrdf's mesh nodes into {"arm": [...], "gripper": [...]}.
+
+    viser builds each mesh node's path through the URDF link that carries it, so the
+    link name is a path segment of the node name and _GRIPPER_URDF_LINKS decides the
+    group. Returns None when the handle exposes no usable mesh list or the URDF has
+    no gripper links — callers then fall back to whole-arm visibility, which is the
+    behavior this split refines, so a viser change degrades instead of breaking.
+
+    Cached per handle identity: the box-DH swap rebuilds the URDFs
+    (ensure_calibrated_arm_urdfs), and a stale list would drive removed nodes."""
+    cached = scene_handles.get(cache_key)
+    if isinstance(cached, dict) and cached.get("handle") is urdf_handle:
+        return cached.get("groups")
+    meshes = getattr(urdf_handle, "_meshes", None) if urdf_handle is not None else None
+    groups: dict[str, list[Any]] | None = None
+    if isinstance(meshes, (list, tuple)) and meshes:
+        arm: list[Any] = []
+        gripper: list[Any] = []
+        for handle in meshes:
+            name = getattr(handle, "name", None)
+            if not isinstance(name, str):
+                arm = []
+                break  # unrecognizable handles: do not guess, fall back
+            segments = set(name.split("/"))
+            (gripper if segments & _GRIPPER_URDF_LINKS else arm).append(handle)
+        if arm and gripper:
+            groups = {"arm": arm, "gripper": gripper}
+    scene_handles[cache_key] = {"handle": urdf_handle, "groups": groups}
+    return groups
+
+
+def _set_urdf_parts_visible(
+    scene_handles: dict[str, Any], cache_key: str, urdf_handle: Any,
+    *, arm_visible: bool, gripper_visible: bool,
+) -> bool:
+    """Drive an arm URDF's link meshes per body group. False when the URDF could not
+    be split, so the caller applies the un-split (whole-arm) visibility instead."""
+    groups = _urdf_part_meshes(scene_handles, cache_key, urdf_handle)
+    if groups is None:
+        return False
+    for handle in groups["arm"]:
+        _set_visible(handle, arm_visible)
+    for handle in groups["gripper"]:
+        _set_visible(handle, gripper_visible)
+    return True
+
+
+def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:
+    """Paint the colliding PARTS translucent red while self_collision.violated.
+
+    Driven by the server's self_collision telemetry, so monitor_only runs show the
+    overlay too. Only the body groups the violating pair names turn red, out of the
+    five the collision model has: left arm, right arm, left gripper, right gripper,
+    stand (see _self_collision_red_groups / _SELF_COLLISION_GROUPS). So two grippers
+    touching lights the two grippers, not two whole arms, and an arm folding onto the
+    stand leaves that arm's gripper normal. Where the URDF cannot be split into arm
+    and gripper meshes the group pair collapses back to the whole arm, which is the
+    behavior this refines.
+
+    pgmode real (physical_motion_expected=True): the ACTUAL robot (q_actual) turns
+    red. pgmode simulation: the commanded ghost (q_sent) turns red while the solid
+    robot keeps showing the true (stationary) state. External-box collision telemetry
+    is per-box only in this first pass, so any box collision turns both arms red."""
     if not isinstance(scene_handles, dict):
         return
     sc = getattr(latest, "self_collision", None) if latest is not None else None
     violated = isinstance(sc, Mapping) and bool(sc.get("violated", False))
     box_collision = _external_box_collision(sc)
     _update_self_collision_witness_markers(scene_handles, sc, violated)
-    pair = sc.get("pair") if isinstance(sc, Mapping) else None
-    if violated and pair not in ("left_right", "left_stand", "right_stand"):
-        pair = "all"  # unknown/legacy pair info: keep the conservative all-red
-    left_red = box_collision or (violated and pair in ("left_right", "left_stand", "all"))
-    right_red = box_collision or (violated and pair in ("left_right", "right_stand", "all"))
-    stand_red = violated and pair in ("left_stand", "right_stand", "all")
+    red = _self_collision_red_groups(sc, violated, box_collision)
+    stand_red = "stand" in red
     physical_real = latest is not None and (
         getattr(latest.left, "physical_motion_expected", None) is True
         or getattr(latest.right, "physical_motion_expected", None) is True
     )
 
-    if violated or box_collision:
-        for key, arm_state, arm_red in (
-            ("left_urdf_collision", latest.left, left_red),
-            ("right_urdf_collision", latest.right, right_red),
-        ):
-            handle = scene_handles.get(key)
-            if handle is None or not arm_red:
-                continue
+    for side, arm_state in (("left", getattr(latest, "left", None)),
+                            ("right", getattr(latest, "right", None))):
+        arm_red = f"{side}_arm" in red
+        gripper_red = f"{side}_gripper" in red
+        any_red = arm_red or gripper_red
+        overlay = scene_handles.get(f"{side}_urdf_collision")
+        if any_red and overlay is not None and arm_state is not None:
             q = arm_state.q_actual_deg if physical_real else (
                 arm_state.q_sent_deg if arm_state.q_sent_deg is not None else arm_state.q_actual_deg
             )
             try:
-                _update_urdf_config(handle, _joint_cfg_radians(q))
+                _update_urdf_config(overlay, _joint_cfg_radians(q))
             except Exception as exc:
                 scene_handles["urdf_collision_update_error"] = f"{type(exc).__name__}: {exc}"
+        # Red overlay: only the red groups' meshes, under a frame shown when either is.
+        _set_urdf_parts_visible(
+            scene_handles, f"_{side}_collision_mesh_groups", overlay,
+            arm_visible=arm_red, gripper_visible=gripper_red,
+        )
+        _set_visible(scene_handles.get(f"{side}_base_collision"), any_red)
+        # Replace (not overlap) the model the red overlay represents to avoid
+        # z-fighting at the identical configuration — per GROUP, only the red ones.
+        # In pgmode simulation the overlay replaces the commanded ghost instead, so
+        # the solid robot (q_actual) stays fully visible.
+        if not _set_urdf_parts_visible(
+            scene_handles, f"_{side}_solid_mesh_groups", scene_handles.get(f"{side}_urdf"),
+            arm_visible=not (arm_red and physical_real),
+            gripper_visible=not (gripper_red and physical_real),
+        ):
+            _set_visible(scene_handles.get(f"{side}_base"), not (any_red and physical_real))
+        else:
+            _set_visible(scene_handles.get(f"{side}_base"), True)
+        if any_red and not physical_real:
+            # The ghost is what the overlay replaces here. update_scene_markers owns
+            # the ghost FRAME (it re-shows it every tick from _reference_ghost_active),
+            # so hide the replaced meshes and leave the frame to it; only fall back to
+            # hiding the whole ghost when the split is unavailable.
+            if not _set_urdf_parts_visible(
+                scene_handles, f"_{side}_ref_mesh_groups", scene_handles.get(f"{side}_urdf_ref"),
+                arm_visible=not arm_red, gripper_visible=not gripper_red,
+            ):
+                _set_visible(scene_handles.get(f"{side}_base_ref"), False)
+        else:
+            _set_urdf_parts_visible(
+                scene_handles, f"_{side}_ref_mesh_groups", scene_handles.get(f"{side}_urdf_ref"),
+                arm_visible=True, gripper_visible=True,
+            )
 
-    _set_visible(scene_handles.get("left_base_collision"), left_red)
-    _set_visible(scene_handles.get("right_base_collision"), right_red)
     _set_visible(scene_handles.get("stand_mesh_collision"), stand_red)
     _set_visible(scene_handles.get("stand_mesh"), not stand_red)
-    # Replace (not overlap) the model the red overlay represents to avoid
-    # z-fighting at the identical configuration — per arm, only the red one.
-    _set_visible(scene_handles.get("left_base"), not (left_red and physical_real))
-    _set_visible(scene_handles.get("right_base"), not (right_red and physical_real))
-    if (violated or box_collision) and not physical_real:
-        if left_red:
-            _set_visible(scene_handles.get("left_base_ref"), False)
-        if right_red:
-            _set_visible(scene_handles.get("right_base_ref"), False)
+    _set_environment_red(scene_handles, "environment" in red)
+
+
+def _set_environment_red(scene_handles: dict[str, Any], red: bool) -> None:
+    """Recolour the env_* cell-structure boxes for the self-collision highlight.
+
+    These are add_box handles, not URDF meshes, so there is no translucent duplicate to
+    swap in the way the arms and the stand have — the box IS the drawing, and the
+    highlight is its colour. The nominal colour comes back from environment_rgb, so a
+    cleared violation restores exactly what the URDF asked for."""
+    names = scene_handles.get("environment_names")
+    if not isinstance(names, (list, tuple)):
+        return
+    nominal = scene_handles.get("environment_rgb")
+    nominal = nominal if isinstance(nominal, Mapping) else {}
+    for key in names:
+        handle = scene_handles.get(f"environment_{key}")
+        if handle is None:
+            continue
+        colour = _SELF_COLLISION_STAND_RGB if red else nominal.get(key)
+        if colour is None:
+            continue
+        try:
+            handle.color = tuple(colour)
+        except (TypeError, ValueError, AttributeError):
+            pass
 
 
 def _external_box_collision(sc: Mapping[str, Any] | None) -> bool:
@@ -1831,6 +2076,36 @@ def _ensure_near_pair_handle(
     return handle
 
 
+def _near_pair_band(
+    pair: Mapping[str, Any], clearance_m: float,
+    hard: float, slow: float, ext_hard: float, ext_slow: float,
+) -> tuple[str, str, tuple[int, int, int]]:
+    """(kind, band, rgb) for one near pair: which palette, and where in it.
+
+    THE PAIR'S OWN BAND WINS. `d_hard_m`/`d_slow_m` are published per pair because the
+    monitor enforces FIVE bands (self, intra-arm, gripper<->gripper, floor, keep-out
+    box) whose floors are an order of magnitude apart, while this function's caller can
+    only see external-vs-not. Measured 2026-09-06: the structural intra-arm
+    link3<->link5 pair sits at ~23 mm against its own 5 mm floor, so banding it against
+    the 40 mm self floor painted it HARD RED continuously — a permanent false alarm on
+    a pair that is not going to collide. The external/self split below is the fallback
+    for a server that does not publish the per-pair band."""
+    external = bool(pair.get("external", False))
+    d_hard = _finite_or(pair.get("d_hard_m"), ext_hard if external else hard)
+    d_slow = _finite_or(pair.get("d_slow_m"), ext_slow if external else slow)
+    if external:
+        kind = "ext"
+        palette = (_EXTERNAL_NEAR_HARD_RGB, _EXTERNAL_NEAR_CAUTION_RGB, _EXTERNAL_NEAR_OK_RGB)
+    else:
+        kind = "self"
+        palette = (_SELF_COLLISION_NEAR_HARD_RGB, _SELF_COLLISION_NEAR_CAUTION_RGB, _SELF_COLLISION_NEAR_OK_RGB)
+    if clearance_m < d_hard:
+        return kind, "hard", palette[0]
+    if clearance_m < d_slow:
+        return kind, "caution", palette[1]
+    return kind, "ok", palette[2]
+
+
 def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
     """Show/update the URDF-mesh close-call segments from self_collision.near_pairs.
     A thin tube spans each checked pair's witness points, colored by clearance band.
@@ -1863,23 +2138,8 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
                     clearance = pair.get("clearance_m")
                     if a is None or b is None or not isinstance(clearance, (int, float)):
                         continue
-                    c = float(clearance)
-                    external = bool(pair.get("external", False))
-                    # Per-category thresholds + palette: floor pairs are violet/cyan/blue
-                    # banded against the external d_hard/d_slow; self pairs red/amber/green.
-                    d_hard, d_slow = (ext_hard, ext_slow) if external else (hard, slow)
-                    if external:
-                        palette = (_EXTERNAL_NEAR_HARD_RGB, _EXTERNAL_NEAR_CAUTION_RGB, _EXTERNAL_NEAR_OK_RGB)
-                        kind = "ext"
-                    else:
-                        palette = (_SELF_COLLISION_NEAR_HARD_RGB, _SELF_COLLISION_NEAR_CAUTION_RGB, _SELF_COLLISION_NEAR_OK_RGB)
-                        kind = "self"
-                    if c < d_hard:
-                        band, rgb = "hard", palette[0]
-                    elif c < d_slow:
-                        band, rgb = "caution", palette[1]
-                    else:
-                        band, rgb = "ok", palette[2]
+                    kind, band, rgb = _near_pair_band(
+                        pair, float(clearance), hard, slow, ext_hard, ext_slow)
                     key = f"{i}_{kind}_{band}"
                     handle = _ensure_near_pair_handle(server, scene_handles, key, math.dist(a, b), rgb)
                     if handle is None:
@@ -1891,6 +2151,15 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
                     used_keys.add(key)
     for key, entry in cache.items():
         _set_visible(entry["handle"], show and key in used_keys)
+
+
+def _is_finite(value: Any) -> bool:
+    """True for a real, finite number. bool is rejected: JSON `true` must not read as 1."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 def _finite_or(value: Any, default: float) -> float:
@@ -2173,6 +2442,276 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
             handles["stand_mesh_collision_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
     except Exception as exc:
         handles["stand_mesh_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
+
+
+# CELL FURNITURE (the work table, and the riser between it and the stand base plate).
+# These are things the operator sees in the room but the viewer used to draw nothing
+# for, so the rendered scene ended at the stand and the arms appeared to reach into
+# empty space.
+#
+# The rule here is the stand mesh's rule, for the stand mesh's reason: the dimensions
+# and the pose live in the UNIFIED URDF and are read from it, never written as
+# constants in this module. Hardcoding the stand's visual origin here is exactly how
+# the RB3 -> RB5 swap shipped a stand rotated 90 deg (see _stand_visual_from_urdf).
+# Anything named env_* under the `stand` link is picked up with no further GUI change,
+# so adding a second table later is a URDF edit, not a code edit.
+#
+# VISUAL ONLY, DELIBERATELY. The CollisionMonitor builds from
+# buildGeom(..., pinocchio::COLLISION, ...), so a link carrying only <visual> adds
+# zero geoms and the checked pair set is unchanged. Putting the table INTO the
+# collision model is a separate, reviewed decision (it would start braking the arms
+# on a surface whose measured pose has never been validated against contact).
+_ENVIRONMENT_LINK_PREFIX = "env_"
+# Only used when a link's visual carries no <material><color>: a neutral mid-gray,
+# distinct from the stand's (90, 90, 90) so furniture does not read as structure.
+_ENVIRONMENT_DEFAULT_RGB = (140, 136, 128)
+# The one env_* link the operator can retune from the GUI (see set_riser_height_m).
+_ENVIRONMENT_RISER_LINK = "env_stand_riser"
+# Sanity bounds on that live value. Not a safety limit -- nothing reads the furniture
+# but the renderer -- just a guard so a fat-fingered entry cannot put the tables in
+# orbit and leave the operator wondering where the scene went.
+_ENVIRONMENT_RISER_MIN_M = 0.02
+_ENVIRONMENT_RISER_MAX_M = 1.50
+
+
+def _urdf_origin(element: Any) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """A URDF <origin> child's (xyz, rpy), defaulting to identity as URDF specifies."""
+    origin = element.find("origin") if element is not None else None
+    if origin is None:
+        return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+    xyz = tuple(float(v) for v in (origin.get("xyz") or "0 0 0").split())
+    rpy = tuple(float(v) for v in (origin.get("rpy") or "0 0 0").split())
+    if len(xyz) != 3 or len(rpy) != 3:
+        raise ValueError(f"malformed <origin> xyz={origin.get('xyz')} rpy={origin.get('rpy')}")
+    return xyz, rpy
+
+
+def _urdf_transform(xyz: tuple[float, float, float], rpy: tuple[float, float, float]) -> Any:
+    return _pose_transform(xyz, _rpy_to_wxyz(*rpy))
+
+
+def _link_pose_in(root: Any, link_name: str, base_link: str) -> Any | None:
+    """Compose fixed-joint origins from `base_link` down to `link_name`.
+
+    Returns None when the link is not reachable from base_link through FIXED joints
+    only — a movable joint on the path would make the pose configuration-dependent,
+    which is not what cell furniture is."""
+    parents: dict[str, tuple[str, Any]] = {}
+    for joint in root.findall("joint"):
+        child = joint.find("child")
+        parent = joint.find("parent")
+        if child is None or parent is None:
+            continue
+        parents[child.get("link", "")] = (parent.get("link", ""), joint)
+    transform = _pose_transform((0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))
+    name = link_name
+    for _ in range(32):  # depth guard: a URDF cycle must not hang the viewer
+        if name == base_link:
+            return transform
+        entry = parents.get(name)
+        if entry is None:
+            return None
+        parent_name, joint = entry
+        if joint.get("type") != "fixed":
+            return None
+        xyz, rpy = _urdf_origin(joint)
+        transform = _multiply_transform(_urdf_transform(xyz, rpy), transform)
+        name = parent_name
+    return None
+
+
+def _environment_visuals_from_urdf(urdf_path: Path) -> list[dict[str, Any]]:
+    """Every env_* link's <visual> in the unified URDF, posed in the stand frame.
+
+    Each entry is {name, shape, position, wxyz, rgb, opacity} plus either
+    `dimensions` (box, metres) or `mesh_path` + `mesh_scale`. Unreadable or
+    unsupported entries are skipped with `error` set, so one bad link cannot cost
+    the operator the rest of the furniture."""
+    import xml.etree.ElementTree as ET
+
+    out: list[dict[str, Any]] = []
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except Exception as exc:
+        return [{"name": "", "error": f"{type(exc).__name__}: {exc}"}]
+    for link in root.findall("link"):
+        name = link.get("name", "")
+        if not name.startswith(_ENVIRONMENT_LINK_PREFIX):
+            continue
+        link_pose = _link_pose_in(root, name, "stand")
+        if link_pose is None:
+            out.append({"name": name, "error": "not fixed to the stand link"})
+            continue
+        for index, visual in enumerate(link.findall("visual")):
+            entry: dict[str, Any] = {"name": name if index == 0 else f"{name}_{index}"}
+            try:
+                xyz, rpy = _urdf_origin(visual)
+                pose = _multiply_transform(link_pose, _urdf_transform(xyz, rpy))
+                rotation, position = pose
+                entry["position"] = position
+                entry["wxyz"] = _matrix_to_wxyz(rotation)
+                geometry = visual.find("geometry")
+                box = geometry.find("box") if geometry is not None else None
+                mesh = geometry.find("mesh") if geometry is not None else None
+                if box is not None:
+                    dims = tuple(float(v) for v in (box.get("size") or "").split())
+                    if len(dims) != 3:
+                        raise ValueError(f"<box size=\"{box.get('size')}\">")
+                    entry["shape"] = "box"
+                    entry["dimensions"] = dims
+                elif mesh is not None and mesh.get("filename"):
+                    entry["shape"] = "mesh"
+                    entry["mesh_path"] = (urdf_path.parent / mesh.get("filename")).resolve()
+                    scale = tuple(float(v) for v in (mesh.get("scale") or "1 1 1").split())
+                    entry["mesh_scale"] = scale if len(scale) == 3 else (1.0, 1.0, 1.0)
+                else:
+                    raise ValueError("no <box> or <mesh> geometry")
+                color = visual.find("material/color")
+                rgba = tuple(float(v) for v in (color.get("rgba") or "").split()) if color is not None else ()
+                entry["rgb"] = (tuple(int(round(255 * c)) for c in rgba[:3])
+                                if len(rgba) >= 3 else _ENVIRONMENT_DEFAULT_RGB)
+                entry["opacity"] = float(rgba[3]) if len(rgba) == 4 else 1.0
+            except Exception as exc:
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+            out.append(entry)
+    return out
+
+
+def _add_environment_visuals(server: Any, handles: dict[str, Any]) -> None:
+    """Draw the env_* furniture from the unified URDF under /stand/env_*."""
+    entries = _environment_visuals_from_urdf(_unified_urdf_path())
+    names: list[str] = []
+    nominal: dict[str, tuple] = {}
+    rgb: dict[str, tuple] = {}
+    for entry in entries:
+        key = entry.get("name") or "env"
+        if entry.get("error"):
+            handles[f"environment_error_{key}"] = _asset_error(f"{key}: {entry['error']}")
+            continue
+        try:
+            if entry["shape"] == "box":
+                if not hasattr(server.scene, "add_box"):
+                    continue
+                handle = server.scene.add_box(
+                    f"/stand/{key}",
+                    color=entry["rgb"],
+                    dimensions=entry["dimensions"],
+                    position=entry["position"],
+                    wxyz=entry["wxyz"],
+                )
+            else:
+                import trimesh
+
+                mesh = trimesh.load_mesh(str(entry["mesh_path"]))
+                mesh.apply_scale(entry["mesh_scale"])
+                try:
+                    mesh.visual.face_colors = (*entry["rgb"], 255)
+                except Exception:  # pragma: no cover - trimesh visual variants
+                    pass
+                handle = server.scene.add_mesh_trimesh(
+                    f"/stand/{key}", mesh=mesh,
+                    position=entry["position"], wxyz=entry["wxyz"],
+                )
+        except Exception as exc:
+            handles[f"environment_error_{key}"] = _asset_error(f"{key}: {type(exc).__name__}: {exc}")
+            continue
+        handles[f"environment_{key}"] = handle
+        # The URDF geometry is the BASELINE every later adjustment is computed from.
+        # Keeping it means set_riser_height_m() can be called any number of times
+        # without the corrections compounding, and "back to the URDF value" is always
+        # one call away.
+        nominal[key] = (tuple(entry.get("dimensions", ())), tuple(entry["position"]))
+        rgb[key] = tuple(entry["rgb"])
+        names.append(key)
+    handles["environment_names"] = names
+    handles["environment_nominal"] = nominal
+    # Kept separately from `nominal` (which set_riser_height_m unpacks positionally):
+    # the colour is what update_self_collision_overlay swaps to red and back.
+    handles["environment_rgb"] = rgb
+
+
+def set_environment_visible(scene_handles: dict[str, Any], visible: bool) -> None:
+    """Show/hide the cell furniture (GUI toggle). Solid geometry occludes the arms
+    from below, so the operator needs to be able to take it away."""
+    for key in scene_handles.get("environment_names", ()):
+        _set_visible(scene_handles.get(f"environment_{key}"), bool(visible))
+
+
+def environment_riser_nominal_height_m(scene_handles: Mapping[str, Any]) -> float | None:
+    """The riser height the URDF ships, i.e. what the operator is adjusting away from."""
+    nominal = scene_handles.get("environment_nominal") or {}
+    entry = nominal.get(_ENVIRONMENT_RISER_LINK)
+    if not entry or len(entry[0]) != 3:
+        return None
+    return float(entry[0][2])
+
+
+def environment_riser_height_m(scene_handles: Mapping[str, Any]) -> float | None:
+    """The riser height currently drawn (the operator's value, or the URDF's)."""
+    current = scene_handles.get("environment_riser_height_m")
+    if isinstance(current, (int, float)):
+        return float(current)
+    return environment_riser_nominal_height_m(scene_handles)
+
+
+def environment_table_top_z_m(scene_handles: Mapping[str, Any]) -> float | None:
+    """Stand-frame z of the drawn table tops, which is what the operator is really
+    judging when they adjust the riser: the riser's underside IS the table top."""
+    nominal = scene_handles.get("environment_nominal") or {}
+    entry = nominal.get(_ENVIRONMENT_RISER_LINK)
+    height = environment_riser_height_m(scene_handles)
+    if not entry or height is None or len(entry[0]) != 3:
+        return None
+    top = float(entry[1][2]) + float(entry[0][2]) / 2.0   # riser top = plate underside
+    return top - height
+
+
+def set_riser_height_m(scene_handles: dict[str, Any], height_m: float) -> str:
+    """Re-draw the riser at `height_m`, carrying the tables with it.
+
+    THE RISER IS THE ONE FURNITURE DIMENSION THAT IS NOT REALLY KNOWN. Its columns
+    measured 280-290 mm and the URDF models 300, so the drawn table top is 10-20 mm
+    low; rather than freeze a wrong number, the operator dials it in against what
+    they can see and the settled value goes back into the URDF generator.
+
+    The riser hangs from the stand base plate's underside, so its TOP is fixed and it
+    grows downward; the tables sit ON its underside, so they travel with it. Every
+    position is recomputed from the URDF baseline, never from the current one.
+    Returns "" on success, else why it was refused."""
+    nominal = scene_handles.get("environment_nominal") or {}
+    riser = nominal.get(_ENVIRONMENT_RISER_LINK)
+    if not riser or len(riser[0]) != 3:
+        return f"no {_ENVIRONMENT_RISER_LINK} box in the unified URDF"
+    try:
+        height = float(height_m)
+    except (TypeError, ValueError):
+        return f"riser height {height_m!r} is not a number"
+    if not math.isfinite(height) or not (_ENVIRONMENT_RISER_MIN_M <= height <= _ENVIRONMENT_RISER_MAX_M):
+        return (f"riser height {height} m is outside "
+                f"[{_ENVIRONMENT_RISER_MIN_M}, {_ENVIRONMENT_RISER_MAX_M}] m")
+    dims, position = riser
+    nominal_height = float(dims[2])
+    top_z = float(position[2]) + nominal_height / 2.0
+    handle = scene_handles.get(f"environment_{_ENVIRONMENT_RISER_LINK}")
+    if handle is None:
+        return f"{_ENVIRONMENT_RISER_LINK} is not drawn"
+    try:
+        handle.dimensions = (float(dims[0]), float(dims[1]), height)
+        handle.position = (float(position[0]), float(position[1]), top_z - height / 2.0)
+        shift = nominal_height - height       # riser shorter -> everything under it rises
+        for key in scene_handles.get("environment_names", ()):
+            if key == _ENVIRONMENT_RISER_LINK:
+                continue
+            other = nominal.get(key)
+            other_handle = scene_handles.get(f"environment_{key}")
+            if other is None or other_handle is None:
+                continue
+            x, y, z = other[1]
+            other_handle.position = (float(x), float(y), float(z) + shift)
+    except Exception as exc:  # pragma: no cover - viser handle already gone
+        return f"{type(exc).__name__}: {exc}"
+    scene_handles["environment_riser_height_m"] = height
+    return ""
 
 
 _ARM_URDF_HANDLE_KEYS = (
@@ -2551,6 +3090,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         # lazily build the unified collision-hull URDF from the runtime manifest.
         handles["_server"] = server
         _add_stand_mesh(server, handles)
+        _add_environment_visuals(server, handles)
         _add_robot_urdfs(server, handles)
         urdf_loaded = "left_urdf" in handles and "right_urdf" in handles
         if urdf_loaded:

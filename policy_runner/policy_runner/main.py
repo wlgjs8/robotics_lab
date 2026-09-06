@@ -393,6 +393,10 @@ def run(
             config.servo_command.timeout_sec,
         )
     source = source or make_action_source(config)
+    if getattr(source, "velproprio_source", None) == "servo_command":
+        # Collect coordinator samples during startup/Init/tare too. Sampling
+        # remains cut off at each frozen observation's server timestamp.
+        state_client.enable_servo_command_history()
     abort_on_fault_latch = (
         _runner_role(config, source, str(getattr(source, "name", config.action_source)))
         == "flow_infer"
@@ -1635,14 +1639,28 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--velproprio-source",
         default="measured",
-        choices=("measured", "command"),
+        choices=("measured", "command", "servo_command"),
         help=(
             "Source stream for velocity* proprio finite differences (openpi-remote only). "
             "'measured' (default) uses live robot TCP pose. 'command' uses the runner's emitted "
             "absolute TcpPoseTarget stream, matching UMI training semantics where velocity is "
-            "finite-differenced from the same trajectory the actions describe. Requires "
+            "finite-differenced from the same trajectory the actions describe. "
+            "'servo_command' uses timestamped servo-coordinator q_sent FK history; "
+            "it is neither a controller ACK nor encoder feedback. Both command sources require "
             "--velproprio-sample-mode fixed_step and --proprio-mode velocity*."
         ),
+    )
+    flow_infer.add_argument(
+        "--chunk-activation-mode",
+        choices=("fixed_steps", "ready_event"),
+        default="fixed_steps",
+        help="Activate at the fixed execution boundary, or the first policy-row deadline after a fresh result is ready.",
+    )
+    flow_infer.add_argument(
+        "--tcp-target-profile",
+        choices=("flow_infer_smooth", "flow_infer_fresh"),
+        default="flow_infer_smooth",
+        help="Explicit server-owned Cartesian profile; flow_infer_fresh must exist in the running tracked stack.",
     )
     flow_infer.add_argument(
         "--include-depth",
@@ -2495,6 +2513,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             run_direct_bc_ensemble_offline_eval,
             run_direct_bc_offline_eval,
             run_flow_offline_eval,
+            validate_chunk_activation_mode,
         )
         from .gripper import GripperCommand, GripperRuntime
         from .openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
@@ -2506,6 +2525,20 @@ def _main_with_subcommands(argv: list[str]) -> int:
             send_dryrun_commands=args.send_dryrun_commands,
         )
         try:
+            validate_chunk_activation_mode(
+                args.chunk_activation_mode,
+                rtc_enabled=bool(args.rtc),
+                stitch_mode=args.chunk_stitch_mode,
+                sequential=bool(args.sequential_chunk_inference),
+                anchor_source=args.chunk_anchor_source,
+                prefetch_at=args.stream_prefetch_at,
+                training_replay=args.training_episode_hdf5 is not None,
+            )
+            if args.velproprio_source == "servo_command":
+                if not str(args.checkpoint).startswith(OPENPI_CHECKPOINT_PREFIX):
+                    raise ValueError("--velproprio-source servo_command requires an openpi:// checkpoint")
+                if args.velproprio_sample_mode != "fixed_step" or not args.proprio_mode.startswith("velocity"):
+                    raise ValueError("--velproprio-source servo_command requires fixed_step and velocity* proprio")
             if str(args.checkpoint).startswith(OPENPI_CHECKPOINT_PREFIX):
                 checkpoint_kind = "openpi_remote"
                 dataset_stats = None
@@ -3004,6 +3037,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 )
             source.runner_role = "flow_infer"
             source.name = "flow_infer"
+            source.tcp_target_profile = args.tcp_target_profile
             source.configure_rollout_step_log(args.rollout_step_log)
             if args.rollout_step_log:
                 print(
@@ -3081,6 +3115,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     "kicks at this consumed-step index (RTC frozen prefix = execute_steps - this)",
                     flush=True,
                 )
+            source.configure_chunk_activation(args.chunk_activation_mode)
+            print(
+                f"[flow-infer] chunk_activation_mode={args.chunk_activation_mode} "
+                f"tcp_target_profile={args.tcp_target_profile}",
+                flush=True,
+            )
             if source.chunk_anchor_source != "actual":
                 _anchor_desc = {
                     "command": "FK(q_sent) (command pose)",

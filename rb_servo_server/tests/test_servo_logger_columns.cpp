@@ -12,6 +12,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -95,6 +96,23 @@ int main() {
         sample.safety_projection.constraint_count = 2;
         sample.safety_projection.ceiling_clamped = true;
         sample.safety_projection.min_margin_m = 0.004;
+        // Retained reference displacement must remain visible when coverage is
+        // off; it is distinct from the current tick's applied deviation.
+        sample.left_force_control.covered = false;
+        sample.left_force_control.reference_deviation_m = {0.011, -0.022, 0.033};
+        sample.left_force_control.reference_deviation_rad = {-0.044, 0.055, -0.066};
+        sample.left_force_control.reference_strip_enabled = false;
+        sample.left_force_control.reference_reset_count = 9'007'199'254'740'993ULL;
+        sample.right_force_control.covered = true;
+        sample.right_force_control.reference_deviation_m = {-0.071, 0.082, -0.093};
+        sample.right_force_control.reference_deviation_rad = {0.104, -0.115, 0.126};
+        sample.right_force_control.reference_strip_enabled = true;
+        sample.right_force_control.reference_reset_count = 7;
+        rb_servo::Pose6D prefilter{0.11,-0.22,0.33,0,0,0};
+        prefilter.quaternion_xyzw=std::array<double,4>{0.0,0.0,0.6,0.8};
+        sample.left_cartesian_solve.follower_prefilter_stand=prefilter;
+        sample.left_cartesian_solve.follower_sample_velocity=rb_servo::Vec6{.01,.02,.03,.04,.05,.06};
+        sample.left_cartesian_solve.follower_sample_acceleration=rb_servo::Vec6{.1,.2,.3,.4,.5,.6};
         // Push REPEATEDLY, not once. ServoLogger::push() takes the ring mutex with
         // try_to_lock and DROPS the sample if the writer thread holds it -- deliberate,
         // documented RT behaviour, since a servo tick must never stall to log itself.
@@ -137,6 +155,9 @@ int main() {
         "init_motion_right_request_id",
         "left_follower_axis_duration_sec_2",
         "right_follower_target_velocity_5",
+        "left_follower_prefilter_stand_qw",
+        "right_follower_sample_velocity_5",
+        "left_follower_sample_acceleration_0",
         "left_follower_target_acceleration_0",
         "left_follower_advance_dir_z",
         "right_follower_output_smd_reseeded",
@@ -171,6 +192,45 @@ int main() {
             std::cerr << "missing column: " << name << "\n";
             return 1;
         }
+    }
+    auto column = [&](const std::string& name) -> std::string {
+        for (size_t i = 0; i < header_fields.size(); ++i) {
+            if (header_fields[i] == name) return row_fields[i];
+        }
+        return {};
+    };
+    if (std::abs(std::stod(column("left_follower_prefilter_stand_qw"))-.8)>1e-9 ||
+        std::abs(std::stod(column("left_follower_sample_velocity_5"))-.06)>1e-9 ||
+        std::abs(std::stod(column("left_follower_sample_acceleration_0"))-.1)>1e-9 ||
+        !column("right_follower_prefilter_stand_qw").empty() ||
+        !column("right_follower_sample_velocity_5").empty()) {
+        std::cerr << "sampled follower pose/derivative telemetry mismatch\n";return 1;
+    }
+    const char* reference_axes[] = {"x_m", "y_m", "z_m", "rx_rad", "ry_rad", "rz_rad"};
+    const double reference_values[2][6] = {
+        {0.011, -0.022, 0.033, -0.044, 0.055, -0.066},
+        {-0.071, 0.082, -0.093, 0.104, -0.115, 0.126},
+    };
+    const char* sides[] = {"left", "right"};
+    for (size_t side = 0; side < 2; ++side) {
+        for (size_t axis = 0; axis < 6; ++axis) {
+            const std::string name = std::string(sides[side]) + "_fc_reference_dev_" + reference_axes[axis];
+            const std::string value = column(name);
+            if (value.empty() || !std::isfinite(std::stod(value)) ||
+                std::abs(std::stod(value) - reference_values[side][axis]) > 1e-9) {
+                std::cerr << "incorrect reference deviation column: " << name << '\n';
+                return 1;
+            }
+        }
+    }
+    if (column("left_fc_reference_strip_enabled") != "0" ||
+        column("right_fc_reference_strip_enabled") != "1" ||
+        column("left_fc_reference_reset_count") != "9007199254740993" ||
+        column("right_fc_reference_reset_count") != "7" ||
+        column("left_fc_covered") != "0" ||
+        column("right_fc_covered") != "1") {
+        std::cerr << "incorrect reference lifecycle telemetry\n";
+        return 1;
     }
     std::cout << "servo_logger columns OK (" << header_fields.size()
               << " columns, header/row parity)\n";

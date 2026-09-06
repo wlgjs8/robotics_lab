@@ -834,7 +834,14 @@ safety:
       # 2026-06-19 rationale for the old value ("wider slow zone reduces boundary
       # chatter") is unchanged and still argues for the wider zone, not the narrower one.
       d_slow_m: 0.090
-      a_brake_m_s2: 3.0  # softer braking ramp near collision boundary
+      # 2026-09-06: 3.0 -> 4.5 m/s^2 (both self-collision families). The loader requires
+      # d_slow >= d_hard + v_max^2 / (2 a_brake) against the highest commanded TCP
+      # ceiling; that ceiling rose 0.50 -> 0.60 m/s (flow_infer max_linear_velocity),
+      # and 3.0 would have needed d_slow 0.100 / 0.085 m. Raising the brake keeps the
+      # hard and slow bands where they were (0.040/0.090, 0.025/0.067): a 0.6 m/s
+      # head-on approach now stops in 40 mm instead of 60. Still a third of the
+      # follower's own 12 m/s^2 linear acceleration limit.
+      a_brake_m_s2: 4.5  # 3.0 -> 4.5 (2026-09-06, see above)
       hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
       latency_s: 0.003   # small cushion for verdict/telemetry jitter without aggressive chatter
       # Intra-arm-only margin. Arm<->arm and arm<->stand keep the self values above.
@@ -886,12 +893,42 @@ safety:
         # off by ~20 mm at the rail ends and an exact check would let them touch.
         d_hard_m: 0.025
         d_slow_m: 0.067
-        a_brake_m_s2: 3.0
+        a_brake_m_s2: 4.5   # 3.0 -> 4.5 (2026-09-06, see the mesh note: v_max 0.60 needs d_hard + v^2/2a = 0.065 <= 0.067)
         hyst_m: 0.010
       # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
       # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
       # 장애물로 양팔과 페어링. shape: box|sphere|capsule|cylinder.
       # TODO(operator): 실제 치수/장착 오프셋으로 채운 뒤 주석 해제할 것(추측값 금지).
+      # CELL STRUCTURE (env_* geometry in the unified URDF). Today that is
+      # env_stand_riser, the 307 x 324 x 295 mm block between the stand base plate
+      # and the work table, which make_rb5_850e_urdfs.py emits with a <collision>
+      # (ENVIRONMENT entry "collision": True). Any env_* box that opts in lands here.
+      #
+      # 25/67, NOT the 40/90 self set, and the reason is measured. Over 1,075 poses
+      # sampled from servo_log_20260906_131740 the closest arm link came to 35.7 mm of
+      # the riser (left elbow, link3), so a 40 mm floor would clamp_hold on 1.1% of the
+      # postures the cell already uses and put 21.4% of them inside the slow band. At
+      # 25 mm nothing in that run violates and the margin to the closest approach is
+      # 10.7 mm -- comfortably outside the box's own ~6 mm position uncertainty (2.50 mm
+      # fit rms + 3.3 mm arm-to-arm bias). 25/67 is also not a new pair of numbers: it
+      # is what this stack shipped as its SELF set until 2026-09-05, and gripper_gripper
+      # still keeps it.
+      #
+      # The self set is wide because arm<->arm carries ~20 mm of dual-arm relative
+      # error; a tape-and-contact measured box does not, so it does not need that
+      # margin.
+      #
+      # a_brake and hyst are deliberately NOT pinned here: they inherit the self set,
+      # so a retune of the shared ramp carries into this class instead of silently
+      # leaving it behind. That inheritance is load-bearing for the braking invariant
+      # d_slow >= d_hard + v^2/(2*a): at the current ceiling (0.60 m/s) and the shared
+      # a_brake (4.5) the requirement is 0.025 + 0.60^2/9 = 0.065 <= 0.067. Pinning
+      # a_brake at 3.0 would need 0.085 and the loader refuses to start -- which is how
+      # this was caught. If a_brake is ever lowered, widen d_slow with it.
+      environment:
+        d_hard_m: 0.025
+        d_slow_m: 0.067
+        recover_speed_m_s: 0.0
       extra_collision: []
       #   - { name: left_wrist_camera,  shape: box, parent_frame: dual_rb3_730e_left_attachment_site,
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
@@ -2250,7 +2287,14 @@ cartesian_control:
         # consequence: ~17.5 N m*a transients at 5 m/s2 with the ~3.5 kg tool;
         # watch for EFT-residual spikes against the 30/35 N hard limits before
         # raising further.
-        max_linear_velocity_m_s: 0.45
+        # 2026-09-06: 0.45 -> 0.60. servo_log_20260906_131740.csv: knot linear demand
+        # p90 161-164 / p99 282-335 / max 572-579 mm/s while this cap was 450 -- the
+        # fastest reaches saturated, and (with the core time-stretch) stretched. The
+        # joint caps (dq 170 deg/s, ddq 1500-3000) had 40 % headroom at 0.45; the
+        # accel/jerk pair below is unchanged, so the profile between knots is as
+        # smooth as before, it only stops clipping the fast ones. Operator direction
+        # 2026-09-06: "follow the fast chunk actions as they are".
+        max_linear_velocity_m_s: 0.60   # 0.45 -> 0.60 (2026-09-06, see above)
         # 2026-07-31: speed_scale 1.0 trembling was diagnosed as SEGMENT
         # INFEASIBILITY, not roughness in the reference. The follower solves one
         # Ruckig segment per policy step with minimum_duration=dt, consumes only
@@ -2329,7 +2373,26 @@ cartesian_control:
         # near it. Revert this pair (not the accels) if trembling or micro-pauses
         # of the infeasibility kind reappear -- judge with tools/follower_feasibility.py.
         max_linear_jerk_m_s3: 2000.0    # 4000.0 -> 2000.0 (2026-08-28, see above)
-        max_angular_velocity_rad_s: 0.90
+        # 2026-09-06: 0.90 -> 1.40 rad/s (51.6 -> 80.2 deg/s). MEASURED on
+        # servo_log_20260906_123643.csv (pi0.5 rollout, 126 s): the policy's knot
+        # rotation rate was p50 6 / p90 21 / p99 56 deg/s on the left wrist with bursts
+        # to 84 deg/s, i.e. the 0.90 rad/s cap sat exactly at the policy's p99 and the
+        # top 1-2% of every wrist turn saturated here. Nothing below this cap was
+        # binding: joints ran 90-102 deg/s against dq_max 170, ddq 1500-3000 was never
+        # touched, and the arm tracked its command to 0.7-1.1 deg through the burst.
+        # What DID happen is that the plan ran 6 deg ahead of the sent command (core cap
+        # + output SMD 5.5 deg + IK throttle on 50-73% of ticks) and ended the run on
+        # the 0.10 rad chunk_follower_divergence latch at 120.0 s. FOUND WHILE FIXING
+        # IT: 557 of that window's ticks were FAILED Ruckig solves -- the target
+        # velocity clamp landed at v_max*(1+1e-9), which Ruckig rejects outright, so
+        # every knot faster than this cap broke the segment solve instead of
+        # saturating (chunk_follower_core.hpp clampInside; follower_solve_failures
+        # column). Raising the cap and fixing the clamp are both needed. 1.4 matches the
+        # umi_large_smooth profile the same arm already runs; the accel/jerk pair stays.
+        # Watch: output SMD angular lag (nf_angular 2.5 Hz) scales with rotation rate;
+        # if follower_output_smd_lag_rad grows past ~0.15 rad, raise nf_angular_hz
+        # before touching this again.
+        max_angular_velocity_rad_s: 1.40   # 0.90 -> 1.40 (2026-09-06, see above)
         max_angular_accel_rad_s2: 40.0   # 20.0 -> 40.0 (2026-08-14, binding; see above)
         max_angular_jerk_rad_s3: 4000.0  # 8000.0 -> 4000.0 (2026-08-28, paired with the linear halving above)
         discard_head_steps: 0     # v3 producer already removes rows emitted since observation
@@ -2448,6 +2511,17 @@ cartesian_control:
           damping_ratio: 1.0
           velocity_ff: true
           velocity_ff_lpf_hz: 0.0  # 0 = follow each domain's natural frequency
+          velocity_ff_linear_gain: 1.0
+          # 2026-09-06 14:44 both-arm vibration: same-delta offline replay
+          # reproduced the logged stage and isolated sampled-v/a feed-forward
+          # passing the 33 ms segment acceleration pulses through the SMD.
+          # Restore endpoint-velocity LPF conditioning: acceleration p95 L/R
+          # 7.29/12.60 -> 0.41/1.30 m/s^2, with position lag p95 1.24/6.01 mm.
+          # This is output evidence, not physical stability acceptance. Keep
+          # the existing reseed bounds; the earlier 13:17 lag/snap case still
+          # needs separate evaluation. Evidence: outputs/chunk_review_20260906_144454/
+          # replay/ablation/report.md. Same setting in flow_infer_fresh.
+          profile_feedforward: false
         # 2026-07-24: 1.0 -> 0.6 paired with smoothing_window 1. Removing the
         # positional moving-average restored waypoint fidelity but exposed the
         # model's row-to-row noise in the central-diff accel feedforward
@@ -2516,7 +2590,14 @@ cartesian_control:
         # -noise hypothesis; raise corner_velocity_scale toward 1.0 to soften the cut.
         corner_deadband_lin_m: 0.0003        # 0.3 mm
         corner_deadband_ang_rad: 0.0005      # 0.029 deg
-        corner_velocity_scale: 0.25          # target-velocity ring-down at a reversal
+        # 2026-09-06: 0.25 -> 1.0 (velocity cut OFF, acceleration reset at a reversal
+        # kept). servo_log_20260906_131740.csv: the corner flag fired on 32-39 % of
+        # segments and per-axis target-velocity sign flips on 17-25 % with a MEDIAN
+        # magnitude of 1.7-2.3 mm/s / 0.2-0.3 deg/s -- knot noise, not reversals. Each
+        # false corner cut the boundary velocity 4x, which the next segment had to
+        # re-accelerate (T-slip, and under the core time-stretch a 2-3x longer
+        # segment). Genuine reversals are handled by the time-optimal profile itself.
+        corner_velocity_scale: 1.0           # 0.25 -> 1.0 (2026-09-06, see above)
         delta_twist_clear_residual_on_new_frame: true
         delta_twist_min_time_to_go_sec: 0.015
         delta_twist_tau_sec: 0.020
@@ -2566,6 +2647,18 @@ cartesian_control:
         # (5.73 deg) follower divergence latch (kPoseTrackReanchorAngTolRad):
         # above it the coarser chunk_follower_divergence fault fires first and
         # the lead diagnostic is lost.
+        # 2026-09-06 FAULT CRITERION MOVED TO THE ROBOT. Both plan-vs-command gates
+        # (this lead budget and the 0.10 rad / 50 mm divergence latch) measure the lag
+        # of our own chain whenever the arm is on its command, and servo_log_20260906_
+        # 123643.csv 120.0 s latched divergence on exactly that (plan 6 deg ahead of
+        # the sent command, arm 0.7-1.1 deg from it, during an 84 deg/s policy wrist
+        # turn). A breach is now EXCUSED -- no re-anchor, no fault, telemetry
+        # follower_divergence_excused_count / follower_cmd_track_* -- while the measured
+        # pose matches a command sent within the last 50 ms to half of this budget
+        # (dead-time tolerant, CommandTrackingWindow). Only the hard bound
+        # 0.10 m / 0.30 rad (kPoseTrackDivergenceHard*) still latches unconditionally.
+        # With v_ang 1.4 rad/s the honest 65 ms lag is ~5.2 deg: this budget WILL be
+        # touched on fast turns and that is now the excused case, not a fault.
         preview_max_actual_lead_rad: 0.08726646259       # 5.0 deg
         preview_max_consecutive_actual_lead_errors: 3
         # LEAD RE-ANCHOR BUDGET (2026-08-26). A lead breach used to latch outright.
@@ -2588,6 +2681,29 @@ cartesian_control:
         # arm is momentarily behind.
         preview_lead_reanchor_window_sec: 2.0
         preview_max_lead_reanchors_in_window: 5
+        # CHAIN LAG -> TIME, NOT FAULT (2026-09-06, docs/plans/plan_clock_time_stretch_
+        # 20260906.md). Two plan-clock gates, min-combined with safety.plan_gate:
+        #  * core time-stretch: a knot the v/a/j limits above cannot reach in one
+        #    policy period is reached in the time the profile needs (<= 4 periods)
+        #    instead of being truncated at one period and re-targeted from wherever
+        #    the profile got. The executed path is the policy's path at these limits;
+        #    only the KNOT clock slows. servo_log_20260906_123643.csv: the left wrist
+        #    ran projection errors to 18.5 deg (knot vs plan) on 53-84 deg/s requests
+        #    -- that content was being DROPPED, not delayed.
+        #  * divergence leash: the plan-vs-sent divergence (what the 50 mm / 0.10 rad
+        #    soft latch reads) ramps the plan clock from 1.0 at start down to 0.25 at
+        #    full == the soft bound, so the chain's lag (output SMD, throttle, rows)
+        #    cannot wind the divergence to the latch; the plan never stops (0.25).
+        # Telemetry: follower_core_gate, follower_leash_gate (plan_rate_gate = min
+        # of safety and leash). Rollback: both enables false == today's behaviour.
+        core_time_stretch_enable: true
+        core_time_stretch_max_ratio: 4.0
+        plan_leash_enable: true
+        plan_leash_start_m: 0.010
+        plan_leash_start_rad: 0.0349            # 2 deg
+        plan_leash_full_m: 0.050                # == kPoseTrackReanchorPosTolM
+        plan_leash_full_rad: 0.10               # == kPoseTrackReanchorAngTolRad
+        plan_leash_min_gate: 0.25
         # 2026-07-18 12:44: eight synchronized 10--360 ms Hold bounces in
         # 32 s repeatedly cold-seeded the follower at v=0 while the arms were
         # moving. Preserve the frozen chained position/velocity for a bounded
@@ -2603,6 +2719,89 @@ cartesian_control:
         fallback_policy: "hold"
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)
       max_smd_goal_lead_m: 0.080
+      max_smd_goal_lead_rad: 0.35
+    # Explicit experimental execution profile. Same limits as this stack's
+    # flow_infer_smooth; fresh retargeting, held resume and linear output FF differ.
+    flow_infer_fresh:
+      pose_track_smd:
+        enable: true
+        damping_ratio_linear: 1.0
+        damping_ratio_angular: 1.0
+        natural_frequency_linear_hz: 1.6
+        natural_frequency_angular_hz: 1.6
+        velocity_feedforward: true
+        max_linear_velocity_m_s: 0.5
+        max_linear_accel_m_s2: 1.2
+        max_angular_velocity_rad_s: 1.8
+        max_angular_accel_rad_s2: 5.0
+        reengage_relatch_max_step_m: 0.01
+        reengage_relatch_max_step_rad: 0.1
+        singularity_scale_full_sigma: 0.12
+        singularity_scale_floor_sigma: 0.05
+        singularity_scale_min: 0.12
+      ruckig_follower:
+        enable: true
+        controller: delta_preview
+        max_linear_velocity_m_s: 0.6
+        max_linear_accel_m_s2: 12.0
+        max_linear_jerk_m_s3: 2000.0
+        max_angular_velocity_rad_s: 1.4
+        max_angular_accel_rad_s2: 40.0
+        max_angular_jerk_rad_s3: 4000.0
+        discard_head_steps: 0
+        consume_steps: 8
+        reserve_steps: 4
+        smoothing_window: 1
+        output_smd:
+          enable: true
+          nf_linear_hz: 3.5
+          nf_angular_hz: 2.5
+          damping_ratio: 1.0
+          velocity_ff: true
+          velocity_ff_lpf_hz: 0.0
+          # 2026-09-06 recorded-reference tradeoff: less 2 Hz peaking / 3-20 Hz
+          # excitation with minimal added lag. Angular conditioning is unchanged.
+          velocity_ff_linear_gain: 0.8
+          # Acceleration feedforward remains off; see low-frequency evidence report.
+          profile_feedforward: false
+        af_damping_beta_lin: 1.0
+        af_damping_beta_ang: 1.0
+        corner_deadband_lin_m: 0.0003
+        corner_deadband_ang_rad: 0.0005
+        corner_velocity_scale: 1.0
+        delta_twist_clear_residual_on_new_frame: true
+        delta_twist_min_time_to_go_sec: 0.015
+        delta_twist_tau_sec: 0.02
+        delta_twist_residual_drain_steps: 1
+        delta_twist_max_residual_m: 0.006
+        delta_twist_max_residual_rad: 0.05
+        delta_twist_max_lead_m: 0.02
+        delta_twist_max_lead_rad: 0.06
+        delta_twist_stale_residual_timeout_sec: 0.15
+        preview_max_projection_error_m: 0.002
+        preview_max_projection_error_rad: 0.00436332313
+        preview_max_consecutive_projection_errors: 12
+        preview_projection_fault_policy: warn
+        preview_max_actual_lead_m: 0.035
+        preview_max_actual_lead_rad: 0.08726646259
+        preview_max_consecutive_actual_lead_errors: 3
+        preview_lead_reanchor_window_sec: 2.0
+        preview_max_lead_reanchors_in_window: 5
+        core_time_stretch_enable: true
+        core_time_stretch_max_ratio: 4.0
+        plan_leash_enable: true
+        plan_leash_start_m: 0.01
+        plan_leash_start_rad: 0.0349
+        plan_leash_full_m: 0.05
+        plan_leash_full_rad: 0.1
+        plan_leash_min_gate: 0.25
+        hold_bounce_resume_sec: 0.5
+        chunk_feed_timeout_sec: 1.5
+        fallback_policy: hold
+        engage_timeout_sec: 3.0
+        fresh_chunk_replan: true
+        continuous_hold_resume: true
+      max_smd_goal_lead_m: 0.08
       max_smd_goal_lead_rad: 0.35
   linear_move:
     min_duration_sec: 0.05

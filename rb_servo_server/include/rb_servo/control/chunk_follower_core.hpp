@@ -112,6 +112,10 @@ struct GuardConfig {
 struct SegmentSolve {
   ruckig::Result result{ruckig::Result::Error};
   double duration{0.0};
+  // Where the chained state was taken on the solved trajectory [s]. Legacy: dt. With
+  // the core time-stretch it is clamp(duration, dt, chain_max), i.e. the knot itself
+  // whenever the stretch covers the whole overrun (see solve()).
+  double chain_at_sec{0.0};
   double alpha{1.0};              // telemetry-compatible; predictive alpha is disabled
   bool   converged{false};       // duration ≈ dt (within tol) → in converging regime
   bool   corner{false};          // any axis rang down af→0 this segment
@@ -127,18 +131,21 @@ template <std::size_t N>
 class ChunkFollowerSegment {
  public:
   ChunkFollowerSegment(const std::array<AxisLimit, N>& limits, double dt,
-                       GuardConfig guard = {})
-      : limits_(limits), dt_(dt), guard_(guard) {
+                       GuardConfig guard = {}, bool preserve_current_state = false)
+      : limits_(limits), dt_(dt), guard_(guard),
+        preserve_current_state_(preserve_current_state) {
     prewarm();
   }
 
   // Swap limits/guards in place (profile change). The ruckig OTG object is
   // limit-agnostic (limits ride on each input), so no reconstruction and no
   // re-prewarm; chained state and the current trajectory are dropped.
-  void reconfigure(const std::array<AxisLimit, N>& limits, double dt, GuardConfig guard) {
+  void reconfigure(const std::array<AxisLimit, N>& limits, double dt, GuardConfig guard,
+                   bool preserve_current_state = false) {
     limits_ = limits;
     dt_ = dt;
     guard_ = guard;
+    preserve_current_state_ = preserve_current_state;
     have_state_ = false;
     have_traj_ = false;
   }
@@ -153,6 +160,9 @@ class ChunkFollowerSegment {
   }
 
   bool hasState() const { return have_state_; }
+  // A sampled-state preemption must never replay the displaced trajectory if
+  // both the next solve and its ring-down fail. Keep p/v/a, drop samples only.
+  void discardTrajectory() { have_traj_ = false; sample_offset_ = {}; }
 
   // TRANSLATE THE CHAINED STATE AND THE IN-FLIGHT SEGMENT BY `delta`, keeping the
   // velocity/acceleration state untouched. This is the force overlay's FOLD landing
@@ -205,8 +215,18 @@ class ChunkFollowerSegment {
   }
 
   // Build the guarded BVP, solve, and — on success — CHAIN the start state from
-  // the ruckig output at t=dt.
-  SegmentSolve solve(const BoundarySample<N>& sample) {
+  // the ruckig output at t = chain_at, where chain_at = clamp(duration, dt, chain_max).
+  //
+  // chain_max < 0 (the default) means chain_max = dt: the legacy contract, one policy
+  // period per segment, the overrun of an infeasible knot truncated and re-targeted
+  // from wherever the profile got. A chain_max above dt is the CORE TIME-STRETCH
+  // (2026-09-06): a knot the limits cannot reach in one period is reached in the time
+  // the time-optimal profile actually needs, the chained state is the knot itself
+  // (with its target velocity), and the caller lets the segment last that long. The
+  // executed path is then the policy's path at the follower's limits instead of a
+  // truncated one; the plan clock is what slows down. Bounded by chain_max so a
+  // pathological solve (a corner ring-down of several periods) cannot stall the clock.
+  SegmentSolve solve(const BoundarySample<N>& sample, double chain_max_sec = -1.0) {
     SegmentSolve out;
     if (!have_state_) return out;
 
@@ -229,9 +249,12 @@ class ChunkFollowerSegment {
     out.corner = corner;
     out.converged = out.duration <= dt_ * 1.001 + 1e-9;
 
-    // Chain (p0,v0,a0) ← ruckig OUTPUT at t=dt (never from measured encoder).
+    // Chain (p0,v0,a0) ← ruckig OUTPUT at t=chain_at (never from measured encoder).
+    const double chain_max = chain_max_sec > dt_ ? chain_max_sec : dt_;
+    const double chain_at = std::min(std::max(out.duration, dt_), chain_max);
+    out.chain_at_sec = chain_at;
     std::array<double, N> p, v, a;
-    traj.at_time(dt_, p, v, a);
+    traj.at_time(chain_at, p, v, a);
     p0_ = p; v0_ = v; a0_ = a;
     last_traj_ = traj;
     have_traj_ = true;
@@ -239,7 +262,7 @@ class ChunkFollowerSegment {
     return out;
   }
 
-  // Sample the current segment's trajectory at time t∈[0,dt] (per-2ms tick).
+  // Sample the current segment's trajectory at time t∈[0,chain_at] (per-2ms tick).
   bool sample(double t, std::array<double, N>& p, std::array<double, N>& v,
               std::array<double, N>& a) const {
     if (!have_traj_) return false;
@@ -267,6 +290,21 @@ class ChunkFollowerSegment {
     const double c = lim * (1.0 + eps);
     return x > c ? c : (x < -c ? -c : x);
   }
+  // Clamp strictly INSIDE the limit. Ruckig validates the TARGET state against the
+  // limits with a plain `vf > vMax` (ruckig.hpp validate_input, check_target_state_
+  // within_limits=true), so a target clamped to lim*(1+eps) -- 5e-10 above -- is an
+  // ErrorInvalidInput and the whole segment solve fails. MEASURED 2026-09-06,
+  // servo_log_20260906_123643.csv: 557 failed solves on the left arm, ALL inside the
+  // 118.68-120.0 s window where the policy asked the wrist for 53-84 deg/s against a
+  // 0.9 rad/s cap -- every knot faster than the limit broke the solve instead of
+  // saturating, the plan clock kept consuming knots against a frozen core (projection
+  // error 18.5 deg), and the run ended on the divergence latch. Right arm: 33 at
+  // 29.22 s. Targets are clamped inside the limit; the legacy current state keeps
+  // clampAbs. Continuous mode instead lets Ruckig brake from the exact state.
+  static double clampInside(double x, double lim, double eps) {
+    const double c = lim * (1.0 - eps);
+    return x > c ? c : (x < -c ? -c : x);
+  }
 
   // Legacy Δv-capacity feasibility of a dilated sample on ALL axes (cheap; no
   // ruckig call). Retained alongside dvCapacity for documentation/debugging; the
@@ -288,10 +326,16 @@ class ChunkFollowerSegment {
     bool corner = false;
     for (std::size_t d = 0; d < N; ++d) {
       const auto& L = limits_[d];
-      // start: chained state, ε-clamped to limits.
+      // A re-linearized sampled state can already lie outside a component limit
+      // in the new tangent. Clipping it invents an instantaneous v/a change.
+      // In the continuous mode, give Ruckig the exact current state and let its
+      // brake profile return within the SAME limits/jerk; target guards below
+      // remain unchanged. The legacy mode retains its epsilon clamp.
       in.current_position[d] = p0_[d];
-      in.current_velocity[d] = clampAbs(v0_[d], L.v_max, guard_.eps_clamp);
-      in.current_acceleration[d] = clampAbs(a0_[d], L.a_max, guard_.eps_clamp);
+      in.current_velocity[d] = preserve_current_state_ ? v0_[d] :
+          clampAbs(v0_[d], L.v_max, guard_.eps_clamp);
+      in.current_acceleration[d] = preserve_current_state_ ? a0_[d] :
+          clampAbs(a0_[d], L.a_max, guard_.eps_clamp);
 
       // target: pf unchanged; vf/af time-dilated by α (vf·α, af·α²) then damped.
       // Axes 0-2 are stand-frame translation, 3-5 the rotation vector about R0_ref_ (see
@@ -314,8 +358,18 @@ class ChunkFollowerSegment {
 
       in.current_position[d] = p0_[d];
       in.target_position[d] = s.pf[d];
-      in.target_velocity[d] = clampAbs(vf, L.v_max, guard_.eps_clamp);
-      in.target_acceleration[d] = clampAbs(af, L.a_max, guard_.eps_clamp);
+      // Target state strictly inside the limits (see clampInside). Ruckig additionally
+      // requires the velocity just BEFORE the target -- vf +/- af^2/(2 j_max), the
+      // velocity from which jerking the acceleration to af arrives at vf -- to be
+      // within [vMin, vMax], so a non-zero af eats into the reachable |vf|.
+      af = clampInside(af, L.a_max, guard_.eps_clamp);
+      double vf_hi = L.v_max * (1.0 - guard_.eps_clamp);
+      double vf_lo = -vf_hi;
+      const double af_margin = (af * af) / (2.0 * L.j_max);
+      if (af < 0.0) vf_hi = std::max(0.0, vf_hi - af_margin);
+      if (af > 0.0) vf_lo = std::min(0.0, vf_lo + af_margin);
+      in.target_velocity[d] = std::min(std::max(vf, vf_lo), vf_hi);
+      in.target_acceleration[d] = af;
       in.max_velocity[d] = L.v_max;
       in.max_acceleration[d] = L.a_max;
       in.max_jerk[d] = L.j_max;
@@ -327,6 +381,7 @@ class ChunkFollowerSegment {
   std::array<AxisLimit, N> limits_{};
   double dt_{1.0 / 30.0};
   GuardConfig guard_{};
+  bool preserve_current_state_{false};
 
   ruckig::Ruckig<N> otg_{};
   ruckig::Trajectory<N> last_traj_{};

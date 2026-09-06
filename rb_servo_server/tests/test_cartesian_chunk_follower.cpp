@@ -165,8 +165,77 @@ static void testFoldIsGaugeInvariant() {
   check(!b.absorbOffset(dp_inc, dR_inc), "absorbOffset declines while paused for a Hold");
 }
 
+// -- Test S: core time-stretch (2026-09-06). ---------------------------------
+// Knots turning at 1.0 rad/s against an angular v_max of 0.5 rad/s. Legacy: each
+// segment is truncated at one policy period, so the plan falls behind the knots
+// (projection error grows) while consuming one knot per period. Stretched: every
+// knot is reached (projection error ~ 0 once the seed artifact -- the first knot is
+// the seed pose itself with a 0.5 rad/s target velocity, a zero-displacement
+// reversal that costs ~0.4 s -- has been worked off), the same 600 ticks consume
+// about half the knots, and the per-tick step never exceeds the limit in either mode.
+struct StretchRun {
+  double max_ang_step = 0.0;
+  double max_proj_rad = 0.0;
+  double min_core_gate = 1.0;
+  double max_seg_len = 0.0;
+  int consumed = 0;
+  int solve_failures = 0;
+  double final_proj_rad = 0.0;   // projection error of the last segment (steady state)
+};
+static StretchRun runStretch(bool stretch) {
+  CartesianChunkFollowerConfig cfg;
+  cfg.window = {/*L*/ 2, /*C*/ 30, /*R*/ 2, /*smooth*/ 1};
+  cfg.lin = rb_servo::control::AxisLimit{1.0, 6.0, 30.0};
+  cfg.ang = rb_servo::control::AxisLimit{0.5, 12.0, 60.0};
+  cfg.core_time_stretch_enable = stretch;
+  cfg.core_time_stretch_max_ratio = 4.0;
+  CartesianChunkFollower f(cfg);
+  ChunkFrame frame = makeRef(40, 0.0, 1.0);
+  f.submitFrame(frame, frame.pose[static_cast<std::size_t>(cfg.window.discard_head_L)]);
+  StretchRun r;
+  Pose6D prev = f.tick(TICK);
+  for (int i = 0; i < 600; ++i) {
+    const Pose6D cur = f.tick(TICK);
+    r.max_ang_step = std::max(r.max_ang_step, rb_servo::math::orientationDistanceRad(prev, cur));
+    r.max_proj_rad = std::max(r.max_proj_rad, f.diag().projection_error_rad);
+    r.min_core_gate = std::min(r.min_core_gate, f.coreGate());
+    r.max_seg_len = std::max(r.max_seg_len, f.segmentLengthSec());
+    prev = cur;
+  }
+  r.consumed = f.windowConsumed();
+  r.solve_failures = f.diag().solve_failure_count;
+  r.final_proj_rad = f.diag().projection_error_rad;
+  return r;
+}
+static void testCoreTimeStretch() {
+  std::printf("Test S: core time-stretch reaches the knots at the limits, slower\n");
+  const StretchRun legacy = runStretch(false);
+  const StretchRun stretched = runStretch(true);
+  std::printf("    legacy    : consumed %d, max proj %.4f rad, max step %.5f rad, min gate %.2f, max seg %.4f s\n",
+              legacy.consumed, legacy.max_proj_rad, legacy.max_ang_step, legacy.min_core_gate, legacy.max_seg_len);
+  std::printf("    stretched : consumed %d, max proj %.4f rad, max step %.5f rad, min gate %.2f, max seg %.4f s\n",
+              stretched.consumed, stretched.max_proj_rad, stretched.max_ang_step, stretched.min_core_gate, stretched.max_seg_len);
+  check(legacy.solve_failures == 0 && stretched.solve_failures == 0,
+        "knots faster than v_max no longer break the solve (targets clamped inside the limits)");
+  check(legacy.min_core_gate == 1.0 && legacy.max_seg_len <= SEG + 1e-12, "legacy never stretches a segment");
+  check(stretched.min_core_gate < 0.75, "stretched: the knot clock slows (core gate < 0.75)");
+  check(stretched.max_seg_len > 1.5 * SEG && stretched.max_seg_len <= 4.0 * SEG + 1e-9,
+        "stretched segments last longer than a period, within max_ratio");
+  check(stretched.consumed < legacy.consumed, "stretched consumes fewer knots in the same wall time");
+  check(legacy.max_proj_rad > 0.01, "legacy truncation leaves the plan behind the knots");
+  // The first segment from rest cannot reach a 0.5 rad/s knot inside 4 periods, so it
+  // is truncated at the cap (max seg == 4 * SEG above) and leaves a residual; in steady
+  // state every knot needs ~2 periods, fits the cap, and is reached exactly.
+  check(stretched.max_proj_rad < 0.35 * legacy.max_proj_rad, "stretched: the projection error collapses to the capped residual");
+  check(stretched.final_proj_rad < 1e-6,
+        "stretched reaches the knots exactly once the overrun fits max_ratio");
+  check(legacy.max_ang_step <= 0.5 * TICK * 1.02 + 1e-9 && stretched.max_ang_step <= 0.5 * TICK * 1.02 + 1e-9,
+        "per-tick rotation stays within v_max in both modes");
+}
+
 int main() {
   testFoldIsGaugeInvariant();
+  testCoreTimeStretch();
   CartesianChunkFollowerConfig cfg;
   cfg.window = {/*L*/ 2, /*C*/ 10, /*R*/ 2, /*smooth*/ 3};
 

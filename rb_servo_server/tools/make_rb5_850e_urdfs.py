@@ -175,6 +175,171 @@ STAND_VISUAL_RPY = "0.0 0.0 0.0"
 STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver2/stand_hull_{i:03d}.stl"
                for i in range(20)]
 
+# ---------------------------------------------------------------------------
+# CELL FURNITURE (env_* links): the work table, and the riser that carries the
+# stand base plate above it. rb_gui draws anything named env_* that is fixed to
+# `stand` (scene.py _environment_visuals_from_urdf); nothing else reads these.
+#
+# VISUAL ONLY, ON PURPOSE. buildGeom(..., pinocchio::COLLISION, ...) is what the
+# CollisionMonitor loads, so a link with no <collision> adds zero geoms and the
+# checked pair set is untouched. Giving the table a collision shell would start
+# braking the arms against a surface whose pose has never been checked against
+# contact -- that is a separate decision with its own evidence, not a side effect
+# of wanting to see the table.
+#
+# THE FRAME, because every number below depends on it. Upstream ver2 models the
+# stand base plate as stand_base_col, a 0.24 x 0.30 x 0.015 box centred at
+# z = -0.0075, and the stand STL spans z -0.015 .. +0.6815. So:
+#     z = 0      the plate's TOP face -- where the stand bolts down
+#     z = -0.015 the plate's underside -- what the riser actually carries
+#     +X         out over the work area (the enforced ROI is x 0.300 .. 1.100)
+#     +Y         toward the LEFT arm (left mount y +0.19707)
+# Each entry's `xyz` is the BOX CENTRE in the stand frame, in metres.
+#
+# NOT MEASURED YET. There is no CAD for either part, so these stay empty until
+# the operator's tape measurements arrive. An empty list emits nothing and the
+# committed URDF is unchanged -- which is the right failure: a guessed table is
+# worse than no table, because the operator reads the gap between the drawn
+# surface and the arm as a real clearance.
+# RGBA NOTE. The tables are painted the SAME grey the viewer paints the stand,
+# because they are the same kind of thing to the operator: fixed structure that is
+# simply there. rb_gui paints the stand STL with _RB3_DARK_GRAY_RGB = (90, 90, 90)
+# (the STL carries no colour of its own), so 90/255 = 0.352941 here. Change one and
+# change the other. The riser is a lifted black -- darker than the stand so the
+# 300 mm block reads as a separate part, but off 0 so its faces still shade
+# (the same reason make_pika_tool_meshes.py lifts pla_black off 0).
+ENVIRONMENT: list[dict] = [
+    # 295, NOT the 300 first modelled, and it is a ROBOT MEASUREMENT rather than a tape
+    # one. 2026-09-06 13:33 the operator hand-parked both gripper tips down onto the
+    # table and held them there (servo_log_20260906_133253, last 10 s, both arms still
+    # to 0.1-0.2 mm). The TCP IS the fingertip plane, so a flat tip reads the surface
+    # directly. The LEFT arm settles it: its tool axis is 0.49 deg off vertical and all
+    # four tip corners fall within 1.0 mm, i.e. genuinely flat, at z -310.5 mm. Riser =
+    # 310 - 15 (the plate is 15 mm thick and z = 0 is its top face) = 295 mm.
+    # The right arm agrees to 1.1 mm on the quantity that is actually comparable -- its
+    # LOWEST tip corner, -309.4 -- but its tool axis reads 3.37 deg off vertical, so the
+    # model has only its -x edge touching and its TCP centre 4.5 mm higher. See the note
+    # in ENVIRONMENT's table entry; do not average the two TCP z values, they are not
+    # measuring the same thing.
+    # The F/T sensor could not arbitrate: ft_tare_state was empty in that run, so the
+    # compensated wrench is untared bias (AGENTS.md auto-tare gap), not contact.
+    # rb_gui can still retune this live (env_riser_height_m in ~/.rb_servo_gui/
+    # settings.json); bring any settled value back here with its evidence.
+    # FOOTPRINT 307 x 324, MEASURED. Two hand-parked poses (2026-09-06 13:43 and 13:52),
+    # both arms, all four blade tips against the riser, joints read off the boxes with
+    # rbpodo_read_state (read-only: it does not link rb::podo::Cobot, so it cannot command
+    # motion while somebody is standing in the cell). The second pose was taken with both
+    # grippers commanded FULLY OPEN, which is what makes the first one usable too: the
+    # meshes are baked at the measured open stop, so travel = 0, and the two poses then
+    # read the same faces to 1.7-4.1 mm. Had the jaws differed the readings would have
+    # moved by tens of mm -- an earlier attempt to solve for the opening as a free unknown
+    # returned -23 % (more closed than the mechanism closes), which was that free
+    # parameter absorbing arm-to-arm error, not evidence about the jaws.
+    # The fit is over all 8 finger meshes at once, three faces free (+x, +y, -y), each
+    # finger contributing its minimum signed distance to the box. Fitting the MESH rather
+    # than a single "outermost vertex" matters here: the blade tips straddle the block's
+    # top edge, so the outermost vertex sits beyond the +x face while other vertices of
+    # the same tip sit under the top face, and a per-face max reads ~20 mm too wide.
+    #     +x face +153.3    +y face +166.9    -y face -157.1    rms residual 2.50 mm
+    # -> Y span -157.1..+166.9 (324.0 wide, centre +4.9). X assumed concentric with the
+    #    stand plate because NOTHING EVER TOUCHED THE -x FACE -- only +153.3 is measured.
+    # Residual arm-to-arm bias: left -1.86 mm, right +1.41 mm. That 3.3 mm is the floor on
+    # this measurement, and it is the same dual-arm relative error that the box DH sync
+    # could not explain.
+    # HEIGHT 295 is from a separate measurement (servo_log_20260906_133253): both gripper
+    # tips parked flat DOWN on the table. That one does not depend on the jaw opening at
+    # all -- the TCP IS the fingertip plane, wherever the jaws are. The left tool axis was
+    # 0.49 deg off vertical with all four tip corners inside 1.0 mm at z -310.5 mm, and
+    # 310 - 15 (plate thickness, z = 0 is its top face) = 295. The right arm agreed to
+    # 1.1 mm on its lowest tip corner while sitting 3.37 deg tilted, which the operator
+    # confirmed was a real tilt. F/T could not arbitrate anything here: ft_tare_state was
+    # empty, so the compensated wrench is untared bias.
+    # CHECKED, not just drawn (2026-09-06). The riser is the ONE env_* box the arms
+    # actually approach: over 1,075 poses sampled from servo_log_20260906_131740 the
+    # closest arm link came within 35.7 mm of it (left elbow, link3), while both work
+    # tables stayed beyond 204 mm and never entered any barrier band. And nothing else
+    # guards it -- safety.floor_constraint and self_collision.mesh.ground_plane are both
+    # disabled, and the ground_plane comment says so explicitly: elbow/wrist descent is
+    # left to arm<->arm / arm<->stand self-collision, which the riser was not part of.
+    # Its band is safety.self_collision.mesh.environment (25/67 mm), NOT the 40/90 mm
+    # self set: at 40 mm those same recorded poses violate on 1.1% of ticks, which would
+    # clamp_hold the arm in a posture the cell already uses. See that config block.
+    {"name": "env_stand_riser", "size": (0.307, 0.324, 0.295), "xyz": (0.0, 0.0049, -0.1625),
+     "rgba": (0.20, 0.20, 0.21, 1.0), "collision": True,
+     "measured": "2026-09-06 two four-tip contact poses with the grippers fully open "
+                 "(rbpodo_read_state), 8-contact mesh fit, rms 2.50 mm, arm-to-arm bias "
+                 "3.3 mm; height 295 from tips-down on the table."},
+    # Two identical 800 mm cube tables butted along +X. The robot's riser stands on
+    # table 1; the place boxes sit on table 2. The X placement is NOT a tape
+    # measurement -- it is fitted to where the arms actually work in
+    # servo_log_20260906_122520: the pick tray bottoms out at TCP z -292 mm over
+    # x 356..518, and both place motions bottom out ~200 mm higher (box interiors) at
+    # x 644..792. Putting the riser flush with table 1's back edge is the only
+    # placement that puts the tray in the middle of table 1 AND the place boxes on
+    # table 2. Re-measure the riser's setback from table 1's back edge to confirm.
+    {"name": "env_work_table", "size": (0.80, 0.80, 0.80), "xyz": (0.25, 0.0, -0.710),
+     "rgba": (0.352941, 0.352941, 0.352941, 1.0),
+     "measured": "2026-09-06 operator: 800 x 800 x 800. Top z -310 mm follows the riser "
+                 "measurement above (table top = riser underside). X/Y placement fitted "
+                 "to the measured pick/place work regions, not taped."},
+    {"name": "env_work_table_2", "size": (0.80, 0.80, 0.80), "xyz": (1.05, 0.0, -0.710),
+     "rgba": (0.352941, 0.352941, 0.352941, 1.0),
+     "measured": "2026-09-06 operator: second 800 cube butted to table 1 at x +650, "
+                 "carrying the place boxes."},
+]
+
+
+def _environment_elements(spec: dict) -> tuple[ET.Element, ET.Element]:
+    """One env_* link (a box) plus its fixed joint to `stand`.
+
+    Visual only unless the entry sets `collision: True`. That flag is what puts the
+    box into the CHECKED set: buildGeom(..., pinocchio::COLLISION, ...) is what the
+    CollisionMonitor loads, so a <collision> here is the whole mechanism -- no
+    extra_collision entry, no second copy of the dimensions. A <box> becomes a coal
+    primitive, so it needs no convex hull STL.
+
+    Turning it on for a piece of furniture is a SAFETY decision, not a drawing one:
+    the arms will be braked and held against that surface, so its pose has to be
+    measured (the `measured` provenance below is mandatory either way) and it needs a
+    barrier band that its measured clearance actually clears --
+    safety.self_collision.mesh.environment in the stack config, which is the band
+    every env_* geometry is enforced against.
+    """
+    name = str(spec.get("name", ""))
+    if not name.startswith("env_"):
+        raise SystemExit(f"environment entry {name!r}: name must start with env_ "
+                         "(rb_gui picks furniture up by that prefix)")
+    size = tuple(float(v) for v in spec["size"])
+    xyz = tuple(float(v) for v in spec["xyz"])
+    if len(size) != 3 or min(size) <= 0.0:
+        raise SystemExit(f"{name}: size must be three positive metres, got {size}")
+    if len(xyz) != 3:
+        raise SystemExit(f"{name}: xyz must be three metres, got {xyz}")
+    if not str(spec.get("measured", "")).strip():
+        raise SystemExit(f"{name}: no `measured` provenance. Every furniture dimension "
+                         "is a tape measurement with no CAD behind it; record how and "
+                         "when it was taken or it cannot be re-checked.")
+    size_attr = " ".join(f"{v:.6g}" for v in size)
+    link = ET.Element("link", {"name": name})
+    visual = ET.SubElement(link, "visual")
+    ET.SubElement(visual, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+    geometry = ET.SubElement(visual, "geometry")
+    ET.SubElement(geometry, "box", {"size": size_attr})
+    material = ET.SubElement(visual, "material", {"name": name + "_material"})
+    rgba = tuple(float(v) for v in spec.get("rgba", (0.55, 0.52, 0.48, 1.0)))
+    ET.SubElement(material, "color", {"rgba": " ".join(f"{v:.4g}" for v in rgba)})
+    if spec.get("collision", False):
+        # The SAME box as the visual, from the same numbers, so what is drawn and what
+        # is checked cannot disagree. (Two sources is how an operator ends up reading
+        # the gap to a drawn surface as a real clearance.)
+        collision = ET.SubElement(link, "collision")
+        ET.SubElement(collision, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+        col_geometry = ET.SubElement(collision, "geometry")
+        ET.SubElement(col_geometry, "box", {"size": size_attr})
+    joint = _fixed_joint(name + "_fixed", "stand", name,
+                         " ".join(f"{v:.6g}" for v in xyz), "0.0 0.0 0.0")
+    return link, joint
+
 
 
 
@@ -244,6 +409,17 @@ def build(src: Path) -> ET.ElementTree:
     ET.SubElement(joint, "parent", {"link": "stand"})
     ET.SubElement(joint, "child", {"link": "stand_collision"})
     ET.SubElement(joint, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+
+    # (5) cell furniture: env_* boxes fixed to the stand (see ENVIRONMENT). Visual
+    # only unless the entry opts into `collision`, which is what adds it to the
+    # checked pair set (safety.self_collision.mesh.environment carries its band).
+    for spec in ENVIRONMENT:
+        name = str(spec.get("name", ""))
+        if root.find(f"link[@name='{name}']") is not None:
+            raise SystemExit(f"environment link {name} already exists in this URDF")
+        link, joint = _environment_elements(spec)
+        root.append(link)
+        root.append(joint)
 
     if replaced != 2 * sum(len(v) for v in ARM_COLLISION.values()):
         raise SystemExit(f"expected both arms' collision shells, replaced {replaced}")

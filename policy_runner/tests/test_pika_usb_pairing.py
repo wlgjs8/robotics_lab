@@ -172,6 +172,31 @@ class PikaUsbPairingTest(unittest.TestCase):
         pairing = self.resolve(_health(self.left_camera, self.right_camera, status="degraded"))
         self.assertEqual(pairing.arms["left"].camera_serial, LEFT_SERIAL)
 
+    def test_stale_video_leaf_requires_fresh_camera_health(self) -> None:
+        old_port = Path(self.left_camera)
+        old_port.rmdir()
+        new_port = old_port.with_name("video32")
+        new_port.mkdir()
+        with self.assertRaisesRegex(PikaUsbPairingError, "stale path after USB reconnect"):
+            self.resolve()
+        pairing = self.resolve(_health(str(new_port), self.right_camera))
+        self.assertEqual(pairing.arms["left"].gripper_tty, "ttyUSB9")
+        self.assertEqual(pairing.arms["left"].camera_physical_port, str(new_port))
+
+    def test_missing_camera_usb_node_is_refused(self) -> None:
+        (self.fixture.sysfs_usb / "4-1.2").unlink()
+        with self.assertRaisesRegex(PikaUsbPairingError, "USB device 4-1.2 is not present"):
+            self.resolve()
+
+    def test_physical_path_on_wrong_controller_is_refused(self) -> None:
+        device = self.fixture.sysfs_usb / "4-1.2"
+        wrong_device = self.fixture.root / "sys/devices/controller1/usb4/4-1/4-1.2"
+        wrong_device.mkdir(parents=True)
+        device.unlink()
+        device.symlink_to(wrong_device)
+        with self.assertRaisesRegex(PikaUsbPairingError, "does not belong to sysfs device"):
+            self.resolve()
+
     def test_unrelated_ch340_on_another_controller_is_ignored(self) -> None:
         self.fixture.add_gripper(
             bus=7,

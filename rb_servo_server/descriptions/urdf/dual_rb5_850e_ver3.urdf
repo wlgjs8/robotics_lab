@@ -612,4 +612,58 @@
     <child link="stand_collision" />
     <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
   </joint>
+  <link name="env_stand_riser">
+    <visual>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <box size="0.307 0.324 0.295" />
+      </geometry>
+      <material name="env_stand_riser_material">
+        <color rgba="0.2 0.2 0.21 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <box size="0.307 0.324 0.295" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="env_stand_riser_fixed" type="fixed">
+    <parent link="stand" />
+    <child link="env_stand_riser" />
+    <origin xyz="0 0.0049 -0.1625" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="env_work_table">
+    <visual>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <box size="0.8 0.8 0.8" />
+      </geometry>
+      <material name="env_work_table_material">
+        <color rgba="0.3529 0.3529 0.3529 1" />
+      </material>
+    </visual>
+  </link>
+  <joint name="env_work_table_fixed" type="fixed">
+    <parent link="stand" />
+    <child link="env_work_table" />
+    <origin xyz="0.25 0 -0.71" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="env_work_table_2">
+    <visual>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <box size="0.8 0.8 0.8" />
+      </geometry>
+      <material name="env_work_table_2_material">
+        <color rgba="0.3529 0.3529 0.3529 1" />
+      </material>
+    </visual>
+  </link>
+  <joint name="env_work_table_2_fixed" type="fixed">
+    <parent link="stand" />
+    <child link="env_work_table_2" />
+    <origin xyz="1.05 0 -0.71" rpy="0.0 0.0 0.0" />
+  </joint>
 </robot>

@@ -29,6 +29,7 @@ environment — e.g. run policy_runner inside the openpi .venv.
 from __future__ import annotations
 
 import os
+import copy
 import sys
 import threading
 import time
@@ -394,7 +395,7 @@ def anchored_chunk_to_deltas(chunk):
 # ~512 samples covers >1 s at any realistic control rate — only the last ~policy_dt
 # window is read, so this is a cheap bounded ring.
 _VELPROPRIO_HISTORY_MAXLEN = 512
-_VELPROPRIO_SOURCES = ("measured", "command")
+_VELPROPRIO_SOURCES = ("measured", "command", "servo_command")
 _VELPROPRIO_SAMPLE_MODES = ("replan", "fixed_step", "camera_frame")
 _CAMERA_TIME_MAX_PLAUSIBLE_AGE_SEC = 5.0
 _CAMERA_TIME_FUTURE_TOLERANCE_SEC = 0.010
@@ -587,6 +588,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             "right": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
         }
         self._last_command_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
+        self._servo_command_history: Any | None = None
+        self._servo_command_not_before_ns = 0
         self._last_now_monotonic: float | None = None
         self._last_obs_camera_bundle: Any | None = None
         self._last_obs_camera_time_sec: float | None = None
@@ -863,6 +866,14 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                     file=self.stderr,
                     flush=True,
                 )
+            elif self.velproprio_source == "servo_command":
+                print(
+                    "[flow-infer] velproprio_source=servo_command: coordinator attempted q_sent FK, "
+                    "not controller ACK; exact policy_dt body delta ending at the frozen state "
+                    "loop_start_time_ns, same-host monotonic clock required",
+                    file=self.stderr,
+                    flush=True,
+                )
         self._logged_wrist_shape = False
 
         # The server's first inference triggers torch compile/kernel autotune and can
@@ -894,6 +905,40 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         print(f"openpi remote: warmup done in {time.perf_counter() - started:.1f}s", file=self.stderr, flush=True)
 
     # ------------------------------------------------------------------ obs --
+
+    def _freeze_inference_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Capture selected gripper features once at request time, before queueing.
+
+        The arm window remains server-time aligned. Gripper command/feedback
+        has a separate existing source, so its *selection* time is identified
+        explicitly rather than pretending it is a server ACK/sample timestamp.
+        """
+        if (getattr(self, "velproprio_source", "measured") != "servo_command" or
+                self.proprio_mode not in ("velocity_grip", "velocity_grav")):
+            return payload
+        key = "_servo_command_proprio_observation"
+        if key in payload:
+            return payload  # Worker execution must never re-read live gripper state.
+        frozen = copy.deepcopy(payload)
+        clock = getattr(self, "_external_clock", None)
+        selected_ns = int(clock.now_ns()) if clock is not None else time.monotonic_ns()
+        block: dict[str, Any] = {
+            "selection_time_ns": selected_ns,
+            "time_semantics": "request_time_source_selection_not_device_sample_or_ack",
+            "source_option": str(getattr(self, "gripper_proprio_source", "actual")),
+            "arms": {},
+        }
+        stamp = payload.get("loop_start_time_ns")
+        block["selection_minus_state_ms"] = (selected_ns - stamp) * 1e-6 if isinstance(stamp, int) else None
+        for side in ("left", "right"):
+            value = self._proprio_gripper_percent(payload, side)
+            valid = value is not None and np.isfinite(value)
+            block["arms"][side] = {
+                "valid": bool(valid), "percent": float(value) if valid else None,
+                "source": self._gripper_proprio_state("_gripper_proprio_last_source").get(side),
+            }
+        frozen[key] = block
+        return frozen
     def _proprio_state(self, payload: dict[str, Any]) -> np.ndarray:
         """14-dim RESET-RELATIVE state (pi05 reset-relative retrain convention).
 
@@ -987,6 +1032,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                     "velproprio_source='command' requires a velocity proprio mode "
                     "('velocity', 'velocity_grip', or 'velocity_grav'), not proprio_mode='pose'"
                 )
+        if source == "servo_command":
+            if str(velproprio_sample_mode) != "fixed_step":
+                raise ValueError("velproprio_source='servo_command' requires velproprio_sample_mode='fixed_step'")
+            if str(proprio_mode) not in ("velocity", "velocity_grip", "velocity_grav"):
+                raise ValueError("velproprio_source='servo_command' requires a velocity proprio mode")
         return source
 
     @staticmethod
@@ -1067,6 +1117,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         return float(t_img_mono)
 
     def next_intent(self, snapshot, now_monotonic):  # type: ignore[override]
+        self._require_chunk_execution_profile(getattr(snapshot, "payload", None))
         self._last_now_monotonic = now_monotonic
         self._handle_server_motion_epoch(snapshot)
         blocked, guard_intent = self._camera_runtime_gate(float(now_monotonic))
@@ -1256,6 +1307,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         )
 
     def _before_policy_intent(self, snapshot, now_monotonic) -> None:  # type: ignore[override]
+        if getattr(self, "velproprio_source", "measured") == "servo_command":
+            # The state client records every UDP packet, including Init/tare and
+            # Hold. Binding a history does not change this observation's cutoff.
+            self._servo_command_history = getattr(snapshot, "servo_command_history", None)
+            return
         # The base class calls this only when inference may run, or after the
         # force-recovery clear has reset all pre-contact history. Thus camera-frame
         # velocity proprio can never bridge across a contact discontinuity.
@@ -1385,12 +1441,56 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         historical normalization behavior; camera_frame deliberately does no dt math.
         Defaults to 'replan' for sources constructed without the flag (legacy tests).
         """
+        if getattr(self, "velproprio_source", "measured") == "servo_command":
+            return self._arm_body_velocities_servo_command(payload)
         mode = getattr(self, "velproprio_sample_mode", "replan")
         if mode == "camera_frame":
             return self._arm_body_velocities_camera_frame(payload)
         if mode == "fixed_step":
             return self._arm_body_velocities_fixed_step(payload)
         return self._arm_body_velocities_replan(payload)
+
+    def _arm_body_velocities_servo_command(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
+        history = getattr(self, "_servo_command_history", None)
+        if history is None:
+            self._last_velproprio_diagnostics = {
+                "sample_mode": "fixed_step", "source": "servo_command", "valid": False,
+                "zero_reason": "servo_command_history_collector_unavailable",
+                "arms": {side: {"valid": False, "zero_reason": "history_collector_unavailable"}
+                         for side in ("left", "right")},
+            }
+            return {side: np.zeros(6, dtype=np.float64) for side in ("left", "right")}
+        clock = getattr(self, "_external_clock", None)
+        now = float(clock.now_ns()) * 1e-9 if clock is not None else time.monotonic()
+        velocities, diagnostics = history.body_deltas(
+            payload, policy_dt_sec=float(self.policy_dt_sec), now_monotonic=now,
+            not_before_ns=int(getattr(self, "_servo_command_not_before_ns", 0)),
+        )
+        camera_time = getattr(self, "_last_obs_camera_time_sec", None)
+        end_ns = diagnostics.get("window_end_time_ns")
+        if camera_time is not None and np.isfinite(camera_time):
+            diagnostics["camera_observation_monotonic_ns"] = round(float(camera_time) * 1e9)
+            diagnostics["camera_time_semantics"] = "existing_camera_raw_to_monotonic_mapping_or_receipt"
+            if end_ns is not None:
+                diagnostics["camera_minus_state_ms"] = (float(camera_time) - int(end_ns) * 1e-9) * 1e3
+        else:
+            diagnostics["camera_observation_monotonic_ns"] = None
+            diagnostics["camera_minus_state_ms"] = None
+        if self.proprio_mode in ("velocity_grip", "velocity_grav"):
+            frozen_gripper = payload.get("_servo_command_proprio_observation")
+            arms = frozen_gripper.get("arms", {}) if isinstance(frozen_gripper, dict) else {}
+            gripper_valid = all(
+                isinstance(arms.get(side), dict) and arms[side].get("valid") is True
+                and isinstance(arms[side].get("percent"), (int, float))
+                and np.isfinite(arms[side]["percent"])
+                for side in ("left", "right")
+            )
+            diagnostics["gripper_observation"] = copy.deepcopy(frozen_gripper)
+            if not gripper_valid:
+                diagnostics["valid"] = False
+                diagnostics["zero_reason"] = "frozen_gripper_observation_unavailable"
+        self._last_velproprio_diagnostics = diagnostics
+        return velocities
 
     def _arm_body_velocities_replan(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
         """Legacy: difference the TCP pose between successive proprio SAMPLES (replan
@@ -1683,6 +1783,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         for side in ("left", "right"):
             pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
             vel = vel_by_side[side]
+            if getattr(self, "velproprio_source", "measured") == "servo_command":
+                endpoint = getattr(self, "_last_velproprio_diagnostics", {}).get("arms", {}).get(side, {}).get("end_pose")
+                if endpoint is not None:
+                    pose = np.asarray(endpoint, dtype=np.float64)
             if self.ee_local_r_align is not None:
                 # Body deltas are in the RB TCP frame; the checkpoint trained in the
                 # EE (pika tip) frame -> v_tip = R_align . v_tcp (same as the pose path).
@@ -1704,9 +1808,21 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             if include_grip:
                 # ABSOLUTE gripper opening (matches the converter's _state_velocity_grip / _arm_velocity_grav).
                 # Source (measured / commanded / hybrid) per --gripper-proprio-source.
-                grip = self._proprio_gripper_percent(payload, side)
-                if grip is None:
-                    grip = _gripper_from_arm_payload(payload.get(side, {}))
+                if getattr(self, "velproprio_source", "measured") == "servo_command":
+                    frozen_block = payload.get("_servo_command_proprio_observation")
+                    frozen_arms = frozen_block.get("arms", {}) if isinstance(frozen_block, dict) else {}
+                    frozen_gripper = frozen_arms.get(side, {}) if isinstance(frozen_arms, dict) else {}
+                    frozen_gripper = frozen_gripper if isinstance(frozen_gripper, dict) else {}
+                    grip = frozen_gripper.get("percent") if frozen_gripper.get("valid") is True else None
+                    self._gripper_proprio_state("_gripper_proprio_last")[side] = grip
+                    self._gripper_proprio_state("_gripper_proprio_last_source")[side] = frozen_gripper.get("source")
+                    # An unavailable frozen channel is marked invalid above, so
+                    # these zero placeholders never reach the model request.
+                    grip = float(grip) if grip is not None else 0.0
+                else:
+                    grip = self._proprio_gripper_percent(payload, side)
+                    if grip is None:
+                        grip = _gripper_from_arm_payload(payload.get(side, {}))
                 parts.append(np.array([float(grip) / 100.0]))
             features.append(np.concatenate(parts))
         if getattr(self, "_print_velproprio_enabled", False):
@@ -1910,6 +2026,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         """
         self._rtc_prev_raw_chunk = None
         self._rtc_warned_no_raw = False
+        history = getattr(self, "_servo_command_history", None)
+        if history is not None:
+            # The collector is shared with the state client. Keep it intact but
+            # forbid this policy's next velocity window from crossing its reset.
+            self._servo_command_not_before_ns = max(
+                int(getattr(self, "_servo_command_not_before_ns", 0)), history.latest_time_ns,
+            )
         # Velocity-proprio is a per-step finite difference; drop the previous-pose
         # memory so a new rollout's first sample reports rest (vel 0), not a jump
         # across the reset teleport.
@@ -1988,6 +2111,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 "observation/state": self._proprio_state(payload),
                 "prompt": self.prompt,
             }
+            if (getattr(self, "velproprio_source", "measured") == "servo_command" and
+                    not self._last_velproprio_diagnostics.get("valid", False)):
+                self._last_inference_camera_diagnostics["outcome"] = "servo_command_proprio_unavailable"
+                return None  # Never substitute Python commands/measured state or query with invented motion.
             if getattr(self, "include_depth", False):
                 obs["observation/left_wrist_0_depth"] = images["left_depth"]
                 obs["observation/right_wrist_0_depth"] = images["right_depth"]

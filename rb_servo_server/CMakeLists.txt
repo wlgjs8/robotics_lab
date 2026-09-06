@@ -285,7 +285,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_smd_pose_tracker PRIVATE rb_servo_core)
     add_test(NAME smd_pose_tracker COMMAND test_smd_pose_tracker)
 
-    add_executable(test_follower_output_smd tests/test_follower_output_smd.cpp)
+    add_executable(recorded_pose_ik_audit tools/recorded_pose_ik_audit.cpp)
+target_link_libraries(recorded_pose_ik_audit PRIVATE rb_servo_core)
+
+add_executable(test_follower_output_smd tests/test_follower_output_smd.cpp)
     target_link_libraries(test_follower_output_smd PRIVATE rb_servo_core)
     add_test(NAME follower_output_smd COMMAND test_follower_output_smd)
 
@@ -304,6 +307,13 @@ if(BUILD_TESTING)
     add_executable(test_cartesian_chunk_follower tests/test_cartesian_chunk_follower.cpp)
     target_link_libraries(test_cartesian_chunk_follower PRIVATE rb_servo_core)
     add_test(NAME cartesian_chunk_follower COMMAND test_cartesian_chunk_follower)
+
+    add_executable(test_chunk_fresh_continuity tests/test_chunk_fresh_continuity.cpp)
+    target_link_libraries(test_chunk_fresh_continuity PRIVATE rb_servo_core)
+    add_test(NAME chunk_fresh_continuity COMMAND test_chunk_fresh_continuity)
+    add_executable(test_command_tracking_window tests/test_command_tracking_window.cpp)
+    target_link_libraries(test_command_tracking_window PRIVATE rb_servo_core)
+    add_test(NAME command_tracking_window COMMAND test_command_tracking_window)
 
     add_executable(test_delta_twist_follower tests/test_delta_twist_follower.cpp)
     target_link_libraries(test_delta_twist_follower PRIVATE rb_servo_core)
@@ -332,6 +342,10 @@ if(BUILD_TESTING)
     add_executable(test_force_control tests/test_force_control.cpp)
     target_link_libraries(test_force_control PRIVATE rb_servo_core)
     add_test(NAME force_control COMMAND test_force_control)
+
+    add_executable(test_force_overlay_resume tests/test_force_overlay_resume.cpp)
+    target_link_libraries(test_force_overlay_resume PRIVATE rb_servo_core)
+    add_test(NAME force_overlay_resume COMMAND test_force_overlay_resume)
 
     add_executable(test_dh_calibration tests/test_dh_calibration.cpp)
     target_link_libraries(test_dh_calibration PRIVATE rb_servo_core)

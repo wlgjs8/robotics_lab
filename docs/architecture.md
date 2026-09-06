@@ -441,11 +441,30 @@ For the tracked real flow profile, the chunk overlay is schema v3 and the server
 uses `delta_preview`: the publisher aligns a warm result by the number of policy
 steps actually emitted since its camera observation, then the server integrates
 the remaining ee-local deltas and feeds the existing Ruckig p/v/a preview chain.
-Velocity proprio is the measured body delta over the image-time window; an
-unavailable bracket is explicit metadata and prevents preview activation. The
+With measured/camera-frame proprio, the input is the body delta over the
+image-time window; an unavailable bracket is explicit metadata and prevents
+preview activation. Other explicit sources carry their own time/provenance
+contract as described below. The
 server bounds both requested-to-preview projection error and
 preview-command-to-measured-TCP lead with mandatory config limits and a
 persistent fault policy.
+
+An opt-in execution path selects `flow_infer_fresh`, with server-owned
+`fresh_chunk_replan` and `continuous_hold_resume` flags. Fresh frames splice
+from the sampled plan p/v/a on the next servo tick; an IK-refused command holds
+the nominal sent reference and resumes from rest. The policy independently
+selects `ready_event` row-deadline activation and `servo_command` proprio from
+published coordinator FK history. The latter uses a frozen server-time window;
+camera selection and gripper selection times are separately logged. State JSON
+advertises `chunk_execution_profiles`, and requesting the fresh profile without
+matching server capability is rejected before policy emission. Defaults and
+all motion/force/safety limits are preserved by this opt-in path. See
+[the execution design](plans/plan_fresh_chunk_execution_20260906.md) and
+[the proprio time/source contract](reference/servo_command_proprio.md). The real
+fresh profile also selects the
+[linear output-conditioner tradeoff](reference/follower_output_conditioning.md);
+state fanout now [bounds optional collision witnesses](reference/state_udp_payload_budget.md)
+so visualization growth cannot make an otherwise fitting core packet exceed UDP limits.
 
 ### `TcpLinearMove`
 

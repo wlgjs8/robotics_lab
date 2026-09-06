@@ -1622,6 +1622,117 @@ bool testRuckigFollowerControllerConfig() {
     RB_CHECK(preview_cfg.cartesian_control.ruckig_follower.controller ==
              rb_servo::RuckigFollowerController::DeltaPreview);
     RB_CHECK(near(preview_cfg.cartesian_control.ruckig_follower.preview_max_actual_lead_m, 0.006));
+    RB_CHECK(!preview_cfg.cartesian_control.ruckig_follower.core_time_stretch_enable);
+    RB_CHECK(!preview_cfg.cartesian_control.ruckig_follower.plan_leash_enable);
+    RB_CHECK(!preview_cfg.cartesian_control.ruckig_follower.fresh_chunk_replan);
+    RB_CHECK(!preview_cfg.cartesian_control.ruckig_follower.continuous_hold_resume);
+
+    // Plan-clock pacing (2026-09-06): core time-stretch + divergence leash.
+    const std::string pacing_prefix =
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    controller: delta_preview\n"
+        "    fallback_policy: fault\n"
+        "    preview_max_projection_error_m: 0.001\n"
+        "    preview_max_projection_error_rad: 0.004\n"
+        "    preview_max_consecutive_projection_errors: 3\n"
+        "    preview_max_actual_lead_m: 0.006\n"
+        "    preview_max_actual_lead_rad: 0.017\n"
+        "    preview_max_consecutive_actual_lead_errors: 3\n";
+    const std::string pacing_path = writeTempConfig(
+        "ruckig-follower-pacing",
+        pacing_prefix +
+        "    core_time_stretch_enable: true\n"
+        "    core_time_stretch_max_ratio: 4.0\n"
+        "    plan_leash_enable: true\n"
+        "    plan_leash_start_m: 0.010\n"
+        "    plan_leash_start_rad: 0.0349\n"
+        "    plan_leash_full_m: 0.050\n"
+        "    plan_leash_full_rad: 0.10\n"
+        "    plan_leash_min_gate: 0.25\n"
+    );
+    const rb_servo::DualArmConfig pacing_cfg = rb_servo::loadConfigFromYaml(pacing_path);
+    ::unlink(pacing_path.c_str());
+    RB_CHECK(pacing_cfg.cartesian_control.ruckig_follower.core_time_stretch_enable);
+    RB_CHECK(near(pacing_cfg.cartesian_control.ruckig_follower.core_time_stretch_max_ratio, 4.0));
+    RB_CHECK(pacing_cfg.cartesian_control.ruckig_follower.plan_leash_enable);
+    RB_CHECK(near(pacing_cfg.cartesian_control.ruckig_follower.plan_leash_start_m, 0.010));
+    RB_CHECK(near(pacing_cfg.cartesian_control.ruckig_follower.plan_leash_start_rad, 0.0349));
+    RB_CHECK(near(pacing_cfg.cartesian_control.ruckig_follower.plan_leash_full_m, 0.050));
+    RB_CHECK(near(pacing_cfg.cartesian_control.ruckig_follower.plan_leash_full_rad, 0.10));
+    RB_CHECK(near(pacing_cfg.cartesian_control.ruckig_follower.plan_leash_min_gate, 0.25));
+    // The profile copy carries the same pacing keys.
+    RB_CHECK(pacing_cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.plan_leash_enable);
+
+    const std::string fresh_path = writeTempConfig(
+        "ruckig-follower-fresh-transitions",
+        pacing_prefix +
+        "    enable: true\n"
+        "    hold_bounce_resume_sec: 0.5\n"
+        "    fresh_chunk_replan: true\n"
+        "    continuous_hold_resume: true\n"
+        "network:\n"
+        "  chunk_frame_bind: udp://127.0.0.1:50377\n"
+    );
+    const auto fresh_cfg = rb_servo::loadConfigFromYaml(fresh_path);
+    ::unlink(fresh_path.c_str());
+    RB_CHECK(fresh_cfg.cartesian_control.ruckig_follower.fresh_chunk_replan);
+    RB_CHECK(fresh_cfg.cartesian_control.ruckig_follower.continuous_hold_resume);
+    RB_CHECK(fresh_cfg.cartesian_control.tcp_pose_target_profiles.front()
+                 .ruckig_follower.fresh_chunk_replan);
+    RB_CHECK(fresh_cfg.cartesian_control.tcp_pose_target_profiles.front()
+                 .ruckig_follower.continuous_hold_resume);
+    for (const auto* option : {"fresh_chunk_replan", "continuous_hold_resume"}) {
+        const auto wrong_controller = writeTempConfig(
+            std::string("fresh-transition-controller-") + option,
+            std::string("schema: robotics_lab.rb_servo_server.v1\n") +
+            "cartesian_control:\n  ruckig_follower:\n"
+            "    enable: true\n    hold_bounce_resume_sec: 0.5\n"
+            "    controller: ruckig_waypoint\n    " + option + ": true\n");
+        RB_CHECK(loadRejectsWithMessage(wrong_controller, "controller=delta_preview"));
+        ::unlink(wrong_controller.c_str());
+        const auto disabled = writeTempConfig(
+            std::string("fresh-transition-disabled-") + option,
+            pacing_prefix + "    enable: false\n    " + option + ": true\n");
+        RB_CHECK(loadRejectsWithMessage(disabled, "enable=true"));
+        ::unlink(disabled.c_str());
+    }
+
+    const std::string bad_leash_path = writeTempConfig(
+        "ruckig-follower-pacing-bad-leash",
+        pacing_prefix +
+        "    plan_leash_enable: true\n"
+        "    plan_leash_start_m: 0.050\n"
+        "    plan_leash_start_rad: 0.0349\n"
+        "    plan_leash_full_m: 0.050\n"
+        "    plan_leash_full_rad: 0.10\n"
+        "    plan_leash_min_gate: 0.25\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(bad_leash_path, "plan_leash_full_{m,rad}"));
+    ::unlink(bad_leash_path.c_str());
+
+    const std::string bad_gate_path = writeTempConfig(
+        "ruckig-follower-pacing-bad-gate",
+        pacing_prefix +
+        "    plan_leash_enable: true\n"
+        "    plan_leash_start_m: 0.010\n"
+        "    plan_leash_start_rad: 0.0349\n"
+        "    plan_leash_full_m: 0.050\n"
+        "    plan_leash_full_rad: 0.10\n"
+        "    plan_leash_min_gate: 1.0\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(bad_gate_path, "plan_leash_min_gate"));
+    ::unlink(bad_gate_path.c_str());
+
+    const std::string bad_ratio_path = writeTempConfig(
+        "ruckig-follower-pacing-bad-ratio",
+        pacing_prefix +
+        "    core_time_stretch_enable: true\n"
+        "    core_time_stretch_max_ratio: 0.5\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(bad_ratio_path, "core_time_stretch_max_ratio"));
+    ::unlink(bad_ratio_path.c_str());
 
     const std::string preview_missing_bound_path = writeTempConfig(
         "ruckig-follower-controller-preview-missing-bound",
@@ -1725,6 +1836,8 @@ bool testFollowerOutputSmdConfig() {
     RB_CHECK(near(default_smd.damping_ratio, 1.0));
     RB_CHECK(default_smd.velocity_ff);
     RB_CHECK(near(default_smd.velocity_ff_lpf_hz, 0.0));
+    RB_CHECK(near(default_smd.velocity_ff_linear_gain, 1.0));
+    RB_CHECK(!default_smd.profile_feedforward);
 
     const std::string parsed_path = writeTempConfig(
         "follower-output-smd-parsed",
@@ -1738,11 +1851,13 @@ bool testFollowerOutputSmdConfig() {
         "      damping_ratio: 1.2\n"
         "      velocity_ff: false\n"
         "      velocity_ff_lpf_hz: 2.0\n"
+        "      profile_feedforward: true\n"
     );
     const rb_servo::DualArmConfig parsed = rb_servo::loadConfigFromYaml(parsed_path);
     ::unlink(parsed_path.c_str());
     const auto& output_smd = parsed.cartesian_control.ruckig_follower.output_smd;
     RB_CHECK(output_smd.enable);
+    RB_CHECK(output_smd.profile_feedforward);
     RB_CHECK(near(output_smd.nf_linear_hz, 4.0));
     RB_CHECK(near(output_smd.nf_angular_hz, 3.0));
     RB_CHECK(near(output_smd.damping_ratio, 1.2));
@@ -1760,6 +1875,9 @@ bool testFollowerOutputSmdConfig() {
         {"damping_ratio", "2.01"},
         {"velocity_ff_lpf_hz", "0.5"},
         {"velocity_ff_lpf_hz", "25.0"},
+        {"velocity_ff_linear_gain", "-0.01"},
+        {"velocity_ff_linear_gain", "1.01"},
+        {"velocity_ff_linear_gain", ".nan"},
     };
     for (std::size_t i = 0; i < invalid_fields.size(); ++i) {
         const auto& [field, value] = invalid_fields[i];
@@ -1773,6 +1891,19 @@ bool testFollowerOutputSmdConfig() {
         );
         RB_CHECK(loadRejectsWithMessage(
             path, "cartesian_control.ruckig_follower.output_smd." + field));
+        ::unlink(path.c_str());
+    }
+    for (const auto& option : {std::string(""), std::string("      velocity_ff: false\n"),
+                               std::string("      profile_feedforward: true\n")}) {
+        const auto path=writeTempConfig("linear-ff-gain",
+            "schema: robotics_lab.rb_servo_server.v1\ncartesian_control:\n"
+            "  ruckig_follower:\n    output_smd:\n      velocity_ff_linear_gain: 0.0\n" + option);
+        if (option.empty()) {
+            const auto cfg=rb_servo::loadConfigFromYaml(path);
+            RB_CHECK(near(cfg.cartesian_control.ruckig_follower.output_smd.velocity_ff_linear_gain,0.0));
+        } else {
+            RB_CHECK(loadRejectsWithMessage(path,"velocity_ff_linear_gain requires"));
+        }
         ::unlink(path.c_str());
     }
     return true;

@@ -122,8 +122,14 @@ from .scene import (
     _robot_urdf_path,
     _stand_mesh_path,
     _update_urdf_config,
+    _ENVIRONMENT_RISER_MAX_M,
+    _ENVIRONMENT_RISER_MIN_M,
+    environment_riser_nominal_height_m,
+    environment_table_top_z_m,
+    set_environment_visible,
     set_ik_infeasible_region_visible,
     set_reach_envelope_visible,
+    set_riser_height_m,
     update_chunk_overlay,
     update_circle_overlay,
     update_floor_check_points,
@@ -1097,6 +1103,9 @@ def _arm_init_failure_detail(status: Mapping[str, Any], side: str) -> str:
 
 
 ARM_INIT_AUTO_ROI_SETTING_KEY = "arm_init_auto_roi_recover"
+# Operator-tuned riser height (metres). The URDF value is the default; this is
+# what the operator settled on by eye, and it wins on the next start.
+ENV_RISER_HEIGHT_SETTING_KEY = "env_riser_height_m"
 # How long to wait before re-pushing the toggle to a runner that has not reported it
 # back yet. update_gui runs at ~10 Hz; a lost datagram or a runner still starting up
 # must not turn this into a packet-per-tick stream at the control endpoint.
@@ -4095,6 +4104,82 @@ def build_gui(
                 handles["ik_infeasible_status"] = server.gui.add_text(
                     "IK 불가 영역", initial_value=ik_status, disabled=True
                 )
+
+            with server.gui.add_folder("작업 셀 구조물 (테이블/라이저)"):
+                # The env_* links of the unified URDF: the work table and the riser
+                # under the stand base plate. Default ON — they are what the operator
+                # sees in the room, and the point of drawing them is that the scene
+                # stops ending at the stand. Solid geometry occludes the arms from
+                # below, so the toggle exists.
+                scene = handles.get("scene", {})
+                names = scene.get("environment_names", ()) if isinstance(scene, dict) else ()
+                errors = [str(v) for k, v in scene.items()
+                          if isinstance(scene, dict) and k.startswith("environment_error_")]
+                env_status = ", ".join(names) if names else "URDF에 env_* 링크 없음"
+                if errors:
+                    env_status = f"{env_status} | {errors[0]}"
+                if hasattr(server.gui, "add_checkbox"):
+                    env_toggle = server.gui.add_checkbox("테이블/라이저 표시", initial_value=True)
+                    handles["environment_visible_toggle"] = env_toggle
+
+                    def _environment_toggle(_: Any) -> None:
+                        set_environment_visible(
+                            handles.get("scene", {}), bool(env_toggle.value)
+                        )
+
+                    env_toggle.on_update(_environment_toggle)
+                handles["environment_status"] = server.gui.add_text(
+                    "구조물", initial_value=env_status, disabled=True
+                )
+                # THE RISER HEIGHT IS THE ONE FURNITURE NUMBER THAT IS NOT SETTLED.
+                # Its columns measured 280-290 mm and the URDF ships 300, so the drawn
+                # table top is 10-20 mm low. Rather than freeze a number nobody has
+                # checked, the operator dials it in against the scene and the settled
+                # value goes back into make_rb5_850e_urdfs.py. Purely visual: nothing
+                # in the server, the safety layers or the collision monitor reads it.
+                nominal_m = environment_riser_nominal_height_m(scene) if isinstance(scene, dict) else None
+                if nominal_m is not None and hasattr(server.gui, "add_number"):
+                    stored = _load_gui_settings().get(ENV_RISER_HEIGHT_SETTING_KEY)
+                    initial_mm = float(stored) * 1000.0 if isinstance(stored, (int, float)) else nominal_m * 1000.0
+                    riser_input = server.gui.add_number(
+                        "라이저 높이 (mm)", initial_value=round(initial_mm, 1),
+                        min=_ENVIRONMENT_RISER_MIN_M * 1000.0,
+                        max=_ENVIRONMENT_RISER_MAX_M * 1000.0, step=1.0,
+                    )
+                    handles["environment_riser_height_input"] = riser_input
+
+                    def _apply_riser_height(_: Any = None, *, persist: bool = True) -> None:
+                        sc = handles.get("scene", {})
+                        height_m = float(riser_input.value) / 1000.0
+                        error = set_riser_height_m(sc, height_m)
+                        status = handles.get("environment_riser_status")
+                        if error:
+                            if status is not None:
+                                status.value = f"❌ {error}"
+                            return
+                        top = environment_table_top_z_m(sc)
+                        if status is not None:
+                            status.value = (
+                                f"테이블 상면 z {top * 1000:+.0f} mm"
+                                f"  (URDF 기본 {nominal_m * 1000:.0f} mm)"
+                                if top is not None else "적용됨"
+                            )
+                        if persist:
+                            try:
+                                settings = _load_gui_settings()
+                                settings[ENV_RISER_HEIGHT_SETTING_KEY] = height_m
+                                _save_gui_settings(settings)
+                            except Exception:
+                                pass
+
+                    handles["environment_riser_status"] = server.gui.add_text(
+                        "테이블 상면", initial_value="-", disabled=True
+                    )
+                    riser_input.on_update(_apply_riser_height)
+                    # Re-apply a stored height at startup: the scene was built from the
+                    # URDF, so without this the operator's saved value would silently
+                    # not be the thing on screen.
+                    _apply_riser_height(persist=False)
 
         with _op_tabs.add_tab("그리퍼"):
             with server.gui.add_folder("그리퍼 제어"):

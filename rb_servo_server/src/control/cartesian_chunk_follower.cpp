@@ -2,6 +2,23 @@
 
 #include "rb_servo/math/se3.hpp"
 
+#include <unsupported/Eigen/AutoDiff>
+#include <pinocchio/spatial/explog.hpp>
+
+// Pinocchio's canonical Jexp3 is scalar-generic. Its Taylor precision is a
+// numerical constant, so give Eigen's directional autodiff the double precision
+// threshold instead of trying to differentiate std::pow's exponent.
+namespace pinocchio {
+template <>
+struct TaylorSeriesExpansion<Eigen::AutoDiffScalar<Eigen::Matrix<double, 1, 1>>> {
+  template <int degree>
+  static auto precision() {
+    return Eigen::AutoDiffScalar<Eigen::Matrix<double, 1, 1>>(
+        TaylorSeriesExpansion<double>::precision<degree>());
+  }
+};
+}  // namespace pinocchio
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -48,18 +65,42 @@ int flankIndex(std::size_t k, int off, std::size_t n) {
   return std::clamp(static_cast<int>(k) + off, 0, static_cast<int>(n) - 1);
 }
 
+void bodyAngularDerivatives(const Eigen::Vector3d& theta,
+                            const Eigen::Vector3d& theta_dot,
+                            const Eigen::Vector3d& theta_ddot,
+                            Eigen::Vector3d& omega,
+                            Eigen::Vector3d& alpha) {
+  using Scalar = Eigen::AutoDiffScalar<Eigen::Matrix<double, 1, 1>>;
+  Eigen::Matrix<Scalar, 3, 1> argument;
+  for (int i = 0; i < 3; ++i) {
+    argument[i].value() = theta[i];
+    argument[i].derivatives()[0] = theta_dot[i];
+  }
+  Eigen::Matrix<Scalar, 3, 3> derivative;
+  pinocchio::Jexp3(argument, derivative);
+  Eigen::Matrix3d J, Jdot;
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+    J(i, j) = derivative(i, j).value();
+    Jdot(i, j) = derivative(i, j).derivatives()[0];
+  }
+  omega = J * theta_dot;
+  alpha = J * theta_ddot + Jdot * theta_dot;
+}
+
 }  // namespace
 
 CartesianChunkFollower::CartesianChunkFollower(const CartesianChunkFollowerConfig& cfg)
     : cfg_(cfg),
       limits_(makeLimits(cfg)),
-      core_(limits_, 1.0 / 30.0, cfg.guard),
+      core_(limits_, 1.0 / 30.0, cfg.guard,
+            cfg.fresh_chunk_replan || cfg.continuous_hold_resume),
       window_(cfg.window) {}
 
 void CartesianChunkFollower::reconfigure(const CartesianChunkFollowerConfig& cfg) {
   cfg_ = cfg;
   limits_ = makeLimits(cfg);
-  core_.reconfigure(limits_, seg_dt_, cfg.guard);
+  core_.reconfigure(limits_, seg_dt_, cfg.guard,
+                    cfg.fresh_chunk_replan || cfg.continuous_hold_resume);
   window_ = ChunkWindow(cfg.window);
   deactivate();
 }
@@ -67,8 +108,10 @@ void CartesianChunkFollower::reconfigure(const CartesianChunkFollowerConfig& cfg
 void CartesianChunkFollower::deactivate() {
   active_ = false;
   hold_paused_ = false;
+  sent_reference_hold_ = false;
   hold_pause_start_sec_ = 0.0;
   have_segment_ = false;
+  fresh_replan_pending_ = false;
   window_.deactivate();
   diag_.consecutive_projection_errors = 0;
   diag_.consecutive_actual_lead_errors = 0;
@@ -117,7 +160,30 @@ HoldResumeResult CartesianChunkFollower::resumeFromHold(
     // policy can choose its already-audited safety reanchor or cold/fault path.
     return HoldResumeResult::Diverged;
   }
+  if (sent_reference_hold_) {
+    // The accepted command was held, so replaying the pre-refusal endpoint
+    // velocity would re-introduce a kick. Replan from the final held reference.
+    R0_ref_ = Eigen::Quaterniond(math::rotationFromPose(live_reference)).normalized();
+    core_.seed({live_reference.x, live_reference.y, live_reference.z, 0, 0, 0});
+    last_pose_ = live_reference;
+    have_segment_ = false;
+    t_in_seg_ = 0.0;
+    sent_reference_hold_ = false;
+  }
   return HoldResumeResult::WarmResumed;
+}
+
+void CartesianChunkFollower::holdAtSentReference(const Pose6D& reference, double now_sec) {
+  if (!active_) return;
+  pauseForHold(now_sec);
+  sent_reference_hold_ = true;
+  R0_ref_ = Eigen::Quaterniond(math::rotationFromPose(reference)).normalized();
+  core_.seed({reference.x, reference.y, reference.z, 0, 0, 0});
+  core_.discardTrajectory();
+  last_pose_ = reference;
+  have_segment_ = false;
+  fresh_replan_pending_ = false;
+  t_in_seg_ = 0.0;
 }
 
 void CartesianChunkFollower::setAdvanceGate(double gate, const Eigen::Vector3d& dir) {
@@ -139,13 +205,14 @@ bool CartesianChunkFollower::absorbOffset(const Eigen::Vector3d& dp_stand,
   fold_rot_ = (dR_stand * fold_rot_).normalized();
   // What tick() reports between boundaries is last_pose_; move it with the plan so
   // a paused/held read-back never lags the fold by one tick.
-  last_pose_ = have_segment_ ? sampleAt(std::min(t_in_seg_, seg_dt_))
+  last_pose_ = have_segment_ ? sampleAt(std::min(t_in_seg_, seg_len_))
                              : tangentPose(core_.p0());
   return true;
 }
 
 void CartesianChunkFollower::reanchor(const Pose6D& reference) {
   hold_paused_ = false;
+  sent_reference_hold_ = false;
   hold_pause_start_sec_ = 0.0;
   // Carry the plan's current velocity/acceleration through the re-base. The
   // previous seed(p0) zeroed both, which made every re-anchor a hard velocity
@@ -167,6 +234,7 @@ void CartesianChunkFollower::reanchor(const Pose6D& reference) {
   std::array<double, 6> p0{reference.x, reference.y, reference.z, 0.0, 0.0, 0.0};
   core_.seed(p0, v0, a0);  // keep the active window untouched
   have_segment_ = false;   // force a fresh BVP solve from the new anchor on the next tick
+  fresh_replan_pending_ = false;
   t_in_seg_ = 0.0;
   last_pose_ = reference;
   active_ = true;
@@ -201,6 +269,12 @@ void CartesianChunkFollower::submitFrame(const ChunkFrame& frame,
 void CartesianChunkFollower::submitDeltaFrame(const ChunkFrame& frame,
                                                const Pose6D& current_pose) {
   if (frame.delta.empty() || frame.delta.size() != frame.grip.size()) return;
+  // Validate the window before changing the ongoing trajectory. A malformed
+  // fresh frame must not interrupt a valid segment.
+  const int available = static_cast<int>(frame.delta.size()) -
+      std::max(0, cfg_.window.discard_head_L) - std::max(1, cfg_.window.reserve_R);
+  if (cfg_.fresh_chunk_replan && (available < 1 || cfg_.window.consume_C < 1)) return;
+  if (cfg_.fresh_chunk_replan && active_ && !hold_paused_) seedFromCurrentSample();
   ChunkFrame integrated = frame;
   integrated.pose.clear();
   integrated.pose.reserve(frame.delta.size());
@@ -240,6 +314,23 @@ void CartesianChunkFollower::submitDeltaFrame(const ChunkFrame& frame,
   submitFrame(integrated, current_pose);
 }
 
+void CartesianChunkFollower::seedFromCurrentSample() {
+  if (!have_segment_ || !core_.hasState()) return;
+  std::array<double, 6> p{}, v{}, a{};
+  if (!core_.sample(std::min(t_in_seg_, seg_len_), p, v, a)) return;
+  // A gated plan can be preempted before every ordinary segment boundary.
+  // Roll the tangent here too, or its rotation grows indefinitely and future
+  // principal-log knots wrap at pi. Re-linearization transports sampled tangent
+  // derivatives to physical body omega/alpha without changing the emitted state.
+  last_pose_ = tangentPose(p);
+  core_.seed(p, v, a);
+  relinearizeAndReseed();
+  core_.discardTrajectory();
+  have_segment_ = false;
+  fresh_replan_pending_ = true;
+  t_in_seg_ = 0.0;
+}
+
 void CartesianChunkFollower::updateActualLead(const Pose6D& actual_pose) {
   diag_.actual_lead_m = math::positionDistance(last_pose_, actual_pose);
   diag_.actual_lead_rad = math::orientationDistanceRad(last_pose_, actual_pose);
@@ -267,12 +358,18 @@ Pose6D CartesianChunkFollower::tick(double dt_tick) {
   // identical to the ungated behaviour. This is the geometric-layer
   // counterpart of the force advance gate (setAdvanceGate), which stays
   // directional and per-segment.
+  // CORE TIME-STRETCH: the segment boundary is the segment's own length -- the policy
+  // period, or the stretched chain point when the knot needed longer (see
+  // stepToNextSegment). Sampling runs at wall time over the whole stretched profile,
+  // so the arm moves at the follower's limits and only the KNOT clock slows.
   t_in_seg_ += dt_tick * plan_rate_gate_;
-  if (!have_segment_ || t_in_seg_ >= seg_dt_) {
-    t_in_seg_ = have_segment_ ? std::max(0.0, t_in_seg_ - seg_dt_) : 0.0;
+  if (!have_segment_ || t_in_seg_ >= seg_len_) {
+    t_in_seg_ = have_segment_ ? std::max(0.0, t_in_seg_ - seg_len_)
+                             : (fresh_replan_pending_ ? t_in_seg_ : 0.0);
     stepToNextSegment();
+    fresh_replan_pending_ = false;
   }
-  last_pose_ = sampleAt(std::min(t_in_seg_, seg_dt_));
+  last_pose_ = sampleAt(std::min(t_in_seg_, seg_len_));
   return last_pose_;
 }
 
@@ -292,11 +389,47 @@ std::optional<Vec6> CartesianChunkFollower::currentVelocity() const {
   return Vec6{v[0], v[1], v[2], v[3], v[4], v[5]};
 }
 
+std::optional<Vec6> CartesianChunkFollower::sampledVelocity() const {
+  if (!active_ || hold_paused_ || !core_.hasState()) return std::nullopt;
+  std::array<double, 6> p{}, v{}, a{};
+  if (have_segment_ && core_.sample(std::min(t_in_seg_, seg_len_), p, v, a)) {
+    return Vec6{v[0], v[1], v[2], v[3], v[4], v[5]};
+  }
+  return currentVelocity();
+}
+
+std::optional<Vec6> CartesianChunkFollower::sampledAcceleration() const {
+  if (!active_ || hold_paused_ || !core_.hasState()) return std::nullopt;
+  std::array<double, 6> p{}, v{}, a{};
+  if (have_segment_ && core_.sample(std::min(t_in_seg_, seg_len_), p, v, a)) {
+    return Vec6{a[0], a[1], a[2], a[3], a[4], a[5]};
+  }
+  const auto& a0 = core_.a0();
+  return Vec6{a0[0], a0[1], a0[2], a0[3], a0[4], a0[5]};
+}
+
+FollowerOutputKinematics CartesianChunkFollower::outputKinematics() const {
+  FollowerOutputKinematics out;
+  out.pose = last_pose_;
+  if (!active_ || hold_paused_ || !core_.hasState()) return out;
+  std::array<double, 6> p = core_.p0(), v = core_.v0(), a = core_.a0();
+  if (have_segment_ && !core_.sample(std::min(t_in_seg_, seg_len_), p, v, a)) return out;
+  Eigen::Vector3d omega, alpha;
+  bodyAngularDerivatives({p[3], p[4], p[5]}, {v[3], v[4], v[5]},
+                         {a[3], a[4], a[5]}, omega, alpha);
+  const double g = plan_rate_gate_;
+  out.velocity = {g*v[0], g*v[1], g*v[2], g*omega.x(), g*omega.y(), g*omega.z()};
+  out.acceleration = {g*g*a[0], g*g*a[1], g*g*a[2],
+                      g*g*alpha.x(), g*g*alpha.y(), g*g*alpha.z()};
+  return out;
+}
+
 void CartesianChunkFollower::stepToNextSegment() {
   // Re-linearize the orientation tangent onto the state chained from the
   // PREVIOUS solve, and reset the rotation axes to 0 for the new segment. Must
   // happen BEFORE the next solve so this segment's samples use the new R0_ref_.
   if (have_segment_) relinearizeAndReseed();
+  if (cfg_.fresh_chunk_replan) core_.discardTrajectory();
 
   seg_dt_ = window_.policyDt();
   core_.setDt(seg_dt_);
@@ -331,7 +464,27 @@ void CartesianChunkFollower::stepToNextSegment() {
       }
     }
     const BoundarySample<6> sample = buildSample(k);
-    diag_.last_solve = core_.solve(sample);
+    const double chain_max_sec =
+        cfg_.core_time_stretch_enable
+            ? seg_dt_ * std::max(1.0, cfg_.core_time_stretch_max_ratio)
+            : seg_dt_;
+    diag_.last_solve = core_.solve(sample, chain_max_sec);
+    if (diag_.last_solve.result != ruckig::Result::Working) {
+      // A refused solve used to leave the PREVIOUS trajectory in place while
+      // t_in_seg_ restarted at 0: the emitted pose jumped back one segment of travel
+      // and replayed it -- a 30 Hz sawtooth (measured 2026-09-06 as the failed-solve
+      // cluster at 118.68-120.0 s, see clampInside in chunk_follower_core.hpp). Serve
+      // the segment as a jerk-limited ring-down from the chained state instead, and
+      // re-target the next knot from there.
+      ++diag_.solve_failure_count;
+      diag_.last_solve = ringDown();
+    }
+    seg_len_ = diag_.last_solve.result == ruckig::Result::Working &&
+                       diag_.last_solve.chain_at_sec > seg_dt_
+                   ? diag_.last_solve.chain_at_sec
+                   : seg_dt_;
+    // With the stretch the chained state IS the knot whenever the overrun fits in
+    // max_ratio periods, so this projection error is the truncation residual only.
     const auto& realized = core_.p0();
     double pos_sq = 0.0;
     double ang_sq = 0.0;
@@ -362,6 +515,7 @@ void CartesianChunkFollower::stepToNextSegment() {
     // Stall / window exhausted with no fresh chunk: ring velocity down to zero
     // at the current pose (jerk-limited hold), and flag the stall.
     diag_.last_solve = ringDown();
+    seg_len_ = seg_dt_;
     diag_.stall = true;
     diag_.projection_error_m = 0.0;
     diag_.projection_error_rad = 0.0;
@@ -446,10 +600,17 @@ SegmentSolve CartesianChunkFollower::ringDown() {
 
 void CartesianChunkFollower::relinearizeAndReseed() {
   std::array<double, 6> p0 = core_.p0();
+  std::array<double, 6> v0 = core_.v0(), a0 = core_.a0();
   const Eigen::Vector3d theta(p0[3], p0[4], p0[5]);
+  if (cfg_.fresh_chunk_replan || cfg_.continuous_hold_resume) {
+    Eigen::Vector3d omega, alpha;
+    bodyAngularDerivatives(theta, {v0[3], v0[4], v0[5]},
+                           {a0[3], a0[4], a0[5]}, omega, alpha);
+    for (int i = 0; i < 3; ++i) { v0[i+3] = omega[i]; a0[i+3] = alpha[i]; }
+  }
   R0_ref_ = (R0_ref_ * Eigen::Quaterniond(math::exp3(theta))).normalized();
   p0[3] = p0[4] = p0[5] = 0.0;  // rotation measured from the new tangent
-  core_.seed(p0, core_.v0(), core_.a0());
+  core_.seed(p0, v0, a0);
 }
 
 Pose6D CartesianChunkFollower::tangentPose(const std::array<double, 6>& axes) const {

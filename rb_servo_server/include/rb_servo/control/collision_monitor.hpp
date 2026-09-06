@@ -157,6 +157,21 @@ struct CollisionMonitorConfig {
     double intra_arm_recover_speed_m_s = 0.0;
     double intra_arm_latency_s = 0.010;
 
+    // ---- CELL-STRUCTURE (env_*) velocity-barrier params (2026-09-06) ----
+    // The env_* geometry in the unified URDF that opted into a <collision>: the
+    // riser under the stand base plate today. Its own class because the self set
+    // does not fit a measured furniture box in either direction -- see
+    // SelfCollisionConfig::MeshConfig::EnvironmentConfig for the measurement.
+    // Defaults are the 25/67 mm pair this stack shipped as its self set until
+    // 2026-09-05, which clears the riser's measured 35.7 mm closest approach and
+    // still satisfies d_slow >= d_hard + v_max^2/(2*a_brake) at the 0.50 m/s ceiling.
+    double environment_d_hard_m = 0.025;
+    double environment_d_slow_m = 0.067;
+    double environment_a_brake_m_s2 = 3.0;
+    double environment_hyst_m = 0.010;
+    double environment_recover_speed_m_s = 0.0;
+    double environment_latency_s = 0.010;
+
     // ---- GRIPPER<->GRIPPER velocity-barrier params (2026-09-04) ----
     // The nine cross-arm pairs among the two Pika hulls (base, finger_left,
     // finger_right x the same on the other arm). They used to sit inside the
@@ -225,6 +240,10 @@ struct CollisionNearPair {
     // True for same-arm non-adjacent link pairs. These use intra_arm_* barrier
     // params instead of the arm<->arm / arm<->stand self set.
     bool intra_arm = false;
+    // True for an arm<->cell-structure pair: the other member is env_* geometry
+    // (environment_* params). Distinct from `external` (the whole-arm floor plane)
+    // and from a plain arm<->stand pair.
+    bool environment = false;
     // True for a cross-arm pair of two gripper hulls (gripper_gripper_* params;
     // excludable by the servo loop when force control covers both arms).
     bool gripper_gripper = false;
@@ -253,6 +272,7 @@ struct CollisionVerdict {
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_box_min_clearance_m = std::numeric_limits<double>::infinity();
     double gripper_gripper_min_clearance_m = std::numeric_limits<double>::infinity();
+    double environment_min_clearance_m = std::numeric_limits<double>::infinity();
     // Per preallocated external box slot (slot 0=green, slot 1=gray).
     // +inf means no finite/active pair for that slot.
     std::vector<double> external_box_clearance_m;
@@ -352,6 +372,22 @@ struct VelocityConstraint {
     std::uint64_t pair_key = 0;   // geom_a<<32 | geom_b, same key as engaged_pairs
     ConstraintClass klass = ConstraintClass::Other;
 };
+
+// The barrier band ONE near pair is enforced against, by its category. The
+// selection order is significant and is the same in every consumer: external_box ->
+// external -> intra_arm -> gripper_gripper -> self (a pair is at most one of the
+// first four, so the order only fixes the fallthrough to the self set).
+//
+// These exist as functions, rather than as ternaries repeated per call site, because
+// the categories carry very different floors (self 40 mm, gripper<->gripper 25 mm,
+// intra-arm 5 mm on the RB5) and the near list is ordered by RAW clearance. Anything
+// that asks "is this pair violating?" or "how close is it, relatively?" MUST use the
+// pair's own band; using the self floor for all of them reports the permanently-near
+// structural intra-arm pair as a violation and misses the pair that really breached.
+// buildCollisionConstraints and the state publisher's near-pair telemetry both read
+// them here so the two cannot drift apart.
+double nearPairHardFloorM(const CollisionMonitorConfig& cfg, const CollisionNearPair& p);
+double nearPairSlowBandM(const CollisionMonitorConfig& cfg, const CollisionNearPair& p);
 
 // Build the self-collision velocity constraints from a verdict (per near pair within
 // d_slow, age-extrapolated). Appends to `out` (so floor rows can be added too).
@@ -453,6 +489,7 @@ struct CollisionDistanceSummary {
     double self_min_clearance_m = std::numeric_limits<double>::infinity();
     double intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
+    double environment_min_clearance_m = std::numeric_limits<double>::infinity();
     std::string nearest_name_a;
     std::string nearest_name_b;
     double nearest_distance_m = std::numeric_limits<double>::infinity();
@@ -560,6 +597,14 @@ public:
     bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
                           double self_thresh_m, double external_thresh_m,
                           double intra_arm_thresh_m,
+                          bool include_left, bool include_right);
+    // With a CELL-STRUCTURE threshold for the env_* geometry. The overloads above
+    // gate those pairs at self_thresh_m, which is what they did before env_* was
+    // checked at all; a planner that knows the environment band should pass it, or it
+    // plans against a floor 15 mm wider than the barrier actually enforces.
+    bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
+                          double self_thresh_m, double external_thresh_m,
+                          double intra_arm_thresh_m, double environment_thresh_m,
                           bool include_left, bool include_right);
 
     void start();   // spawn the monitor thread

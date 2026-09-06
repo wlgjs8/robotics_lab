@@ -56,6 +56,22 @@ struct CartesianChunkFollowerConfig {
   double max_actual_lead_m{0.0};
   double max_actual_lead_rad{0.0};
   int max_consecutive_actual_lead_errors{0};
+  // CORE TIME-STRETCH (2026-09-06, docs/plans/plan_clock_time_stretch_20260906.md).
+  // A segment whose time-optimal profile needs longer than the policy period lasts
+  // that long (up to max_ratio periods) instead of being truncated at one period:
+  // the knot is reached, the plan clock slows. Off = legacy truncation.
+  bool core_time_stretch_enable{false};
+  double core_time_stretch_max_ratio{1.0};
+  // Opt-in: replace a delta frame from the currently sampled p/v/a, without
+  // waiting for the old segment endpoint. Limits and plan/force gates still apply.
+  bool fresh_chunk_replan{false};
+  bool continuous_hold_resume{false};
+};
+
+struct FollowerOutputKinematics {
+  Pose6D pose{};
+  Vec6 velocity{};      // stand linear velocity, current-pose BODY angular velocity
+  Vec6 acceleration{};  // matching derivatives with respect to wall time
 };
 
 struct FollowerDiag {
@@ -77,6 +93,9 @@ struct FollowerDiag {
   int consecutive_actual_lead_errors{0};
   bool infeasible_fault{false};
   bool actual_lead_fault{false};
+  // Segment solves Ruckig refused (ErrorInvalidInput etc.). Each one is served by a
+  // ring-down from the chained state instead of replaying the stale trajectory.
+  int solve_failure_count{0};
 };
 
 enum class HoldResumeResult {
@@ -156,6 +175,10 @@ class CartesianChunkFollower {
   // Clamped to [0, 1].
   void setPlanRateGate(double gate);
   double planRateGate() const { return plan_rate_gate_; }
+  // CORE TIME-STRETCH telemetry: policy period over the active segment's length,
+  // 1.0 when the segment is not stretched (or the stretch is disabled).
+  double coreGate() const { return seg_len_ > 0.0 ? seg_dt_ / seg_len_ : 1.0; }
+  double segmentLengthSec() const { return seg_len_; }
 
     bool active() const { return active_; }
   bool holdPaused() const { return hold_paused_; }
@@ -171,6 +194,12 @@ class CartesianChunkFollower {
                                   double grace_sec,
                                   double position_tolerance_m,
                                   double orientation_tolerance_rad);
+
+  // A Cartesian solve refusal has already held the accepted joint command.
+  // Keep the plan paused at that nominal sent reference, discarding the rejected
+  // plan's future velocity. Repeated calls update the held reference without
+  // restarting the grace timer. New delta frames may replace the paused window.
+  void holdAtSentReference(const Pose6D& reference, double now_sec);
 
   // Strict-divergence recovery when an external safety constraint already
   // explained the plan-vs-sent split. Keeps the active chunk window and consume
@@ -189,6 +218,17 @@ class CartesianChunkFollower {
   // has only a zero-velocity seed and no solved segment, so it reports no valid
   // velocity.
   std::optional<Vec6> currentVelocity() const;
+  // The plan's velocity / acceleration AT THE CURRENT SAMPLE (t_in_seg on the active
+  // Ruckig segment), same axes as currentVelocity(). currentVelocity() is the chained
+  // END-state of the segment -- right for a handoff seed, wrong as a per-tick feed-
+  // forward mid-segment (and wronger under the core time-stretch, where a segment can
+  // last four periods). Falls back to the chained state when no segment is solved.
+  std::optional<Vec6> sampledVelocity() const;
+  std::optional<Vec6> sampledAcceleration() const;
+  // Output-stage contract: converts tangent derivatives through Pinocchio's
+  // Jexp3 and scales by the piecewise-constant plan-clock gate. A safety gate
+  // discontinuity is not promised C2 and is never smoothed to regain motion.
+  FollowerOutputKinematics outputKinematics() const;
   const FollowerDiag& diag() const { return diag_; }
   double tInSegment() const { return t_in_seg_; }
   std::uint64_t windowWireSeq() const { return window_.wireSeq(); }
@@ -206,6 +246,7 @@ class CartesianChunkFollower {
   Pose6D sampleAt(double t) const;
   // Convert a 6-axis point (pos + tangent rotation-vector) to a stand pose.
   Pose6D tangentPose(const std::array<double, 6>& axes) const;
+  void seedFromCurrentSample();
 
   CartesianChunkFollowerConfig cfg_;
   std::array<AxisLimit, 6> limits_{};
@@ -214,10 +255,15 @@ class CartesianChunkFollower {
 
   Eigen::Quaterniond R0_ref_{Eigen::Quaterniond::Identity()};  // current segment tangent anchor
   double seg_dt_{1.0 / 30.0};
+  // Wall-clock length of the active segment: seg_dt_ (legacy / ring-down) or the
+  // stretched chain point of the last solve (core time-stretch).
+  double seg_len_{1.0 / 30.0};
   double t_in_seg_{0.0};
   bool have_segment_{false};
+  bool fresh_replan_pending_{false};
   bool active_{false};
   bool hold_paused_{false};
+  bool sent_reference_hold_{false};
   double hold_pause_start_sec_{0.0};
 
   double current_grip_{0.0};

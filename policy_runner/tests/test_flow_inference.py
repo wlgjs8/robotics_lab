@@ -324,11 +324,12 @@ class FlowInferenceCliTest(unittest.TestCase):
 
         source._request_prefetch({"observation": [1, 2, 3]})
 
-        generation, inference_seq, request_ns, payload = source._stream_request
+        generation, inference_seq, request_ns, payload, observation_step_seq = source._stream_request
         self.assertEqual(generation, 7)
         self.assertEqual(inference_seq, 1)
         self.assertEqual(request_ns, 1_000_000_000)
         self.assertEqual(payload, {"observation": [1, 2, 3]})
+        self.assertEqual(observation_step_seq, 0)
 
         timing = source._record_inference_completion(
             inference_seq=inference_seq,

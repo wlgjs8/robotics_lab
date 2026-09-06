@@ -274,10 +274,21 @@ def _usb_device_node_from_physical_port(
     device_link = sysfs_usb_root / node
     try:
         device_path = device_link.resolve(strict=True)
-        physical_path = Path(physical_port).resolve(strict=True)
     except OSError as exc:
         raise PikaUsbPairingError(
-            f"camera physical_port is not present in sysfs: {physical_port} ({exc})"
+            f"camera USB device {node} is not present in sysfs: {physical_port} ({exc}); "
+            "check the camera connection and refresh camera_server health before retrying"
+        ) from exc
+    try:
+        physical_path = Path(physical_port).resolve(strict=True)
+    except OSError as exc:
+        # A reconnected D405 may have new videoN leaves. The producer must
+        # refresh its serial-to-port association; a surviving USB ancestor
+        # alone cannot prove that the same camera still occupies that port.
+        raise PikaUsbPairingError(
+            f"camera physical_port is not present in sysfs: {physical_port} ({exc}); "
+            f"USB device {node} still exists, but camera.health may contain a stale "
+            "path after USB reconnect. Restart camera_server and retry pairing"
         ) from exc
     if device_path != physical_path and device_path not in physical_path.parents:
         raise PikaUsbPairingError(

@@ -87,7 +87,10 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writeJointArrayHeader(os, side, "follower_target_acceleration");
     os << ',' << side << "_follower_segments"
        << ',' << side << "_follower_advance_gate"
-       << ',' << side << "_follower_plan_rate_gate";
+       << ',' << side << "_follower_plan_rate_gate"
+       << ',' << side << "_follower_core_gate"
+       << ',' << side << "_follower_leash_gate"
+       << ',' << side << "_follower_solve_failures";
     for (const char* axis : {"x", "y", "z"}) os << ',' << side << "_follower_advance_dir_" << axis;
     os << ',' << side << "_follower_output_smd_reseeded";
     writePoseHeader(os, side, "command_tcp_target_stand");
@@ -141,11 +144,11 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_corner"
        << ',' << side << "_follower_output_smd_active"
        << ',' << side << "_follower_output_smd_lag_m"
-       << ',' << side << "_follower_output_smd_lag_rad"
-       << ',' << side << "_follower_prefilter_stand_x_m"
-       << ',' << side << "_follower_prefilter_stand_y_m"
-       << ',' << side << "_follower_prefilter_stand_z_m"
-       << ',' << side << "_follower_divergence_pos_m"
+       << ',' << side << "_follower_output_smd_lag_rad";
+    writePoseHeader(os, side, "follower_prefilter_stand");
+    writeJointArrayHeader(os, side, "follower_sample_velocity");
+    writeJointArrayHeader(os, side, "follower_sample_acceleration");
+    os << ',' << side << "_follower_divergence_pos_m"
        << ',' << side << "_follower_divergence_ang_rad"
        << ',' << side << "_follower_projection_error_m"
        << ',' << side << "_follower_projection_error_rad"
@@ -155,6 +158,11 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_actual_lead_error_count"
        << ',' << side << "_follower_reanchor_count"
        << ',' << side << "_follower_divergence_reanchor_count"
+       << ',' << side << "_follower_divergence_excused_count"
+       << ',' << side << "_follower_cmd_track_pos_m"
+       << ',' << side << "_follower_cmd_track_rad"
+       << ',' << side << "_follower_cmd_track_lag_ticks"
+       << ',' << side << "_follower_cmd_tracks"
        << ',' << side << "_follower_lead_reanchor_explained_count"
        << ',' << side << "_follower_lead_reanchor_unexplained_count"
        << ',' << side << "_follower_warm_resume_count"
@@ -360,6 +368,14 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_coverage_reason"
        << ',' << side << "_fc_law"
        << ',' << side << "_fc_compose_applied"
+       << ',' << side << "_fc_reference_dev_x_m"
+       << ',' << side << "_fc_reference_dev_y_m"
+       << ',' << side << "_fc_reference_dev_z_m"
+       << ',' << side << "_fc_reference_dev_rx_rad"
+       << ',' << side << "_fc_reference_dev_ry_rad"
+       << ',' << side << "_fc_reference_dev_rz_rad"
+       << ',' << side << "_fc_reference_strip_enabled"
+       << ',' << side << "_fc_reference_reset_count"
        << ',' << side << "_fc_dev_x_m"
        << ',' << side << "_fc_dev_y_m"
        << ',' << side << "_fc_dev_z_m"
@@ -824,6 +840,14 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << csvEscape(fc.coverage_reason)
        << ',' << csvEscape(fc.law)
        << ',' << fc.compose_applied
+       << ',' << fc.reference_deviation_m[0]
+       << ',' << fc.reference_deviation_m[1]
+       << ',' << fc.reference_deviation_m[2]
+       << ',' << fc.reference_deviation_rad[0]
+       << ',' << fc.reference_deviation_rad[1]
+       << ',' << fc.reference_deviation_rad[2]
+       << ',' << (fc.reference_strip_enabled ? 1 : 0)
+       << ',' << fc.reference_reset_count
        << ',' << fc.deviation_m[0]
        << ',' << fc.deviation_m[1]
        << ',' << fc.deviation_m[2]
@@ -965,7 +989,10 @@ void writeArmProfilingColumns(
     writeJointArrayColumns(os, telemetry.follower_target_acceleration);
     os << ',' << telemetry.follower_segments
        << ',' << telemetry.follower_advance_gate
-       << ',' << telemetry.follower_plan_rate_gate;
+       << ',' << telemetry.follower_plan_rate_gate
+       << ',' << telemetry.follower_core_gate
+       << ',' << telemetry.follower_leash_gate
+       << ',' << telemetry.follower_solve_failures;
     for (double value : telemetry.follower_advance_direction) os << ',' << value;
     os << ',' << telemetry.follower_output_smd_reseeded;
     writePoseColumns(os, commandTcpTargetStand(command));
@@ -1017,12 +1044,11 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_output_smd_active
        << ',' << telemetry.follower_output_smd_lag_m
        << ',' << telemetry.follower_output_smd_lag_rad;
-    if (telemetry.follower_prefilter_stand.has_value()) {
-        os << ',' << telemetry.follower_prefilter_stand->x
-           << ',' << telemetry.follower_prefilter_stand->y
-           << ',' << telemetry.follower_prefilter_stand->z;
-    } else {
-        os << ",,,";
+    writePoseColumns(os, telemetry.follower_prefilter_stand);
+    for (const auto& value : {telemetry.follower_sample_velocity,
+                              telemetry.follower_sample_acceleration}) {
+        if (value) writeDeltaTwistVecColumns(os, *value);
+        else for (int i = 0; i < 6; ++i) os << ',';
     }
     os << ',' << telemetry.follower_divergence_pos_m
        << ',' << telemetry.follower_divergence_ang_rad
@@ -1034,6 +1060,11 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_actual_lead_error_count
        << ',' << telemetry.follower_reanchor_count
        << ',' << telemetry.follower_divergence_reanchor_count
+       << ',' << telemetry.follower_divergence_excused_count
+       << ',' << telemetry.follower_cmd_track_pos_m
+       << ',' << telemetry.follower_cmd_track_rad
+       << ',' << telemetry.follower_cmd_track_lag_ticks
+       << ',' << (telemetry.follower_cmd_tracks ? 1 : 0)
        << ',' << telemetry.follower_lead_reanchor_explained_count
        << ',' << telemetry.follower_lead_reanchor_unexplained_count
        << ',' << telemetry.follower_warm_resume_count

@@ -123,4 +123,26 @@ A hardware-free validation run is useful only when:
 
 ## Not A Hardware Acceptance
 
+The fresh chunk path also has dedicated hardware-free coverage:
+`chunk_fresh_continuity` exercises C++ sampled-p/v/a splices, SO(3) derivatives,
+force/plan gates and held-reference resume; `force_overlay_resume` repeats the
+actual servo-loop InitMotion/tare/first-chunk regression with both new flags
+enabled. Policy scheduler tests use the production dispatcher, and
+`test_servo_command_proprio.py` checks frozen windows, epochs, gripper capture,
+stale/missing data and model-request refusal. Recorded-latency and recorded-delta
+replays are conditional comparisons, not hardware/model acceptance. See
+[the design and evidence map](plans/plan_fresh_chunk_execution_20260906.md).
+
 A passing hardware-free gate is not permission to run a physical robot. Real robot work must start with a separate read-only acceptance plan.
+
+
+The output-conditioner regression also checks the selected tracked real gain,
+frequency response against the historical amplification, and a moving-reference
+stop. `test_follower_output_smd --replay-reference INPUT OUTPUT STACK_YAML PROFILE`
+replays sampled references without connecting devices. Its JSONL requires explicit
+initial pose/velocity and documents any reconstructed derivatives; it does not
+recreate the follower or robot feedback. `recorded_pose_ik_audit` then audits actual
+Pinocchio IK and joint clamps with a hashed per-arm calibrated URDF. It excludes
+plant/contact feedback and the geometric/collision safety projection. The actual
+mock servo-loop InitMotion/tare/IK-refusal regression is run separately. See
+[conditioner evidence and limitations](reference/follower_output_conditioning.md).

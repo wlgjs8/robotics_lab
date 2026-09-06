@@ -128,6 +128,21 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.left_robot.operation_mode == "real");
         RB_CHECK(stack_real.right_robot.operation_mode == "real");
         RB_CHECK(stack_real.servo.rate_hz == 500);
+        {
+            // The cell-structure band the env_* geometry (the riser) is enforced
+            // against. Asserted on the TRACKED file because the numbers are the
+            // safety decision: at the self 40 mm floor the recorded 35.7 mm closest
+            // approach is a hard violation, and a_brake must stay INHERITED (-1) or
+            // the braking invariant fails at the 0.60 m/s ceiling (needs 0.085 with
+            // a_brake 3.0, 0.065 with the shared 4.5).
+            const auto& env = stack_real.safety.self_collision.mesh.environment;
+            RB_CHECK(env.d_hard_m == 0.025);
+            RB_CHECK(env.d_slow_m == 0.067);
+            RB_CHECK(env.a_brake_m_s2 < 0.0);   // inherits the self ramp
+            RB_CHECK(env.hyst_m < 0.0);         // inherits the self hysteresis
+            RB_CHECK(env.recover_speed_m_s == 0.0);
+            RB_CHECK(env.d_hard_m < stack_real.safety.self_collision.mesh.d_hard_m);
+        }
         RB_CHECK(stack_real.servo.send_servo_commands);
         RB_CHECK(stack_real.servo.allow_real_motion_with_suspect_diagnostics);
         RB_CHECK(!stack_real.servo.allow_controller_simulation_motion);
@@ -165,11 +180,12 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.cartesian_control.allow_in_real);
         RB_CHECK(!stack_real.cartesian_control.allow_in_controller_simulation);
         RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profile_default == "umi_large_smooth");
-        RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profiles.size() == 3);
+        RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profiles.size() == 4);
         bool has_spacemouse = false;
         bool has_umi = false;
         bool has_flow = false;
         const rb_servo::TcpPoseTargetProfileConfig* flow_profile = nullptr;
+        const rb_servo::TcpPoseTargetProfileConfig* fresh_profile = nullptr;
         const rb_servo::TcpPoseTargetProfileConfig* umi_profile = nullptr;
         for (const auto& profile : stack_real.cartesian_control.tcp_pose_target_profiles) {
             has_spacemouse = has_spacemouse || profile.name == "spacemouse_precise";
@@ -178,6 +194,7 @@ bool testRepositoryConfigsParse() {
             if (profile.name == "flow_infer_smooth") {
                 flow_profile = &profile;
             }
+            if (profile.name == "flow_infer_fresh") fresh_profile = &profile;
             if (profile.name == "umi_large_smooth") {
                 umi_profile = &profile;
             }
@@ -186,6 +203,11 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(has_umi);
         RB_CHECK(has_flow);
         RB_CHECK(flow_profile != nullptr);
+        RB_CHECK(fresh_profile != nullptr);
+        RB_CHECK(fresh_profile->ruckig_follower.fresh_chunk_replan);
+        RB_CHECK(fresh_profile->ruckig_follower.continuous_hold_resume);
+        RB_CHECK(!flow_profile->ruckig_follower.fresh_chunk_replan);
+        RB_CHECK(!flow_profile->ruckig_follower.continuous_hold_resume);
         RB_CHECK(umi_profile != nullptr);
         // UMI teleop singularity guard. The ramp onset (full/floor) is the part that was
         // measured to throttle normal motion, so it is pinned; scale_min was lowered
@@ -352,12 +374,19 @@ bool testRepositoryConfigsParse() {
                  rb_servo::CartesianControllerSimulationStateSource::Reference);
         RB_CHECK(stack_sim.cartesian_control.tcp_pose_target_profile_default ==
                  "umi_large_smooth");
-        RB_CHECK(stack_sim.cartesian_control.tcp_pose_target_profiles.size() == 3);
+        RB_CHECK(stack_sim.cartesian_control.tcp_pose_target_profiles.size() == 4);
         const rb_servo::TcpPoseTargetProfileConfig* sim_flow_profile = nullptr;
+        const rb_servo::TcpPoseTargetProfileConfig* sim_fresh_profile = nullptr;
         for (const auto& profile : stack_sim.cartesian_control.tcp_pose_target_profiles) {
             if (profile.name == "flow_infer_smooth") sim_flow_profile = &profile;
+            if (profile.name == "flow_infer_fresh") sim_fresh_profile = &profile;
         }
         RB_CHECK(sim_flow_profile != nullptr);
+        RB_CHECK(sim_fresh_profile != nullptr);
+        RB_CHECK(sim_fresh_profile->ruckig_follower.fresh_chunk_replan);
+        RB_CHECK(sim_fresh_profile->ruckig_follower.continuous_hold_resume);
+        RB_CHECK(!sim_flow_profile->ruckig_follower.fresh_chunk_replan);
+        RB_CHECK(!sim_flow_profile->ruckig_follower.continuous_hold_resume);
         RB_CHECK(sim_flow_profile->ruckig_follower.controller ==
                  rb_servo::RuckigFollowerController::DeltaPreview);
         RB_CHECK(sim_flow_profile->ruckig_follower.consume_steps == 12);

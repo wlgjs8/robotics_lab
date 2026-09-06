@@ -27,6 +27,9 @@ namespace rb_servo::control {
 // which has zero steady-state ramp lag and retains -40 dB/dec asymptotic
 // rolloff. Feeding raw reference velocity would degrade that to -20 dB/dec
 // (about 0.54 gain at 13 Hz for nf=3.5 Hz), defeating the output filter.
+// The translation-only velocity_ff_linear_gain k changes (3s + wn) above to
+// ((1 + 2k)s + wn). Lower k trades ramp delay for less peaking/excitation;
+// angular FF, Ruckig limits and safety/force handling are independent of k.
 class FollowerOutputSmd {
 public:
     explicit FollowerOutputSmd(const FollowerOutputSmdConfig& config);
@@ -35,7 +38,18 @@ public:
     // states are also set to xi, so engagement does not manufacture a transient.
     void reset(const Pose6D& pose, const Vec6& xi);
 
-    Pose6D step(const Pose6D& reference, const Vec6& xi_ref, double dt_sec);
+    // With reference_body_derivatives=true, xi_ref uses stand linear /
+    // reference-body angular velocity and xi_dot_ref matching wall-time
+    // derivatives. False preserves the legacy untransported angular input.
+    // `xi_dot_ref` (optional): the reference ACCELERATION at this sample. With
+    // config.profile_feedforward it is added as a feed-forward term and `xi_ref` is
+    // used unfiltered, so a jerk-limited profile is tracked without lag.
+    Pose6D step(const Pose6D& reference, const Vec6& xi_ref, double dt_sec,
+                const Vec6* xi_dot_ref = nullptr,
+                bool reference_body_derivatives = false);
+    // True when the last step() re-seeded the state onto the reference because the
+    // reference had jumped past the reseed bounds (a re-anchor, never routine lag).
+    bool reseededLastStep() const { return reseeded_last_step_; }
 
     // THE FORCE OVERLAY'S FOLD, on this stage's own state: translate the filtered
     // position and left-compose the filtered orientation by the displacement the
@@ -51,6 +65,11 @@ public:
     // Last-step distance from the pre-filter reference to the emitted pose.
     double lagPos() const { return lag_pos_m_; }
     double lagAng() const { return lag_ang_rad_; }
+    // Diagnostic view of the retained angular LPF state. In the opt-in FF-off
+    // path this verifies equivalence to a filter expressed in a fixed frame.
+    Eigen::Vector3d filteredAngularVelocityStand() const {
+        return rotation_ * angular_velocity_ff_;
+    }
 
 private:
     Pose6D currentPose() const;
@@ -65,6 +84,7 @@ private:
     Eigen::Vector3d angular_velocity_ff_ = Eigen::Vector3d::Zero();
     double lag_pos_m_ = 0.0;
     double lag_ang_rad_ = 0.0;
+    bool reseeded_last_step_ = false;
 };
 
 }  // namespace rb_servo::control

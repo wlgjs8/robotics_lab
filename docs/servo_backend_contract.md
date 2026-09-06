@@ -218,6 +218,43 @@ the CSV publishes `<side>_ft_auto_tare_stage`.
 Automatic tare does not verify that the gripper is empty or that no person is
 touching the wrist. That remains an operator check.
 
+### Force reference across InitMotion and first-chunk waits
+
+A fresh InitMotion request accepted by the planner-backed sequencer starts a new Cartesian/force reference for
+each selected arm, including an already-at-goal request. It clears that arm's
+previous overlay, force gate, compliant-Hold nominal, Cartesian trackers and
+pending plan folds before the joint brake/no-op path runs. It preserves the
+last sent joints, their velocity history, and the joint trajectory filter.
+The opposite arm is unchanged. This reset is independent of automatic tare;
+retransmitting the same logical InitMotion request does not reset it again.
+The tracked real profile enables this sequencer; planner-disabled direct
+JointTarget fallback is outside this lifecycle regression.
+
+The overlay remains frozen, with its displacement preserved, during ordinary
+coverage loss. A first-chunk wait may strip that displacement from its live
+reference only when the downstream Cartesian target will receive the compose:
+coverage must be ready, the stream armed, and queue-sync not pinning output.
+Sub-micrometre composed offsets are written too; a quiescence diagnostic cannot
+discard the inverse of an earlier reference conversion. `compose_applied` reports
+a nonzero transform actually composed, including those small offsets. Tare-valid
+and force-covered are separate states, so a policy resuming after tare may still
+wait at the last sent pose during coverage recovery.
+
+State JSON adds `force_control.reference_deviation_stand_m/rad` (the internal
+overlay at tick entry, even while uncovered), `reference_strip_enabled` and
+`reference_reset_count`. CSV counterparts are `<arm>_fc_reference_dev_{x,y,z}_m`,
+`<arm>_fc_reference_dev_{rx,ry,rz}_rad`, `<arm>_fc_reference_strip_enabled` and
+`<arm>_fc_reference_reset_count`. Existing `deviation_*` fields still describe
+the applied law's sample, so zero there does not imply no frozen internal state.
+
+`test_force_overlay_resume` exercises the production servo loop and Pinocchio
+with in-memory robot/force inputs and a manual 500 Hz clock. No hardware
+receiver is started. This is an InitMotion/reference and waiting-target
+regression; it does not establish actuator stability or correct every active
+trajectory transition when force coverage changes. In particular, rebasing an
+already active trajectory across coverage loss/recovery and composing force
+folds with safety folds require their own validation.
+
 ## ArmWorker Command Policy
 
 Streaming servo requests are latest-wins. If a pending command is overwritten before dispatch, the worker must expose drop/overwrite telemetry. This is intentional for servo targets but must not be silent.
@@ -982,3 +1019,30 @@ State JSON should expose:
 - Cartesian solve/path telemetry when Cartesian modes are active
 
 State publication is an operational truth surface. Do not hide backend or safety details behind a single `ok` field.
+
+
+### Chunk output conditioner observability
+
+The `delta_preview` path uses `ruckig_follower.output_smd`, independently of the
+legacy `pose_track_smd` tuning above. `velocity_ff_linear_gain` multiplies only the
+low-passed translation velocity in the damping term; it defaults to 1 and must be
+finite in [0, 1]. A non-default gain requires `velocity_ff: true` and
+`profile_feedforward: false`, preventing silently ignored settings. The real
+`flow_infer_fresh` profile explicitly selects 0.8; smooth and controller-sim retain
+their previous behavior. No Servo J, joint, IK, force or follower motion limit changes.
+See [selection and validation](reference/follower_output_conditioning.md).
+
+CSV `*_follower_prefilter_stand_*` now includes the full quaternion (xyzw) and
+Euler fields in addition to the existing xyz. `*_follower_sample_velocity_0..5`
+and `*_follower_sample_acceleration_0..5` are the physical wall-time sampled
+Ruckig derivatives: stand-frame linear and reference-body angular components,
+in m/s, rad/s and m/s², rad/s². They are populated on the fresh physical-derivative
+path even with acceleration FF off and are empty when unavailable. These are
+not `*_follower_target_velocity_*` endpoint derivatives. Inactive/reset paths
+clear them. Plan-rate scaling is included as in `outputKinematics()`; its gate
+is piecewise constant per sample, not a measured gate derivative. Logging is
+observational and does not enter the control law.
+
+UDP state publication preserves core data and sheds only optional visualization
+witnesses to keep the packet within a byte budget. Truncation and ongoing send
+failures are explicit; see [wire contract](reference/state_udp_payload_budget.md).

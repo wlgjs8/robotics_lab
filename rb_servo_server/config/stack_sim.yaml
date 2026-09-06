@@ -398,6 +398,36 @@ safety:
       # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
       # 장애물로 양팔과 페어링. shape: box|sphere|capsule|cylinder.
       # TODO(operator): 실제 치수/장착 오프셋으로 채운 뒤 주석 해제할 것(추측값 금지).
+      # CELL STRUCTURE (env_* geometry in the unified URDF). Today that is
+      # env_stand_riser, the 307 x 324 x 295 mm block between the stand base plate
+      # and the work table, which make_rb5_850e_urdfs.py emits with a <collision>
+      # (ENVIRONMENT entry "collision": True). Any env_* box that opts in lands here.
+      #
+      # 25/67, NOT the 40/90 self set, and the reason is measured. Over 1,075 poses
+      # sampled from servo_log_20260906_131740 the closest arm link came to 35.7 mm of
+      # the riser (left elbow, link3), so a 40 mm floor would clamp_hold on 1.1% of the
+      # postures the cell already uses and put 21.4% of them inside the slow band. At
+      # 25 mm nothing in that run violates and the margin to the closest approach is
+      # 10.7 mm -- comfortably outside the box's own ~6 mm position uncertainty (2.50 mm
+      # fit rms + 3.3 mm arm-to-arm bias). 25/67 is also not a new pair of numbers: it
+      # is what this stack shipped as its SELF set until 2026-09-05, and gripper_gripper
+      # still keeps it.
+      #
+      # The self set is wide because arm<->arm carries ~20 mm of dual-arm relative
+      # error; a tape-and-contact measured box does not, so it does not need that
+      # margin.
+      #
+      # a_brake and hyst are deliberately NOT pinned here: they inherit the self set,
+      # so a retune of the shared ramp carries into this class instead of silently
+      # leaving it behind. That inheritance is load-bearing for the braking invariant
+      # d_slow >= d_hard + v^2/(2*a): at the current ceiling (0.60 m/s) and the shared
+      # a_brake (4.5) the requirement is 0.025 + 0.60^2/9 = 0.065 <= 0.067. Pinning
+      # a_brake at 3.0 would need 0.085 and the loader refuses to start -- which is how
+      # this was caught. If a_brake is ever lowered, widen d_slow with it.
+      environment:
+        d_hard_m: 0.025
+        d_slow_m: 0.067
+        recover_speed_m_s: 0.0
       extra_collision: []
       #   - { name: left_wrist_camera,  shape: box, parent_frame: dual_rb3_730e_left_attachment_site,
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
@@ -743,7 +773,7 @@ cartesian_control:
         # 2026-07-31 measurement showing the rotation axes dominate the firing rate.
         corner_deadband_lin_m: 0.0003        # 0.3 mm
         corner_deadband_ang_rad: 0.0005      # 0.029 deg
-        corner_velocity_scale: 0.25
+        corner_velocity_scale: 1.0           # mirrors stack_real.yaml (2026-09-06)
         delta_twist_clear_residual_on_new_frame: true
         delta_twist_min_time_to_go_sec: 0.015
         delta_twist_tau_sec: 0.020
@@ -759,6 +789,16 @@ cartesian_control:
         preview_max_actual_lead_m: 0.006
         preview_max_actual_lead_rad: 0.01745329252
         preview_max_consecutive_actual_lead_errors: 3
+        # Plan-clock pacing, mirrors stack_real.yaml (2026-09-06): core time-stretch
+        # + divergence leash. See docs/plans/plan_clock_time_stretch_20260906.md.
+        core_time_stretch_enable: true
+        core_time_stretch_max_ratio: 4.0
+        plan_leash_enable: true
+        plan_leash_start_m: 0.010
+        plan_leash_start_rad: 0.0349
+        plan_leash_full_m: 0.050
+        plan_leash_full_rad: 0.10
+        plan_leash_min_gate: 0.25
         hold_bounce_resume_sec: 0.5
         chunk_feed_timeout_sec: 1.5
         # 2026-09-04: fault -> hold. Same strictness (never chase a stale target through
@@ -770,6 +810,73 @@ cartesian_control:
         fallback_policy: "hold"
         engage_timeout_sec: 3.0
       max_smd_goal_lead_m: 0.080
+      max_smd_goal_lead_rad: 0.35
+    # Explicit experimental execution profile. Same limits as this stack's
+    # flow_infer_smooth; only fresh retargeting and refusal/resume state handling differ.
+    flow_infer_fresh:
+      pose_track_smd:
+        enable: true
+        damping_ratio_linear: 1.0
+        damping_ratio_angular: 1.0
+        natural_frequency_linear_hz: 1.6
+        natural_frequency_angular_hz: 1.6
+        velocity_feedforward: true
+        max_linear_velocity_m_s: 0.5
+        max_linear_accel_m_s2: 1.2
+        max_angular_velocity_rad_s: 1.8
+        max_angular_accel_rad_s2: 5.0
+        reengage_relatch_max_step_m: 0.01
+        reengage_relatch_max_step_rad: 0.1
+        singularity_scale_full_sigma: 0.12
+        singularity_scale_floor_sigma: 0.05
+        singularity_scale_min: 0.12
+      ruckig_follower:
+        enable: true
+        controller: delta_preview
+        max_linear_velocity_m_s: 0.18
+        max_linear_accel_m_s2: 1.5
+        max_linear_jerk_m_s3: 45.0
+        max_angular_velocity_rad_s: 0.6
+        max_angular_accel_rad_s2: 3.0
+        max_angular_jerk_rad_s3: 120.0
+        discard_head_steps: 0
+        consume_steps: 12
+        reserve_steps: 2
+        smoothing_window: 1
+        af_damping_beta: 1.0
+        corner_deadband_lin_m: 0.0003
+        corner_deadband_ang_rad: 0.0005
+        corner_velocity_scale: 1.0
+        delta_twist_clear_residual_on_new_frame: true
+        delta_twist_min_time_to_go_sec: 0.015
+        delta_twist_tau_sec: 0.02
+        delta_twist_residual_drain_steps: 1
+        delta_twist_max_residual_m: 0.006
+        delta_twist_max_residual_rad: 0.05
+        delta_twist_max_lead_m: 0.02
+        delta_twist_max_lead_rad: 0.06
+        delta_twist_stale_residual_timeout_sec: 0.15
+        preview_max_projection_error_m: 0.001
+        preview_max_projection_error_rad: 0.00436332313
+        preview_max_consecutive_projection_errors: 3
+        preview_max_actual_lead_m: 0.006
+        preview_max_actual_lead_rad: 0.01745329252
+        preview_max_consecutive_actual_lead_errors: 3
+        core_time_stretch_enable: true
+        core_time_stretch_max_ratio: 4.0
+        plan_leash_enable: true
+        plan_leash_start_m: 0.01
+        plan_leash_start_rad: 0.0349
+        plan_leash_full_m: 0.05
+        plan_leash_full_rad: 0.1
+        plan_leash_min_gate: 0.25
+        hold_bounce_resume_sec: 0.5
+        chunk_feed_timeout_sec: 1.5
+        fallback_policy: hold
+        engage_timeout_sec: 3.0
+        fresh_chunk_replan: true
+        continuous_hold_resume: true
+      max_smd_goal_lead_m: 0.08
       max_smd_goal_lead_rad: 0.35
   linear_move:
     min_duration_sec: 0.05

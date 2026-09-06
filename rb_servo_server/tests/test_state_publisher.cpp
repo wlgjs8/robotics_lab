@@ -4,9 +4,13 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <atomic>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -364,14 +368,293 @@ bool testStatePublisherKeepsForceTelemetryInsideTheArmObjects() {
     return true;
 }
 
+bool testStatePublisherPreservesForceReferenceWhenUncovered() {
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(8);
+    snapshot.left_force_control.covered = false;
+    snapshot.left_force_control.reference_deviation_m = {0.011, -0.022, 0.033};
+    snapshot.left_force_control.reference_deviation_rad = {-0.044, 0.055, -0.066};
+    snapshot.left_force_control.reference_strip_enabled = false;
+    snapshot.left_force_control.reference_reset_count = 9'007'199'254'740'993ULL;
+    snapshot.right_force_control.covered = true;
+    snapshot.right_force_control.reference_deviation_m = {-0.071, 0.082, -0.093};
+    snapshot.right_force_control.reference_deviation_rad = {0.104, -0.115, 0.126};
+    snapshot.right_force_control.reference_strip_enabled = true;
+    snapshot.right_force_control.reference_reset_count = 7;
+
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    for (const char* arm : {"left", "right"}) {
+        const auto& fc = json.at(arm).at("force_control");
+        const auto& expected = std::string(arm) == "left"
+            ? snapshot.left_force_control : snapshot.right_force_control;
+        RB_CHECK(fc.at("reference_deviation_stand_m").get<std::vector<double>>() ==
+                 std::vector<double>(expected.reference_deviation_m.begin(), expected.reference_deviation_m.end()));
+        RB_CHECK(fc.at("reference_deviation_stand_rad").get<std::vector<double>>() ==
+                 std::vector<double>(expected.reference_deviation_rad.begin(), expected.reference_deviation_rad.end()));
+        RB_CHECK(fc.at("reference_strip_enabled").get<bool>() == expected.reference_strip_enabled);
+        RB_CHECK(fc.at("reference_reset_count").is_number_unsigned());
+        RB_CHECK(fc.at("reference_reset_count").get<uint64_t>() == expected.reference_reset_count);
+    }
+    const auto& left = json.at("left").at("force_control");
+    RB_CHECK(!left.at("covered").get<bool>());
+    RB_CHECK(left.at("deviation_stand_m").get<std::vector<double>>() == std::vector<double>(3, 0.0));
+    RB_CHECK(left.at("deviation_stand_rad").get<std::vector<double>>() == std::vector<double>(3, 0.0));
+    return true;
+}
+
+bool testStatePublisherSerializesPerPairSelfCollisionBands() {
+    // The near list is ordered by RAW clearance, so a consumer cannot tell which pairs
+    // are in hard violation unless each pair carries its OWN floor. Measured on the RB5
+    // (2026-09-06): the structural intra-arm link3<->link5 pair sits at ~23 mm against a
+    // 5 mm floor and is near[0] on 99.4% of ticks, while a gripper<->gripper pair at
+    // 8.5 mm IS violating its 25 mm floor. Banding both against the single 40 mm self
+    // d_hard_m calls the structural pair a violation and can name the wrong parts.
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(321);
+    snapshot.self_collision_mesh = true;
+    rb_servo::SelfCollisionNearPairViz intra;
+    intra.name_a = "dual_rb5_850e_left_link3_1";
+    intra.name_b = "dual_rb5_850e_left_link5_0";
+    intra.clearance_m = 0.0229;
+    intra.intra_arm = true;
+    intra.d_hard_m = 0.005;
+    intra.d_slow_m = 0.015;
+    rb_servo::SelfCollisionNearPairViz grip;
+    grip.name_a = "dual_rb5_850e_left_pika_gripper_base";
+    grip.name_b = "dual_rb5_850e_right_pika_gripper_base";
+    grip.clearance_m = 0.0085;
+    grip.gripper_gripper = true;
+    grip.d_hard_m = 0.025;
+    grip.d_slow_m = 0.067;
+    snapshot.self_collision_near_pairs = {intra, grip};
+
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    const auto& pairs = json.at("self_collision").at("near_pairs");
+    RB_CHECK(pairs.size() == 2);
+
+    const auto& a = pairs.at(0);
+    RB_CHECK(a.at("intra_arm").get<bool>());
+    RB_CHECK(!a.at("gripper_gripper").get<bool>());
+    RB_CHECK(a.at("d_hard_m").get<double>() == 0.005);
+    RB_CHECK(a.at("d_slow_m").get<double>() == 0.015);
+    // Nearest, but NOT violating: 22.9 mm is well outside its own 5 mm floor.
+    RB_CHECK(a.at("clearance_m").get<double>() >= a.at("d_hard_m").get<double>());
+
+    const auto& b = pairs.at(1);
+    RB_CHECK(b.at("gripper_gripper").get<bool>());
+    RB_CHECK(!b.at("intra_arm").get<bool>());
+    RB_CHECK(b.at("d_hard_m").get<double>() == 0.025);
+    // Ranked second, but this is the pair actually in hard violation.
+    RB_CHECK(b.at("clearance_m").get<double>() < b.at("d_hard_m").get<double>());
+    return true;
+}
+
+bool testPublisherAdvertisesConfiguredChunkExecutionWithoutMotion() {
+    rb_servo::DualArmConfig config;
+    rb_servo::TcpPoseTargetProfileConfig legacy;
+    legacy.name = "flow_infer_smooth";
+    legacy.ruckig_follower.enable = true;
+    legacy.ruckig_follower.controller = rb_servo::RuckigFollowerController::DeltaPreview;
+    auto fresh = legacy;
+    fresh.name = "flow_infer_fresh";
+    fresh.ruckig_follower.fresh_chunk_replan = true;
+    fresh.ruckig_follower.continuous_hold_resume = true;
+    fresh.ruckig_follower.output_smd.velocity_ff_linear_gain = 0.25;
+    config.cartesian_control.tcp_pose_target_profiles = {legacy, fresh};
+    rb_servo::StatePublisher publisher(config);
+    const auto json = nlohmann::json::parse(publisher.serializeSnapshot(snapshotWithTick(0)));
+    const auto& profiles = json.at("chunk_execution_profiles");
+    RB_CHECK(profiles.size() == 2);
+    RB_CHECK(profiles.at(0).at("name") == "flow_infer_smooth");
+    RB_CHECK(!profiles.at(0).at("fresh_chunk_replan").get<bool>());
+    RB_CHECK(profiles.at(1).at("name") == "flow_infer_fresh");
+    RB_CHECK(profiles.at(1).at("controller") == "delta_preview");
+    RB_CHECK(profiles.at(1).at("enabled").get<bool>());
+    RB_CHECK(profiles.at(1).at("fresh_chunk_replan").get<bool>());
+    RB_CHECK(profiles.at(1).at("continuous_hold_resume").get<bool>());
+    RB_CHECK(profiles.at(1).at("output_smd").at("velocity_ff_linear_gain") == 0.25);
+    RB_CHECK(profiles.at(0).at("output_smd").at("velocity_ff_linear_gain") == 1.0);
+    config.cartesian_control.enable = false;
+    rb_servo::StatePublisher disabled(config);
+    const auto off = nlohmann::json::parse(disabled.serializeSnapshot(snapshotWithTick(0)));
+    RB_CHECK(!off.at("chunk_execution_profiles").at(1).at("enabled").get<bool>());
+    return true;
+}
+
+rb_servo::ServoSnapshot witnessStressSnapshot(int count, bool all_hard = false) {
+    auto snapshot = snapshotWithTick(912);
+    snapshot.loop_start_time_ns = 1582481108339256ULL;
+    snapshot.motion_epoch = 17;
+    snapshot.left_force_control.reference_reset_count = 6;
+    snapshot.right_force_control.reference_reset_count = 8;
+    snapshot.left_state.tcp_command_stand = rb_servo::Pose6D{0.13, -0.27, 0.14, 0.2, 0.3, 0.4};
+    snapshot.self_collision_mesh = true;
+    snapshot.self_collision_enabled = true;
+    snapshot.self_collision_checked = true;
+    snapshot.self_collision_violated = true;
+    snapshot.self_collision_near_count = count;
+    snapshot.self_collision_pair = "left_stand";
+    for (int i = 0; i < count; ++i) {
+        rb_servo::SelfCollisionNearPairViz pair;
+        pair.name_a = "dual_rb5_850e_left_link3_" + std::to_string(i);
+        pair.name_b = "dual_rb5_850e_right_pika_gripper_finger_" + std::to_string(i);
+        pair.p_a_m = {0.12345678912345678, -0.23456789123456789, 0.34567891234567891};
+        pair.p_b_m = {0.14345678912345678, -0.24456789123456789, 0.35567891234567891};
+        // Raw-clearance sorted, but the last two are the urgent ones because
+        // their own hard floor differs. The first/nearest pairs are harmless.
+        const bool hard = all_hard || i >= count - 2;
+        pair.clearance_m = 0.020123456789 + i * 0.0001;
+        pair.d_hard_m = hard ? 0.1 : 0.005;
+        pair.d_slow_m = 0.12;
+        snapshot.self_collision_near_pairs.push_back(pair);
+    }
+    return snapshot;
+}
+
+bool testWitnessBudgetPreservesCoreAndUrgentPairs() {
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    const auto snapshot = witnessStressSnapshot(220);
+    const std::string payload = publisher.serializeSnapshot(snapshot);
+    auto result = nlohmann::json::parse(payload);
+    const auto& sc = result.at("self_collision");
+    const auto& pairs = sc.at("near_pairs");
+    RB_CHECK(payload.size() <= 64'000);
+    RB_CHECK(result.at("state_publication").at("payload_bytes") == payload.size());
+    RB_CHECK(sc.at("near_pairs_total") == 220);
+    RB_CHECK(sc.at("near_pairs_published") == pairs.size());
+    RB_CHECK(sc.at("near_pairs_truncated").get<bool>());
+    RB_CHECK(sc.at("near_pairs_hard_total") == 2);
+    RB_CHECK(sc.at("near_pairs_hard_published") == 2);
+    RB_CHECK(!sc.at("near_pairs_hard_truncated").get<bool>());
+    RB_CHECK(pairs.at(pairs.size() - 2).at("name_a") == snapshot.self_collision_near_pairs[218].name_a);
+    RB_CHECK(pairs.back().at("name_a") == snapshot.self_collision_near_pairs[219].name_a);
+    for (std::size_t i = 1; i < pairs.size(); ++i) {
+        RB_CHECK(pairs[i - 1].at("clearance_m").get<double>() <= pairs[i].at("clearance_m").get<double>());
+    }
+    // The const servo snapshot and all non-witness JSON are unchanged. This
+    // covers the full legacy tree, not just a selected list of proprio fields.
+    RB_CHECK(snapshot.self_collision_near_pairs.size() == 220);
+    auto core_snapshot = snapshot;
+    core_snapshot.self_collision_near_pairs.clear();
+    auto core = nlohmann::json::parse(publisher.serializeSnapshot(core_snapshot));
+    for (auto* j : {&core, &result}) {
+        j->at("state_publication").erase("payload_bytes");
+        for (const char* name : {"near_pairs", "near_pairs_total", "near_pairs_published",
+             "near_pairs_truncated", "near_pairs_hard_total", "near_pairs_hard_published",
+             "near_pairs_hard_truncated"}) {
+            j->at("self_collision").erase(name);
+        }
+    }
+    RB_CHECK(core == result);
+    return true;
+}
+
+bool testWitnessBudgetMarksIncompleteHardPairsAndEscapedBytes() {
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    auto snapshot = witnessStressSnapshot(220, true);
+    // JSON escaping/UTF-8 byte length, not character count or pair count, owns
+    // the wire bound. A single huge witness must not crowd out the core state.
+    snapshot.self_collision_near_pairs.front().name_a = std::string(40'000, '\n') + u8"로봇";
+    snapshot.self_collision_near_pairs[1].clearance_m = std::numeric_limits<double>::quiet_NaN();
+    snapshot.self_collision_near_pairs[2].d_hard_m = std::numeric_limits<double>::infinity();
+    const auto payload = publisher.serializeSnapshot(snapshot);
+    const auto result = nlohmann::json::parse(payload);
+    const auto& sc = result.at("self_collision");
+    RB_CHECK(payload.size() <= 64'000);
+    RB_CHECK(sc.at("near_pairs_hard_truncated").get<bool>());
+    RB_CHECK(sc.at("near_pairs_hard_total") == 218);
+    RB_CHECK(sc.at("near_pairs_hard_published").get<int>() > 0);
+    RB_CHECK(sc.at("near_pairs_hard_published").get<int>() < 220);
+    RB_CHECK(result.at("state_publication").at("payload_bytes") == payload.size());
+    return true;
+}
+
+bool testOversizeCoreIsNeverSilentlyRemoved() {
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    auto snapshot = witnessStressSnapshot(220);
+    snapshot.fault_reason = std::string(70'000, 'x');
+    const auto payload = publisher.serializeSnapshot(snapshot);
+    const auto result = nlohmann::json::parse(payload);
+    RB_CHECK(payload.size() > 65'507);
+    RB_CHECK(result.at("fault_reason") == snapshot.fault_reason);
+    RB_CHECK(result.at("fault_context").at("reason") == snapshot.fault_reason);
+    RB_CHECK(result.at("self_collision").at("near_pairs_published") == 0);
+    RB_CHECK(result.at("self_collision").at("near_pairs_hard_truncated").get<bool>());
+    RB_CHECK(result.at("state_publication").at("payload_bytes") == payload.size());
+    return true;
+}
+
+bool testBoundedWitnessPayloadActuallyFansOutOverUdp() {
+    UdpSocket recorder, gui;
+    if (!bindLoopbackUdp(&recorder) || !bindLoopbackUdp(&gui)) return true;
+    rb_servo::DualArmConfig cfg;
+    cfg.network.state_pub_endpoints = {endpointFor(recorder), endpointFor(gui)};
+    cfg.network.state_pub_rate_hz = 100;
+    const auto snapshot = witnessStressSnapshot(220);
+    rb_servo::StatePublisher publisher(cfg, [&]() { return snapshot; });
+    RB_CHECK(publisher.start());
+    std::string recorder_payload, gui_payload;
+    const bool received = receivePacket(recorder.fd, &recorder_payload) &&
+        receivePacket(gui.fd, &gui_payload);
+    publisher.stop();
+    RB_CHECK(received);
+    RB_CHECK(recorder_payload.size() <= 64'000);
+    RB_CHECK(recorder_payload == gui_payload);
+    const auto result = nlohmann::json::parse(recorder_payload);
+    RB_CHECK(result.at("self_collision").at("near_pairs_truncated").get<bool>());
+    RB_CHECK(result.at("motion_epoch") == 17);
+    RB_CHECK(result.at("left").at("force_control").at("reference_reset_count") == 6);
+    return true;
+}
+
+bool testOversizeDropDiagnosticAndRecovery() {
+    UdpSocket sink;
+    if (!bindLoopbackUdp(&sink)) return true;
+    rb_servo::DualArmConfig cfg;
+    cfg.network.state_pub_endpoints = {endpointFor(sink)};
+    cfg.network.state_pub_rate_hz = 100;
+    std::atomic<int> calls{0};
+    rb_servo::StatePublisher publisher(cfg, [&]() {
+        auto snapshot = snapshotWithTick(100 + calls.load());
+        if (calls.fetch_add(1) < 3) snapshot.fault_reason = std::string(70'000, 'x');
+        return snapshot;
+    });
+    std::ostringstream diagnostics;
+    auto* previous = std::cerr.rdbuf(diagnostics.rdbuf());
+    const bool started = publisher.start();
+    std::string payload;
+    const bool received = started && receivePacket(sink.fd, &payload);
+    publisher.stop();
+    std::cerr.rdbuf(previous);
+    RB_CHECK(started && received);
+    const auto result = nlohmann::json::parse(payload);
+    RB_CHECK(result.at("state_publication").at("oversize_dropped_total") == 3);
+    RB_CHECK(result.at("state_publication").at("last_error_code") == EMSGSIZE);
+    RB_CHECK(result.at("state_publication").at("last_error_time_ns").get<uint64_t>() > 0);
+    RB_CHECK(diagnostics.str().find("core payload exceeds IPv4 UDP limit") != std::string::npos);
+    RB_CHECK(diagnostics.str().find("monotonic_ns=") != std::string::npos);
+    RB_CHECK(diagnostics.str().find("bytes=") != std::string::npos);
+    RB_CHECK(diagnostics.str().find("payload size recovered") != std::string::npos);
+    RB_CHECK(diagnostics.str().find("dropped=3") != std::string::npos);
+    return true;
+}
+
 }  // namespace
 
 int main() {
+    if (!testWitnessBudgetPreservesCoreAndUrgentPairs()) return 1;
+    if (!testWitnessBudgetMarksIncompleteHardPairsAndEscapedBytes()) return 1;
+    if (!testOversizeCoreIsNeverSilentlyRemoved()) return 1;
+    if (!testBoundedWitnessPayloadActuallyFansOutOverUdp()) return 1;
+    if (!testOversizeDropDiagnosticAndRecovery()) return 1;
+    if (!testPublisherAdvertisesConfiguredChunkExecutionWithoutMotion()) return 1;
     if (!testStatePublisherFanoutSendsSamePayloadToTwoSockets()) return 1;
     if (!testStatePublisherLegacySingleEndpointStillWorks()) return 1;
     if (!testStatePublisherSerializesJointReferenceFields()) return 1;
     if (!testStatePublisherSerializesAsyncStreamingFields()) return 1;
     if (!testStatePublisherKeepsForceTelemetryInsideTheArmObjects()) return 1;
+    if (!testStatePublisherPreservesForceReferenceWhenUncovered()) return 1;
+    if (!testStatePublisherSerializesPerPairSelfCollisionBands()) return 1;
     if (!testRealtimeTimingAccumulatorAndSerialization()) return 1;
     return 0;
 }

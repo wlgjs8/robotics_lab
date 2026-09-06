@@ -50,6 +50,32 @@ Server-level:
 
 Publish `camera.health` once per second.
 
+RealSense identity fields describe the **currently opened pipeline**, not the
+startup discovery scan. After each successful `pipeline.start`, the device
+captures `profile.get_device()` metadata and verifies its SDK serial against
+the configured serial. With reconnect enabled, the manager publishes this
+metadata atomically with `connected: true` after the first frame. With reconnect
+disabled, the existing successful-start readiness boundary is preserved.
+
+On frame timeout, failed start, or server stop, the manager removes that camera's
+firmware/product/USB/physical-port metadata together with `connected: false`,
+before potentially blocking device teardown. Missing identity is not filled
+from an older discovery result. Mock/UVC devices may have no RealSense metadata;
+a real RealSense pipeline without active identity cannot become connected.
+The configured `serial` remains visible while disconnected.
+
+Capture diagnostics are sampled before the atomic connected/identity snapshot.
+If a device is undergoing lifecycle work, its optional capture statistics are
+omitted for that health sample instead of waiting for teardown and returning
+an older routing snapshot afterward.
+
+This matters for USB routing: native librealsense may report a sysfs path ending
+in `video4linux/videoN`. USB recovery can replace that leaf, or move the same
+camera to another USB root, while preserving its SDK serial. Consumers must
+validate the full current path and fail closed on a missing path; they must not
+guess a replacement from a stale ancestor. Linux USB descriptor serials can
+differ from RealSense SDK serials and are not interchangeable identity checks.
+
 Also print concise log:
 
 ```text

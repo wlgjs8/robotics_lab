@@ -134,6 +134,7 @@ from rb_servo_gui.box_detect_control import (
 )
 from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui import geometry as gui_geometry
+from rb_servo_gui import scene
 from rb_servo_gui.models import (
     CIRCLE_OVERLAY_SCHEMA_VERSION,
     EXTERNAL_BOX_COLLISION_M,
@@ -348,6 +349,7 @@ class RecordingCommandFake:
 
 class RecordingSceneHandle:
     def __init__(self):
+        self.color = None
         self.position = None
         self.wxyz = None
         self.points = None
@@ -637,12 +639,36 @@ class RecordingServer:
         self.scene = scene
 
 
+class RecordingMeshNode:
+    """One ViserUrdf mesh node: a read-only path name + assignable visibility, which
+    is the whole surface update_self_collision_overlay drives per body group."""
+    def __init__(self, name):
+        self.name = name
+        self.visible = None
+
+
 class RecordingUrdf:
-    def __init__(self):
+    def __init__(self, meshes=None):
         self.configs = []
+        # Mirrors viser's ViserUrdf._meshes: one handle per URDF <visual> geometry,
+        # named through the link that carries it. Default None = a handle the overlay
+        # cannot split, which must fall back to whole-arm visibility.
+        self._meshes = meshes
 
     def update_cfg(self, config):
         self.configs.append(tuple(float(value) for value in config))
+
+
+# The REAL viser node names for the articulated arm URDF, verified against
+# viser.extras._urdf._viser_name_from_frame on rb5_850e_pika_articulated.urdf
+# (2026-09-06): 38 arm meshes under link0..link6, 7 gripper meshes under
+# tool / finger_left / finger_right, all hanging off attachment_site.
+def arm_urdf_meshes(root):
+    arm_chain = "link0/link1/link2/link3/link4/link5/link6"
+    names = [f"{root}/visual/link0/geometry_0", f"{root}/visual/{arm_chain}/geometry_37"]
+    for i, link in enumerate(("tool", "finger_left", "finger_right")):
+        names.append(f"{root}/visual/{arm_chain}/attachment_site/{link}/geometry_{38 + i}")
+    return [RecordingMeshNode(name) for name in names]
 
 
 class GuiContractsTest(unittest.TestCase):
@@ -6164,6 +6190,31 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         }
 
     @staticmethod
+    def _split_handles():
+        """Handles whose arm URDFs expose viser's per-link mesh nodes, so the overlay
+        can light up a gripper without its arm (the un-split fixture above cannot,
+        and must keep the whole-arm behavior)."""
+        handles = SelfCollisionOverlayTest._handles()
+        for side in ("left", "right"):
+            handles[f"{side}_urdf"] = RecordingUrdf(
+                meshes=arm_urdf_meshes(f"/stand/{side}_base"))
+            handles[f"{side}_urdf_ref"] = RecordingUrdf(
+                meshes=arm_urdf_meshes(f"/stand/{side}_base_ref"))
+            handles[f"{side}_urdf_collision"] = RecordingUrdf(
+                meshes=arm_urdf_meshes(f"/stand/{side}_base_collision"))
+        return handles
+
+    @staticmethod
+    def _mesh_visibility(handles, key):
+        """{"arm": set(visible flags), "gripper": set(...)} for one URDF's meshes."""
+        out = {"arm": set(), "gripper": set()}
+        for node in handles[key]._meshes:
+            group = "gripper" if set(node.name.split("/")) & {
+                "tool", "finger_left", "finger_right"} else "arm"
+            out[group].add(node.visible)
+        return out
+
+    @staticmethod
     def _latest(
         *,
         violated,
@@ -6172,6 +6223,8 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         q_sent,
         pair="left_stand",
         external_box_clearance_m=None,
+        near_pairs=None,
+        manifest=None,
     ):
         store = StateStore(stale_after_sec=5.0)
         arm = {
@@ -6183,6 +6236,14 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         sc = {"enabled": True, "checked": True, "violated": violated,
               "pair": pair,
               "stand_capsule": "lower_column" if pair and "stand" in pair else None}
+        if near_pairs is not None:
+            sc["near_pairs"] = [
+                {"name_a": a, "name_b": b, "p_a_m": [0.0, 0.0, 0.0],
+                 "p_b_m": [0.0, 0.0, 0.1], "clearance_m": 0.001}
+                for a, b in near_pairs
+            ]
+        if manifest is not None:
+            sc["manifest"] = manifest
         if external_box_clearance_m is not None:
             sc["external_box_clearance_m"] = external_box_clearance_m
             finite = [c for c in external_box_clearance_m if isinstance(c, (int, float)) and math.isfinite(float(c))]
@@ -6266,6 +6327,161 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         self.assertTrue(handles["right_base"].visible)
         self.assertEqual(handles["left_urdf_collision"].configs, [])
 
+    def test_gripper_pair_reddens_only_the_two_grippers(self):
+        handles = self._split_handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="left_right",
+            manifest={"left_prefix": "dual_rb5_850e_left_",
+                      "right_prefix": "dual_rb5_850e_right_"},
+            near_pairs=[("dual_rb5_850e_left_pika_finger_right",
+                         "dual_rb5_850e_right_pika_finger_left")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        for side in ("left", "right"):
+            red = self._mesh_visibility(handles, f"{side}_urdf_collision")
+            self.assertEqual(red["gripper"], {True}, side)   # gripper hulls red
+            self.assertEqual(red["arm"], {False}, side)      # arm links NOT red
+            # The solid arm stays visible; only the replaced gripper is hidden.
+            solid = self._mesh_visibility(handles, f"{side}_urdf")
+            self.assertEqual(solid["arm"], {True}, side)
+            self.assertEqual(solid["gripper"], {False}, side)
+            self.assertTrue(handles[f"{side}_base"].visible, side)
+            self.assertTrue(handles[f"{side}_base_collision"].visible, side)
+        # No stand geometry in the pair -> the stand is untouched.
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+
+    def test_arm_stand_pair_leaves_that_arms_gripper_normal(self):
+        handles = self._split_handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="right_stand",
+            manifest={"left_prefix": "dual_rb5_850e_left_",
+                      "right_prefix": "dual_rb5_850e_right_"},
+            near_pairs=[("dual_rb5_850e_right_link2_0", "stand_body_shoulder_0")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        red = self._mesh_visibility(handles, "right_urdf_collision")
+        self.assertEqual(red["arm"], {True})
+        self.assertEqual(red["gripper"], {False})
+        solid = self._mesh_visibility(handles, "right_urdf")
+        self.assertEqual(solid["arm"], {False})   # replaced by the red overlay
+        self.assertEqual(solid["gripper"], {True})
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        # The left arm is not in the pair at all.
+        left = self._mesh_visibility(handles, "left_urdf_collision")
+        self.assertEqual(left["arm"] | left["gripper"], {False})
+        self.assertFalse(handles["left_base_collision"].visible)
+        self.assertEqual(handles["left_urdf_collision"].configs, [])
+
+    def test_riser_violation_reddens_the_cell_structure_box(self):
+        # env_* boxes are add_box handles, not URDF meshes: the highlight is the box's
+        # own colour, so it has to be restored exactly when the violation clears.
+        handles = self._split_handles()
+        handles["environment_names"] = ["env_stand_riser", "env_work_table"]
+        handles["environment_rgb"] = {"env_stand_riser": (51, 51, 54),
+                                      "env_work_table": (90, 90, 90)}
+        handles["environment_env_stand_riser"] = RecordingSceneHandle()
+        handles["environment_env_work_table"] = RecordingSceneHandle()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="all",
+            manifest={"left_prefix": "dual_rb5_850e_left_",
+                      "right_prefix": "dual_rb5_850e_right_"},
+            near_pairs=[("dual_rb5_850e_left_link3_1", "env_stand_riser_0")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertEqual(handles["environment_env_stand_riser"].color,
+                         scene._SELF_COLLISION_STAND_RGB)
+        # The left arm is the other member; the stand is NOT involved.
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        # Cleared -> the URDF colours come back.
+        update_self_collision_overlay(handles, self._latest(
+            violated=False, physical_real=True, q_actual=[1, 2, 3, 4, 5, 6], q_sent=None))
+        self.assertEqual(handles["environment_env_stand_riser"].color, (51, 51, 54))
+        self.assertEqual(handles["environment_env_work_table"].color, (90, 90, 90))
+
+    def test_split_overlay_clears_back_to_normal(self):
+        handles = self._split_handles()
+        update_self_collision_overlay(handles, self._latest(
+            violated=True, physical_real=True, pair="left_right",
+            manifest={"left_prefix": "dual_rb5_850e_left_",
+                      "right_prefix": "dual_rb5_850e_right_"},
+            near_pairs=[("dual_rb5_850e_left_pika_finger_right",
+                         "dual_rb5_850e_right_pika_finger_left")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None))
+        update_self_collision_overlay(handles, self._latest(
+            violated=False, physical_real=True,
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None))
+        for side in ("left", "right"):
+            red = self._mesh_visibility(handles, f"{side}_urdf_collision")
+            self.assertEqual(red["arm"] | red["gripper"], {False}, side)
+            solid = self._mesh_visibility(handles, f"{side}_urdf")
+            self.assertEqual(solid["arm"] | solid["gripper"], {True}, side)
+            self.assertFalse(handles[f"{side}_base_collision"].visible, side)
+            self.assertTrue(handles[f"{side}_base"].visible, side)
+
+    def test_sim_gripper_pair_replaces_only_the_ghost_gripper(self):
+        handles = self._split_handles()
+        latest = self._latest(
+            violated=True, physical_real=False, pair="left_right",
+            manifest={"left_prefix": "dual_rb5_850e_left_",
+                      "right_prefix": "dual_rb5_850e_right_"},
+            near_pairs=[("dual_rb5_850e_left_pika_gripper_base",
+                         "dual_rb5_850e_right_pika_gripper_base")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=[9, 8, 7, 6, 5, 4])
+        update_self_collision_overlay(handles, latest)
+        for side in ("left", "right"):
+            ghost = self._mesh_visibility(handles, f"{side}_urdf_ref")
+            self.assertEqual(ghost["gripper"], {False}, side)  # replaced by red
+            self.assertEqual(ghost["arm"], {True}, side)       # ghost arm stays
+            # The solid robot (q_actual) is untouched in controller simulation.
+            solid = self._mesh_visibility(handles, f"{side}_urdf")
+            self.assertEqual(solid["arm"] | solid["gripper"], {True}, side)
+            # The red overlay is posed at the COMMANDED pose.
+            self.assertAlmostEqual(
+                handles[f"{side}_urdf_collision"].configs[-1][0], math.radians(9.0))
+            # update_scene_markers owns the ghost frame; the overlay must not hide it.
+            self.assertIsNone(handles[f"{side}_base_ref"].visible, side)
+
+    def test_unsplittable_urdf_keeps_whole_arm_behavior(self):
+        # No viser mesh list (older/newer viser, or meshes not loaded): the gripper
+        # cannot be separated, so the whole arm reddens — the pre-split behavior.
+        handles = self._handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="left_right",
+            manifest={"left_prefix": "dual_rb5_850e_left_",
+                      "right_prefix": "dual_rb5_850e_right_"},
+            near_pairs=[("dual_rb5_850e_left_pika_finger_right",
+                         "dual_rb5_850e_right_pika_finger_left")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["right_base_collision"].visible)
+        self.assertFalse(handles["left_base"].visible)
+        self.assertFalse(handles["right_base"].visible)
+
+    def test_rebuilt_urdf_invalidates_the_cached_mesh_split(self):
+        # ensure_calibrated_arm_urdfs swaps the arm URDFs at runtime (box DH). A
+        # cached mesh list from the removed handle would drive dead scene nodes.
+        handles = self._split_handles()
+        args = dict(
+            violated=True, physical_real=True, pair="left_right",
+            manifest={"left_prefix": "dual_rb5_850e_left_",
+                      "right_prefix": "dual_rb5_850e_right_"},
+            near_pairs=[("dual_rb5_850e_left_pika_finger_right",
+                         "dual_rb5_850e_right_pika_finger_left")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, self._latest(**args))
+        old = handles["left_urdf_collision"]
+        handles["left_urdf_collision"] = RecordingUrdf(
+            meshes=arm_urdf_meshes("/stand/left_base_collision"))
+        update_self_collision_overlay(handles, self._latest(**args))
+        self.assertEqual(self._mesh_visibility(handles, "left_urdf_collision")["gripper"],
+                         {True})
+        # The removed handle's nodes are left where they were, not driven again.
+        self.assertEqual({node.visible for node in old._meshes if "finger_left" in node.name},
+                         {True})
+
     def test_external_box_collision_paints_both_arms_red(self):
         handles = self._handles()
         latest = self._latest(
@@ -6285,6 +6501,282 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         self.assertFalse(handles["right_base_ref"].visible)
         self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(9.0))
         self.assertAlmostEqual(handles["right_urdf_collision"].configs[-1][0], math.radians(9.0))
+
+
+class SelfCollisionGroupClassifyTest(unittest.TestCase):
+    """The five body groups (left/right arm, left/right gripper, stand) the red
+    overlay lights up, derived from the monitor's own geometry names."""
+
+    LEFT = "dual_rb5_850e_left_"
+    RIGHT = "dual_rb5_850e_right_"
+
+    def group(self, name, left=None, right=None):
+        return scene._self_collision_geom_group(
+            name, self.LEFT if left is None else left, self.RIGHT if right is None else right)
+
+    def test_arm_link_and_gripper_hulls_split_by_the_pika_marker(self):
+        # collision_monitor.cpp: gripper hulls are the "<prefix>pika_*" objects it
+        # attaches at attachment_site; everything else prefixed is an arm link.
+        self.assertEqual(self.group(self.LEFT + "link4_2"), "left_arm")
+        self.assertEqual(self.group(self.RIGHT + "link0_0"), "right_arm")
+        self.assertEqual(self.group(self.LEFT + "pika_gripper_base"), "left_gripper")
+        self.assertEqual(self.group(self.RIGHT + "pika_gripper"), "right_gripper")
+
+    def test_right_arms_left_finger_is_not_the_left_arm(self):
+        # "<right_prefix>pika_finger_left" contains BOTH words. Prefix matching keeps
+        # it on the right arm; the server's own side() lambda (find "left" first)
+        # would file it under the left.
+        self.assertEqual(self.group(self.RIGHT + "pika_finger_left"), "right_gripper")
+        self.assertEqual(self.group(self.LEFT + "pika_finger_right"), "left_gripper")
+
+    def test_cell_structure_is_its_own_group_not_stand(self):
+        # env_stand_riser carries a <collision> since 2026-09-06 and the server checks
+        # it in its own `environment` barrier class. Filing it under "stand" would
+        # redden the stand mesh and leave the box the arm actually reached untouched.
+        self.assertEqual(self.group("env_stand_riser_0"), "environment")
+        self.assertEqual(self.group("env_work_table_0"), "environment")
+        # ...and it wins over the word search even without a manifest.
+        self.assertEqual(self.group("env_stand_riser_0", left="", right=""), "environment")
+
+    def test_stand_links_named_left_right_are_still_stand(self):
+        # The unified URDF has stand_left_arm_base / stand_right_arm_base. Matching
+        # neither arm prefix is conclusive: that geometry is stand, not an arm.
+        self.assertEqual(self.group("stand_left_arm_base_0"), "stand")
+        self.assertEqual(self.group("stand_right_arm_base_0"), "stand")
+        self.assertEqual(self.group("stand_body_shoulder_1"), "stand")
+        self.assertEqual(self.group("ground_plane"), "stand")
+
+    def test_word_fallback_only_without_prefixes(self):
+        # No manifest -> fall back to the EARLIEST of left/right in the name.
+        self.assertEqual(self.group(self.RIGHT + "pika_finger_left", left="", right=""),
+                         "right_gripper")
+        self.assertEqual(self.group(self.LEFT + "link3_0", left="", right=""), "left_arm")
+        self.assertEqual(self.group("stand_collision_0", left="", right=""), "stand")
+
+    def test_unusable_names_are_reported_as_such(self):
+        self.assertIsNone(self.group(None))
+        self.assertIsNone(self.group(""))
+        self.assertIsNone(self.group(17))
+
+
+class SelfCollisionNearPairBandTest(unittest.TestCase):
+    """Tube color for one near pair. Same bug as the red-group selection: the caller
+    can only see external-vs-not, but the monitor enforces five bands."""
+
+    # The self / external thresholds the caller derives from the manifest.
+    HARD, SLOW, EXT_HARD, EXT_SLOW = 0.040, 0.090, 0.003, 0.025
+
+    def band(self, pair, clearance):
+        return scene._near_pair_band(
+            pair, clearance, self.HARD, self.SLOW, self.EXT_HARD, self.EXT_SLOW)
+
+    def test_structural_intra_arm_pair_is_not_painted_hard_red(self):
+        # 22.9 mm is under the 40 mm SELF floor but 4.6x outside its own 5 mm intra-arm
+        # floor. Before the per-pair band it was painted HARD RED on ~99% of ticks.
+        kind, band, rgb = self.band(
+            {"intra_arm": True, "d_hard_m": 0.005, "d_slow_m": 0.015}, 0.0229)
+        self.assertEqual((kind, band), ("self", "ok"))
+        self.assertEqual(rgb, scene._SELF_COLLISION_NEAR_OK_RGB)
+
+    def test_gripper_pair_inside_its_own_floor_is_hard_red(self):
+        kind, band, rgb = self.band(
+            {"gripper_gripper": True, "d_hard_m": 0.025, "d_slow_m": 0.067}, 0.0085)
+        self.assertEqual((kind, band), ("self", "hard"))
+        self.assertEqual(rgb, scene._SELF_COLLISION_NEAR_HARD_RGB)
+        # ...and amber between its own floor and its own slow band.
+        self.assertEqual(self.band(
+            {"gripper_gripper": True, "d_hard_m": 0.025, "d_slow_m": 0.067}, 0.030)[1],
+            "caution")
+
+    def test_external_pairs_keep_their_own_palette(self):
+        kind, band, rgb = self.band(
+            {"external": True, "d_hard_m": 0.003, "d_slow_m": 0.025}, 0.001)
+        self.assertEqual((kind, band), ("ext", "hard"))
+        self.assertEqual(rgb, scene._EXTERNAL_NEAR_HARD_RGB)
+
+    def test_without_a_published_band_it_falls_back_to_self_vs_external(self):
+        # Older server: the two-way split, i.e. the previous behavior exactly.
+        self.assertEqual(self.band({}, 0.0229)[1], "hard")          # < self 40 mm
+        self.assertEqual(self.band({}, 0.050)[1], "caution")        # < self 90 mm
+        self.assertEqual(self.band({}, 0.200)[1], "ok")
+        self.assertEqual(self.band({"external": True}, 0.010)[1], "caution")  # ext band
+
+
+class SelfCollisionRedGroupsTest(unittest.TestCase):
+    MANIFEST = {"left_prefix": "dual_rb5_850e_left_", "right_prefix": "dual_rb5_850e_right_"}
+
+    def test_hard_pairs_omitted_from_state_do_not_hide_another_arm(self):
+        sc = {
+            "pair": "left_stand", "manifest": self.MANIFEST,
+            "near_pairs_truncated": True, "near_pairs_hard_truncated": True,
+            "near_pairs": [{"name_a": "dual_rb5_850e_left_link2_0",
+                            "name_b": "stand_body_shoulder_0",
+                            "clearance_m": 0.020, "d_hard_m": 0.040}],
+        }
+        for box in (False, True):
+            with self.subTest(box=box):
+                self.assertEqual(scene._self_collision_red_groups(sc, True, box),
+                                 set(scene._SELF_COLLISION_GROUPS))
+        self.assertEqual(scene._self_collision_red_groups(sc, False, False), set())
+        # Omitting only non-breaching witnesses preserves precise existing labels.
+        sc["near_pairs_hard_truncated"] = False
+        self.assertEqual(scene._self_collision_red_groups(sc, True, False),
+                         {"left_arm", "stand"})
+
+    def groups(self, *, violated=True, box=False, pair="left_stand", near=None, manifest=True):
+        """near entries are (name_a, name_b) — no per-pair band, i.e. an older server
+        that only supports the near_pairs[0] fallback."""
+        sc = {"violated": violated, "pair": pair}
+        if manifest:
+            sc["manifest"] = self.MANIFEST
+        if near is not None:
+            sc["near_pairs"] = [{"name_a": a, "name_b": b} for a, b in near]
+        return scene._self_collision_red_groups(sc, violated, box)
+
+    def graded(self, near, *, violated=True, box=False, pair="left_stand"):
+        """near entries are (name_a, name_b, clearance_m, d_hard_m) — a server that
+        publishes each pair's OWN barrier floor."""
+        sc = {
+            "violated": violated,
+            "pair": pair,
+            "manifest": self.MANIFEST,
+            "near_pairs": [
+                {"name_a": a, "name_b": b, "clearance_m": c, "d_hard_m": h,
+                 "d_slow_m": h * 2.0}
+                for a, b, c, h in near
+            ],
+        }
+        return scene._self_collision_red_groups(sc, violated, box)
+
+    # -- the bug this replaced: nearest != violating -------------------------- #
+
+    def test_the_violating_pair_wins_over_the_merely_nearest_one(self):
+        # MEASURED (servo_log_20260906_131740.csv): the structural intra-arm
+        # link3<->link5 pair sits at 22.9 mm against its own 5 mm floor and is the
+        # NEAREST pair on 99.4% of 53,795 ticks. An arm<->stand pair breaching its
+        # 40 mm floor at 39 mm ranks below it. Keying off near_pairs[0] therefore
+        # reddened the left arm and left the actual breach unmarked.
+        near = [
+            ("dual_rb5_850e_left_link3_1", "dual_rb5_850e_left_link5_0", 0.0229, 0.005),
+            ("dual_rb5_850e_right_link2_0", "stand_body_shoulder_0", 0.039, 0.040),
+        ]
+        self.assertEqual(self.graded(near), {"right_arm", "stand"})
+        # The old rule, for contrast: it names the nearest pair, which is not violating.
+        self.assertEqual(
+            self.groups(near=[(a, b) for a, b, _c, _h in near]), {"left_arm"})
+
+    def test_riser_violation_names_the_cell_structure(self):
+        # The elbow reaching the riser lights that arm and the riser -- not the stand,
+        # and not the whole robot.
+        near = [("dual_rb5_850e_left_link3_1", "env_stand_riser_0", 0.020, 0.025)]
+        self.assertEqual(self.graded(near), {"left_arm", "environment"})
+        # Its own 25 mm floor decides, not the 40 mm self floor: 35.7 mm (the measured
+        # closest approach of the 13:17 run) is under 40 but clears 25, so nothing
+        # lights up.
+        near_clear = [("dual_rb5_850e_left_link3_1", "env_stand_riser_0", 0.0357, 0.025)]
+        self.assertEqual(self.graded(near_clear), set(scene._SELF_COLLISION_GROUPS))
+        self.assertNotIn("environment", scene._self_collision_red_groups(
+            {"violated": False, "manifest": self.MANIFEST,
+             "near_pairs": [{"name_a": "dual_rb5_850e_left_link3_1",
+                             "name_b": "env_stand_riser_0",
+                             "clearance_m": 0.0357, "d_hard_m": 0.025}]}, False, False))
+
+    def test_every_violating_pair_is_highlighted_not_just_one(self):
+        near = [
+            ("dual_rb5_850e_left_link3_1", "dual_rb5_850e_left_link5_0", 0.0229, 0.005),
+            ("dual_rb5_850e_left_pika_gripper_base",
+             "dual_rb5_850e_right_pika_gripper_base", 0.0085, 0.025),
+            ("dual_rb5_850e_right_link2_0", "stand_body_shoulder_0", 0.039, 0.040),
+        ]
+        self.assertEqual(
+            self.graded(near),
+            {"left_gripper", "right_gripper", "right_arm", "stand"},
+        )
+
+    def test_a_pair_inside_its_own_floor_is_not_highlighted(self):
+        # 22.9 mm is under the 40 mm SELF floor but way outside its own 5 mm intra-arm
+        # floor, so it must not light anything up on its own.
+        near = [("dual_rb5_850e_left_link3_1", "dual_rb5_850e_left_link5_0", 0.0229, 0.005)]
+        self.assertEqual(self.graded(near, violated=False), set())
+        # violated=True with no pair actually breaching -> the breach is outside the
+        # published near list (viz truncation); fail loud rather than highlight nothing.
+        self.assertEqual(self.graded(near), set(scene._SELF_COLLISION_GROUPS))
+
+    def test_pairs_without_a_published_floor_fall_back_to_the_nearest(self):
+        # Older server: no d_hard_m anywhere -> previous behavior (near_pairs[0]).
+        near = [
+            ("dual_rb5_850e_left_pika_finger_right",
+             "dual_rb5_850e_right_pika_finger_left"),
+            ("dual_rb5_850e_right_link2_0", "stand_body_shoulder_0"),
+        ]
+        self.assertEqual(self.groups(near=near), {"left_gripper", "right_gripper"})
+
+    def test_a_json_true_is_not_read_as_a_one_metre_floor(self):
+        # bool is a subclass of int; if `d_hard_m` ever arrived as a JSON boolean it
+        # must be rejected, not read as 1.0 m (which would mark every pair violating).
+        sc = {
+            "violated": True, "pair": "left_stand", "manifest": self.MANIFEST,
+            "near_pairs": [{"name_a": "dual_rb5_850e_left_link3_1",
+                            "name_b": "dual_rb5_850e_left_link5_0",
+                            "clearance_m": 0.0229, "d_hard_m": True}],
+        }
+        self.assertEqual(
+            scene._self_collision_red_groups(sc, True, False), {"left_arm"})
+
+    def test_near_pair_names_drive_the_groups(self):
+        # Geometry NAMES are what buys the arm/gripper split: two grippers touching
+        # lights the two GRIPPERS, not two whole arms, which is all the coarse
+        # pair="left_right" category can express. (Ungraded fallback path here — the
+        # graded tests below cover the same naming with per-pair floors.)
+        self.assertEqual(
+            self.groups(near=[("dual_rb5_850e_left_pika_finger_right",
+                               "dual_rb5_850e_right_pika_finger_left")], pair="left_right"),
+            {"left_gripper", "right_gripper"},
+        )
+        # A gripper on the other arm's forearm: one gripper + one arm.
+        self.assertEqual(
+            self.groups(near=[("dual_rb5_850e_left_pika_gripper_base",
+                               "dual_rb5_850e_right_link3_1")], pair="left_right"),
+            {"left_gripper", "right_arm"},
+        )
+        # Arm on stand leaves that arm's gripper normal.
+        self.assertEqual(
+            self.groups(near=[("dual_rb5_850e_right_link2_0", "stand_body_shoulder_0")],
+                        pair="right_stand"),
+            {"right_arm", "stand"},
+        )
+
+    def test_ungraded_fallback_uses_only_the_closest_pair(self):
+        # Without per-pair floors there is no way to tell which pair breached, so the
+        # fallback keeps the old rule: near_pairs[0], the pair the server also names in
+        # `pair`/`stand_capsule` and marks with the witness spheres.
+        self.assertEqual(
+            self.groups(near=[("dual_rb5_850e_left_pika_finger_left",
+                               "dual_rb5_850e_right_pika_finger_right"),
+                              ("dual_rb5_850e_left_link1_0", "stand_collision_0")]),
+            {"left_gripper", "right_gripper"},
+        )
+
+    def test_falls_back_to_the_coarse_pair_without_near_pairs(self):
+        # Exactly the pre-split behavior: the arm groups carry their gripper along.
+        self.assertEqual(self.groups(pair="left_stand"),
+                         {"left_arm", "left_gripper", "stand"})
+        self.assertEqual(self.groups(pair="right_stand"),
+                         {"right_arm", "right_gripper", "stand"})
+        self.assertEqual(self.groups(pair="left_right"),
+                         {"left_arm", "left_gripper", "right_arm", "right_gripper"})
+
+    def test_unknown_pair_is_all_red(self):
+        self.assertEqual(self.groups(pair=None), set(scene._SELF_COLLISION_GROUPS))
+        self.assertEqual(self.groups(pair="something_new"), set(scene._SELF_COLLISION_GROUPS))
+
+    def test_not_violated_is_no_groups_and_a_box_hit_is_both_arms(self):
+        self.assertEqual(self.groups(violated=False, box=False), set())
+        # External-box telemetry is per-box, not per-geometry: it cannot name a side.
+        self.assertEqual(
+            self.groups(violated=False, box=True),
+            {"left_arm", "right_arm", "left_gripper", "right_gripper"},
+        )
 
 
 class _CheckGeomUrdf:

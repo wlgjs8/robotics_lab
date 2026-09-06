@@ -1,5 +1,6 @@
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
 #include "rb_servo/control/hold_fold.hpp"
+#include "rb_servo/control/command_tracking_window.hpp"
 #include "rb_servo/kinematics/dual_arm_kinematics.hpp"
 
 #include <algorithm>
@@ -243,6 +244,20 @@ void appendReason(ArmStartupValidationSnapshot* validation, const std::string& r
 // below an inter-episode swing (tens of cm), so it isolates external moves without false trips.
 constexpr double kPoseTrackReanchorPosTolM = 0.05;
 constexpr double kPoseTrackReanchorAngTolRad = 0.10;
+// HARD divergence bound (2026-09-06). The 50 mm / 0.10 rad pair above is the SOFT
+// bound: crossing it used to latch chunk_follower_divergence outright, and
+// servo_log_20260906_123643.csv 120.0 s showed what that latches on -- the policy
+// asked the left wrist for 53-84 deg/s, the follower core capped it at 0.9 rad/s and
+// the output SMD + IK throttle lagged a further 5.5 deg (and, found afterwards, 557 of
+// the window's segment solves were Ruckig-refused because the target-velocity clamp
+// sat 5e-10 above v_max -- chunk_follower_core.hpp clampInside), so the PLAN sat 6 deg
+// ahead of the SENT command while the arm tracked that command to 0.7-1.1 deg. That
+// is the lag of this chain, not the robot leaving the plan. A soft breach while the robot
+// tracks its command (dead-time tolerant, see CommandTrackingWindow) is now excused;
+// only these hard bounds still latch regardless, as the runaway backstop.
+constexpr double kPoseTrackDivergenceHardPosTolM = 0.10;
+constexpr double kPoseTrackDivergenceHardAngTolRad = 0.30;   // 17.2 deg
+// The recent-command window length lives with the windows (DualArmServoLoop::kCommandTrackingWindowTicks).
 // Strict chunk-follower divergence is explained only by a safety intervention
 // stamped by applySafety on a recent prior tick. The follower stage runs before
 // this tick's safety evaluation, so the window must cover one or more servo ticks
@@ -329,7 +344,7 @@ ArmCommand applyPoseTrackSmd(
     // this stage emits and must not be anchored on twice (AdmittanceOverlay::strip).
     Pose6D reference =
         kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount);
-    if (overlay != nullptr && overlay->hasDeviation()) reference = overlay->strip(reference);
+    if (overlay != nullptr) reference = overlay->strip(reference);
     if (!tracker->active()) {
         if (seed_stand_twist != nullptr) {
             tracker->reset(reference, *seed_stand_twist);
@@ -438,6 +453,8 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.output_smd.damping_ratio != b.output_smd.damping_ratio ||
         a.output_smd.velocity_ff != b.output_smd.velocity_ff ||
         a.output_smd.velocity_ff_lpf_hz != b.output_smd.velocity_ff_lpf_hz ||
+        a.output_smd.velocity_ff_linear_gain != b.output_smd.velocity_ff_linear_gain ||
+        a.output_smd.profile_feedforward != b.output_smd.profile_feedforward ||
         a.af_damping_beta_lin != b.af_damping_beta_lin ||
         a.af_damping_beta_ang != b.af_damping_beta_ang ||
         a.corner_deadband_lin_m != b.corner_deadband_lin_m ||
@@ -460,7 +477,11 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.preview_max_consecutive_actual_lead_errors != b.preview_max_consecutive_actual_lead_errors ||
         a.hold_bounce_resume_sec != b.hold_bounce_resume_sec ||
         a.preview_projection_fault_policy != b.preview_projection_fault_policy ||
-        a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
+        a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec ||
+        a.core_time_stretch_enable != b.core_time_stretch_enable ||
+        a.core_time_stretch_max_ratio != b.core_time_stretch_max_ratio ||
+        a.fresh_chunk_replan != b.fresh_chunk_replan ||
+        a.continuous_hold_resume != b.continuous_hold_resume;
 }
 
 control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollowerConfig& rf) {
@@ -482,6 +503,10 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
     cfg.max_actual_lead_m = rf.preview_max_actual_lead_m;
     cfg.max_actual_lead_rad = rf.preview_max_actual_lead_rad;
     cfg.max_consecutive_actual_lead_errors = rf.preview_max_consecutive_actual_lead_errors;
+    cfg.core_time_stretch_enable = rf.core_time_stretch_enable;
+    cfg.core_time_stretch_max_ratio = rf.core_time_stretch_max_ratio;
+    cfg.fresh_chunk_replan = rf.fresh_chunk_replan;
+    cfg.continuous_hold_resume = rf.continuous_hold_resume;
     return cfg;
 }
 
@@ -2282,6 +2307,20 @@ DualArmServoLoop::DualArmServoLoop(
             inherit(m.gripper_gripper.hyst_m, m.hyst_m);
         collision_monitor_cfg_.gripper_gripper_recover_speed_m_s =
             inherit(m.gripper_gripper.recover_speed_m_s, m.recover_speed_m_s);
+        // Cell structure (env_* geometry). Unset values inherit the self set, which is
+        // the conservative direction: a wider floor, never a narrower one.
+        collision_monitor_cfg_.environment_d_hard_m =
+            inherit(m.environment.d_hard_m, m.d_hard_m);
+        collision_monitor_cfg_.environment_d_slow_m =
+            inherit(m.environment.d_slow_m, m.d_slow_m);
+        collision_monitor_cfg_.environment_a_brake_m_s2 =
+            inherit(m.environment.a_brake_m_s2, m.a_brake_m_s2);
+        collision_monitor_cfg_.environment_hyst_m =
+            inherit(m.environment.hyst_m, m.hyst_m);
+        collision_monitor_cfg_.environment_recover_speed_m_s =
+            inherit(m.environment.recover_speed_m_s, m.recover_speed_m_s);
+        collision_monitor_cfg_.environment_latency_s =
+            inherit(m.environment.latency_s, m.latency_s);
         collision_monitor_cfg_.external_boxes.enable = m.external_boxes.enable;
         collision_monitor_cfg_.external_boxes.max_count = m.external_boxes.max_count;
         collision_monitor_cfg_.external_boxes.size_m = m.external_boxes.size_m;
@@ -2866,6 +2905,15 @@ void DualArmServoLoop::loopMain() {
         tracking_error_degraded_this_tick_ = false;
         left_abc_telemetry_.safety_clamp_present = false;
         right_abc_telemetry_.safety_clamp_present = false;
+        // These are samples of THIS tick, not retained controller state.
+        // Fault/read-invalid/freedrive branches can bypass computeServoTarget;
+        // clear before those branches so mergeAbcTelemetry cannot revive an
+        // old prefilter pose or derivatives after motion has stopped.
+        for (auto* abc : {&left_abc_telemetry_, &right_abc_telemetry_}) {
+            abc->follower_prefilter_stand.reset();
+            abc->follower_sample_velocity.reset();
+            abc->follower_sample_acceleration.reset();
+        }
         const auto handleAsyncSupervisionFault =
             [&](const LatchedDualFaultContext& async_fault_contexts,
                 const RobotState& current_left_state,
@@ -4034,6 +4082,14 @@ void DualArmServoLoop::loopMain() {
                 // pair the barrier is acting on.
                 const double viz_max = std::max(config_.safety.self_collision.mesh.viz_near_pairs_m,
                                                 config_.safety.self_collision.mesh.d_slow_m);
+                // Each pair also carries ITS OWN floor/slow band. The near list is
+                // ordered by raw clearance, so a consumer that bands every pair against
+                // the single self d_hard_m gets both the color and the "which parts are
+                // colliding" answer wrong wherever the categories differ (the RB5's
+                // structural intra-arm pair sits at ~23 mm against a 5 mm floor and
+                // outranks an arm<->stand pair that IS violating its 40 mm floor).
+                // nearPairHardFloorM/SlowBandM are the SAME functions
+                // buildCollisionConstraints enforces with, so the two cannot drift.
                 latest_snapshot_.self_collision_near_pairs.reserve(last_collision_verdict_.near.size());
                 for (const CollisionNearPair& p : last_collision_verdict_.near) {
                     if (p.d_m > viz_max) continue;
@@ -4041,7 +4097,10 @@ void DualArmServoLoop::loopMain() {
                         p.name_a, p.name_b,
                         {p.p_a.x(), p.p_a.y(), p.p_a.z()},
                         {p.p_b.x(), p.p_b.y(), p.p_b.z()},
-                        p.d_m, p.external, p.external_box});
+                        p.d_m, p.external, p.external_box,
+                        p.intra_arm, p.gripper_gripper, p.environment,
+                        nearPairHardFloorM(collision_monitor_cfg_, p),
+                        nearPairSlowBandM(collision_monitor_cfg_, p)});
                 }
             }
             {
@@ -4920,6 +4979,9 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_segments = abc.follower_segments;
     solve.follower_advance_gate = abc.follower_advance_gate;
     solve.follower_plan_rate_gate = abc.follower_plan_rate_gate;
+    solve.follower_core_gate = abc.follower_core_gate;
+    solve.follower_leash_gate = abc.follower_leash_gate;
+    solve.follower_solve_failures = abc.follower_solve_failures;
     solve.follower_advance_direction = abc.follower_advance_direction;
     solve.follower_output_smd_reseeded = abc.follower_output_smd_reseeded;
     solve.follower_alpha = abc.follower_alpha;
@@ -4932,6 +4994,8 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_output_smd_lag_m = abc.follower_output_smd_lag_m;
     solve.follower_output_smd_lag_rad = abc.follower_output_smd_lag_rad;
     solve.follower_prefilter_stand = abc.follower_prefilter_stand;
+    solve.follower_sample_velocity = abc.follower_sample_velocity;
+    solve.follower_sample_acceleration = abc.follower_sample_acceleration;
     solve.follower_divergence_pos_m = abc.follower_divergence_pos_m;
     solve.follower_divergence_ang_rad = abc.follower_divergence_ang_rad;
     solve.follower_projection_error_m = abc.follower_projection_error_m;
@@ -4942,6 +5006,11 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_actual_lead_error_count = abc.follower_actual_lead_error_count;
     solve.follower_reanchor_count = abc.follower_reanchor_count;
     solve.follower_divergence_reanchor_count = abc.follower_divergence_reanchor_count;
+    solve.follower_divergence_excused_count = abc.follower_divergence_excused_count;
+    solve.follower_cmd_track_pos_m = abc.follower_cmd_track_pos_m;
+    solve.follower_cmd_track_rad = abc.follower_cmd_track_rad;
+    solve.follower_cmd_track_lag_ticks = abc.follower_cmd_track_lag_ticks;
+    solve.follower_cmd_tracks = abc.follower_cmd_tracks;
     solve.follower_lead_reanchor_explained_count = abc.follower_lead_reanchor_explained_count;
     solve.follower_lead_reanchor_unexplained_count = abc.follower_lead_reanchor_unexplained_count;
     solve.follower_warm_resume_count = abc.follower_warm_resume_count;
@@ -5231,6 +5300,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_segments = 0;
     abc.follower_advance_gate = 1.0;
     abc.follower_plan_rate_gate = 1.0;
+    abc.follower_core_gate = 1.0;
+    abc.follower_leash_gate = 1.0;
+    abc.follower_solve_failures = 0;
     abc.follower_advance_direction = {};
     abc.follower_output_smd_reseeded = false;
     abc.follower_alpha = 1.0;
@@ -5243,6 +5315,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_output_smd_lag_m = 0.0;
     abc.follower_output_smd_lag_rad = 0.0;
     abc.follower_prefilter_stand.reset();
+    abc.follower_sample_velocity.reset();
+    abc.follower_sample_acceleration.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
     abc.follower_projection_error_m = 0.0;
@@ -5251,6 +5325,10 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_actual_lead_m = 0.0;
     abc.follower_actual_lead_rad = 0.0;
     abc.follower_actual_lead_error_count = 0;
+    abc.follower_cmd_track_pos_m = 0.0;
+    abc.follower_cmd_track_rad = 0.0;
+    abc.follower_cmd_track_lag_ticks = -1;
+    abc.follower_cmd_tracks = false;
     abc.delta_twist_pending_linear_norm_m = 0.0;
     abc.delta_twist_pending_angular_norm_rad = 0.0;
     abc.delta_twist_step_delta = Vec6{};
@@ -5406,7 +5484,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         ArmCommand out = applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
-            arm_id == ArmId::Left ? &left_overlay_ : &right_overlay_,
+            forceOverlayForReference(arm_id),
             arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
                                     : right_force_control_telemetry_).gate_removed_m,
@@ -5421,7 +5499,12 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         // deactivate() on each of them. Freeze segment/window time;
         // the Hold path owns the robot until a bounded warm resume or expiry.
         const double now_sec = ChunkFrameReceiver::steadyNowSec();
-        follower->pauseForHold(now_sec);
+        if (delta_preview && rf.continuous_hold_resume && kinematics_) {
+            follower->holdAtSentReference(nominalOfEmitted(arm_id,
+                kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount)), now_sec);
+        } else {
+            follower->pauseForHold(now_sec);
+        }
         output_smd->deactivate();
         follower->expireHoldPause(now_sec, rf.hold_bounce_resume_sec);
         resetChunkFollowerEngageWait(arm_id);
@@ -5464,6 +5547,27 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         smoothed.tcp_target_stand = reference;
         return smoothed;
     };
+    // DOES THE ROBOT TRACK ITS COMMAND? This is the question every plan-vs-command
+    // watchdog below (divergence, actual lead) actually needs answered, and it has to
+    // be asked with the box's dead time in mind: the measured pose at this tick is the
+    // response to a command sent ~22 ms ago, so the test is "does the measured pose
+    // match ANY command sent within the last 50 ms" (CommandTrackingWindow). The
+    // tolerance is half the lead budget: tighter than the lead gate it excuses, so the
+    // excuse can never be looser than the thing it overrides. Same measured-vs-plan
+    // side of the force overlay as `reference` (both nominal).
+    control::CommandTrackingWindow<kCommandTrackingWindowTicks>& cmd_track_window =
+        arm_id == ArmId::Left ? left_command_track_window_ : right_command_track_window_;
+    cmd_track_window.record(reference);
+    const control::CommandTrackingMatch cmd_track = cmd_track_window.match(
+        actual_feedback_pose, 0.5 * rf.preview_max_actual_lead_m, 0.5 * rf.preview_max_actual_lead_rad);
+    const bool robot_tracks_command = cmd_track.within;
+    abc.follower_cmd_track_pos_m = cmd_track.pos_m;
+    abc.follower_cmd_track_rad = cmd_track.ang_rad;
+    abc.follower_cmd_track_lag_ticks = cmd_track.lag_ticks;
+    abc.follower_cmd_tracks = robot_tracks_command;
+    std::uint64_t& divergence_excused = arm_id == ArmId::Left
+        ? left_divergence_excused_count_ : right_divergence_excused_count_;
+    abc.follower_divergence_excused_count = divergence_excused;
     // Safety-layer hold: the floor/ROI/self-collision stage clamps this arm to its previous
     // sent joints, but that stage runs AFTER command generation, so the follower never learned
     // the command was refused and kept integrating deltas against a stationary robot. Measured
@@ -5476,15 +5580,32 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // deactivation policy is unchanged (and prevents a deadlock if the block never clears).
     if (command_refused_recent && follower->active()) {
         const double safety_hold_now_sec = ChunkFrameReceiver::steadyNowSec();
-        follower->pauseForHold(safety_hold_now_sec);
-        output_smd->deactivate();
+        if (delta_preview && rf.continuous_hold_resume) {
+            // The safety/IK stage already kept the SENT command stationary.
+            // Do not replay an unaccepted plan endpoint or repeatedly reset
+            // the output filter while the refusal debounce is active.
+            const bool entering = !follower->holdPaused();
+            follower->holdAtSentReference(reference, safety_hold_now_sec);
+            if (entering) {
+                output_smd->reset(reference, Vec6{});
+                abc.follower_output_smd_reseeded = true;
+            }
+        } else {
+            follower->pauseForHold(safety_hold_now_sec);
+            output_smd->deactivate();
+        }
         follower->expireHoldPause(safety_hold_now_sec, rf.hold_bounce_resume_sec);
         // Only a held arm reaches here now, so the reason is always the blocked solve.
         transition_reason = "cartesian solve blocked hold";
     } else if (follower->holdPaused()) {
         // Warm resume always re-seeds the output stage from the latest sent pose;
         // the preserved p/v/a belongs only to the pre-filter follower.
-        output_smd->deactivate();
+        if (delta_preview && rf.continuous_hold_resume) {
+            output_smd->reset(reference, Vec6{});
+            abc.follower_output_smd_reseeded = true;
+        } else {
+            output_smd->deactivate();
+        }
         const control::HoldResumeResult resume = follower->resumeFromHold(
             reference,
             ChunkFrameReceiver::steadyNowSec(),
@@ -5538,12 +5659,46 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 return with_stage_telemetry(hold_at_reference());
             }
         } else {
+            const bool hard_divergence =
+                pos_err > kPoseTrackDivergenceHardPosTolM || ang_err > kPoseTrackDivergenceHardAngTolRad;
             if (pos_err > kPoseTrackReanchorPosTolM || ang_err > kPoseTrackReanchorAngTolRad) {
                 // Divergence: the sent target drifted from the follower's plan. In
                 // strict fault mode, only an active recent safety intervention can
                 // explain it; then reseed the chained state but keep the active window.
                 // Otherwise keep the legacy drop/fault or SMD re-anchor behavior.
-                if (strict_policy && divergence_explained_recent) {
+                //
+                // (2026-09-06) ROBOT TRACKING ITS COMMAND is checked FIRST. Plan-vs-sent
+                // is the lag of our own chain (follower core limits, output SMD, IK
+                // throttle, projection rows) whenever the arm is on its command, and
+                // that lag is neither a runaway nor something re-anchoring should
+                // discard (it would drop the rotation the chain is about to deliver
+                // and lunge). It is excused up to the HARD bound; only the hard bound
+                // still latches. servo_log_20260906_123643.csv 120.0 s ended a healthy
+                // 84 deg/s policy wrist turn on exactly this soft bound.
+                if (!hard_divergence && robot_tracks_command) {
+                    ++divergence_excused;
+                    abc.follower_divergence_excused_count = divergence_excused;
+                    uint64_t& last_log_ns = arm_id == ArmId::Left
+                        ? left_chunk_follower_reanchor_log_ns_
+                        : right_chunk_follower_reanchor_log_ns_;
+                    if (last_log_ns == 0 || now_ns < last_log_ns ||
+                        now_ns - last_log_ns >= kFollowerDivergenceReanchorLogPeriodNs) {
+                        std::cout << "[chunk_follower] " << toString(arm_id)
+                                  << " divergence excused: the robot tracks its command"
+                                  << " (cmd-vs-actual " << cmd_track.pos_m * 1000.0 << " mm / "
+                                  << cmd_track.ang_rad * 180.0 / M_PI << " deg at lag "
+                                  << cmd_track.lag_ticks << " ticks); plan-vs-sent"
+                                  << " pos_err=" << pos_err
+                                  << " ang_err=" << ang_err
+                                  << " is this chain's own lag, no re-anchor"
+                                  << (intervention_recent ? " [safety intervention]" : "")
+                                  << (solve_blocked_recent ? " [cartesian solve blocked]" : "")
+                                  << (throttled_recent ? " [command throttled]" : "")
+                                  << " wire_seq=" << active_diag.seg_wire_seq
+                                  << " recv_seq=" << active_diag.seg_recv_seq << "\n";
+                        last_log_ns = now_ns;
+                    }
+                } else if (strict_policy && divergence_explained_recent) {
                     follower->reanchor(reference);
                     output_smd->deactivate();
                     ++reanchor_count;
@@ -5581,10 +5736,16 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                         std::ostringstream reason;
                         reason << toString(arm_id)
                                << " chunk_follower_divergence"
+                               << (hard_divergence ? " (hard bound)" : " (robot off its command)")
                                << " pos_err_m=" << pos_err
                                << " pos_tol_m=" << kPoseTrackReanchorPosTolM
+                               << " pos_hard_m=" << kPoseTrackDivergenceHardPosTolM
                                << " ang_err_rad=" << ang_err
                                << " ang_tol_rad=" << kPoseTrackReanchorAngTolRad
+                               << " ang_hard_rad=" << kPoseTrackDivergenceHardAngTolRad
+                               << " cmd_vs_actual_m=" << cmd_track.pos_m
+                               << " cmd_vs_actual_rad=" << cmd_track.ang_rad
+                               << " cmd_lag_ticks=" << cmd_track.lag_ticks
                                << " " << diag_seq_labels(active_diag);
                         recordChunkFollowerFaultRequest(arm_id, reason.str());
                         log_transition();
@@ -5598,7 +5759,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         arm_id == ArmId::Left ? chunk_frame_cache_.has_left : chunk_frame_cache_.has_right;
     if (chunk_frame_cache_recv_seq_ != 0 &&
         chunk_frame_cache_recv_seq_ != *submitted_recv_seq &&
-        arm_present) {
+        arm_present && !(delta_preview && rf.continuous_hold_resume &&
+                         command_refused_recent && !follower->active())) {
         transition_reason = (delta_preview ? "delta preview frame " : "chunk frame ") +
             seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
         const bool preview_contract_valid =
@@ -5659,24 +5821,84 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // SAFETY PLAN GATE: last tick's realized/requested step ratio (applySafety)
     // paces this tick's plan-clock advance. 1.0 whenever the gate is disabled
     // or safety is not intervening.
-    follower->setPlanRateGate(
+    // DIVERGENCE LEASH (2026-09-06): this tick's plan-vs-sent divergence (already in
+    // abc from the watchdog above) ramps the plan clock down toward min_gate as it
+    // approaches the soft bound, so the chain's lag is absorbed as time. Min-combined
+    // with the safety gate: the plan advances at the rate of the most restrictive
+    // cause, never the product of overlapping ones (the IK throttle shows up in both).
+    const double safety_plan_gate =
         config_.safety.plan_gate.enable
             ? plan_gate_state_[arm_id == ArmId::Left ? 0 : 1]
-            : 1.0);
+            : 1.0;
+    double leash_gate = 1.0;
+    if (rf.plan_leash_enable) {
+        control::PlanLeashParams leash;
+        leash.start_m = rf.plan_leash_start_m;
+        leash.start_rad = rf.plan_leash_start_rad;
+        leash.full_m = rf.plan_leash_full_m;
+        leash.full_rad = rf.plan_leash_full_rad;
+        leash.min_gate = rf.plan_leash_min_gate;
+        leash_gate = control::planLeashGate(
+            abc.follower_divergence_pos_m, abc.follower_divergence_ang_rad, leash);
+    }
+    abc.follower_leash_gate = leash_gate;
+    follower->setPlanRateGate(std::min(safety_plan_gate, leash_gate));
     // Contact-aware following is gone with the F/T stack: no external reaction
     // is supplied, which is the follower's own blind-mode behaviour.
     const Pose6D pre_filter = follower->tick(dt_sec);
     abc.follower_prefilter_stand = pre_filter;
-    const Vec6 follower_velocity = follower->currentVelocity().value_or(Vec6{});
-    if (rf.output_smd.enable) {
+    // PROFILE FEED-FORWARD (2026-09-06): the SMD is fed the plan's velocity and
+    // acceleration AT THIS SAMPLE, so it tracks the jerk-limited profile itself
+    // without lag and filters only what the profile does not carry. The legacy path
+    // fed the chained end-state velocity through a low-pass at nf, which lagged the
+    // plan by ~3a/wn^2 under acceleration (29 mm at 56.2 s of the 13:17 run) and then
+    // hit the reseed snap.
+    const bool profile_ff = rf.output_smd.profile_feedforward;
+    const bool physical_derivatives = delta_preview &&
+        (rf.fresh_chunk_replan || rf.continuous_hold_resume);
+    const control::FollowerOutputKinematics sampled_output = physical_derivatives
+        ? follower->outputKinematics() : control::FollowerOutputKinematics{};
+    // Record the actual sampled derivatives even with profile feedforward off.
+    // Endpoint velocities are a different signal and cannot replay this filter.
+    abc.follower_sample_velocity = physical_derivatives
+        ? std::optional<Vec6>(sampled_output.velocity) : std::nullopt;
+    abc.follower_sample_acceleration = physical_derivatives
+        ? std::optional<Vec6>(sampled_output.acceleration) : std::nullopt;
+    const Vec6 follower_velocity =
+        physical_derivatives ? sampled_output.velocity
+            : (profile_ff ? follower->sampledVelocity() : follower->currentVelocity()).value_or(Vec6{});
+    const Vec6 follower_accel =
+        profile_ff ? (physical_derivatives ? sampled_output.acceleration
+                                          : follower->sampledAcceleration().value_or(Vec6{}))
+                   : Vec6{};
+    if (delta_preview && rf.continuous_hold_resume && follower->holdPaused()) {
+        // Keep the same force-reference/compose contract as the existing hold.
+        // The unaccepted pre-filter state is never sent while IK refuses it.
+        smoothed.tcp_target_stand = reference;
+        abc.follower_output_smd_active = rf.output_smd.enable && output_smd->active();
+    } else if (rf.output_smd.enable) {
         if (!output_smd->active()) {
             // `reference` is FK of the previous sent target, i.e. the last pose
             // this stage emitted. Never cold-seed from an older filter state.
-            output_smd->reset(reference, follower_velocity);
+            Vec6 seed_velocity = follower_velocity;
+            if (physical_derivatives) {
+                // The physical sample is expressed in the prefilter body;
+                // reset() instead expects angular velocity in its seed pose.
+                const Eigen::Vector3d omega =
+                    math::rotationFromPose(reference).transpose() *
+                    math::rotationFromPose(sampled_output.pose) *
+                    Eigen::Vector3d(follower_velocity.rx, follower_velocity.ry, follower_velocity.rz);
+                seed_velocity.rx = omega.x(); seed_velocity.ry = omega.y(); seed_velocity.rz = omega.z();
+            }
+            output_smd->reset(reference, seed_velocity);
             abc.follower_output_smd_reseeded = true;
         }
-        smoothed.tcp_target_stand =
-            output_smd->step(pre_filter, follower_velocity, dt_sec);
+        smoothed.tcp_target_stand = output_smd->step(
+            pre_filter, follower_velocity, dt_sec, profile_ff ? &follower_accel : nullptr,
+            physical_derivatives);
+        // An internal reseed (reference jumped past the reseed bounds) is a snap of
+        // the emitted target; make it visible in the same column as the loop's own.
+        if (output_smd->reseededLastStep()) abc.follower_output_smd_reseeded = true;
         abc.follower_output_smd_active = output_smd->active();
         abc.follower_output_smd_lag_m = output_smd->lagPos();
         abc.follower_output_smd_lag_rad = output_smd->lagAng();
@@ -5747,11 +5969,12 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     //     own chain (follower core angular limits + output SMD), not the arm. That is
     //     not a runaway and re-anchoring would only discard rotation the chain is
     //     about to deliver; so it neither re-anchors nor spends budget.
+    //  (2026-09-06) The test itself moved up to where `reference` is formed and became
+    //  dead-time tolerant (CommandTrackingWindow): a naive |sent_now - actual_now| grows
+    //  with speed (1.4 rad/s x 22 ms = 1.8 deg) and would stop excusing exactly when the
+    //  arm moves fast. `robot_tracks_command` is now shared with the divergence gate.
     const bool lead_breach =
         delta_preview && diag.actual_lead_fault && !(diag.infeasible_fault && projection_latches);
-    const bool robot_tracks_command =
-        math::positionDistance(reference, actual_feedback_pose) <= 0.5 * rf.preview_max_actual_lead_m &&
-        math::orientationDistanceRad(reference, actual_feedback_pose) <= 0.5 * rf.preview_max_actual_lead_rad;
     if (lead_breach && robot_tracks_command) {
         uint64_t& lead_log_ns = arm_id == ArmId::Left
             ? left_chunk_follower_reanchor_log_ns_
@@ -5760,9 +5983,10 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             now_ns - lead_log_ns >= kFollowerDivergenceReanchorLogPeriodNs) {
             std::cout << "[chunk_follower] " << toString(arm_id)
                       << " actual-lead breach excused: the robot tracks its command (cmd-vs-actual "
-                      << math::positionDistance(reference, actual_feedback_pose) * 1000.0 << " mm / "
-                      << math::orientationDistanceRad(reference, actual_feedback_pose) * 180.0 / M_PI
-                      << " deg); the lead is this chain's own lag, no re-anchor"
+                      << cmd_track.pos_m * 1000.0 << " mm / "
+                      << cmd_track.ang_rad * 180.0 / M_PI
+                      << " deg at lag " << cmd_track.lag_ticks
+                      << " ticks); the lead is this chain's own lag, no re-anchor"
                       << " actual_lead_m=" << diag.actual_lead_m
                       << " actual_lead_rad=" << diag.actual_lead_rad
                       << " count=" << diag.consecutive_actual_lead_errors
@@ -5839,6 +6063,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_segments = diag.segments;
     abc.follower_advance_gate = follower->advanceGate();
     abc.follower_plan_rate_gate = follower->planRateGate();
+    abc.follower_core_gate = follower->coreGate();
+    abc.follower_solve_failures = follower->diag().solve_failure_count;
     const auto& advance_dir = follower->advanceDirection();
     abc.follower_advance_direction = {advance_dir.x(), advance_dir.y(), advance_dir.z()};
     abc.follower_alpha = diag.last_solve.alpha;
@@ -5883,8 +6109,14 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.follower_output_smd_lag_m = 0.0;
     abc.follower_output_smd_lag_rad = 0.0;
     abc.follower_prefilter_stand.reset();
+    abc.follower_sample_velocity.reset();
+    abc.follower_sample_acceleration.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
+    abc.follower_cmd_track_pos_m = 0.0;
+    abc.follower_cmd_track_rad = 0.0;
+    abc.follower_cmd_track_lag_ticks = -1;
+    abc.follower_cmd_tracks = false;
     abc.delta_twist_pending_linear_norm_m = 0.0;
     abc.delta_twist_pending_angular_norm_rad = 0.0;
     abc.delta_twist_step_delta = Vec6{};
@@ -6019,7 +6251,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         ArmCommand out = applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
-            arm_id == ArmId::Left ? &left_overlay_ : &right_overlay_,
+            forceOverlayForReference(arm_id),
             arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
                                     : right_force_control_telemetry_).gate_removed_m);
@@ -6292,7 +6524,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         abc.follower_output_smd_active = false;
         abc.follower_output_smd_lag_m = 0.0;
         abc.follower_output_smd_lag_rad = 0.0;
-        abc.follower_prefilter_stand.reset();
     }
     ServoTarget target;
     const bool synthetic_hold = isSyntheticHoldCommand(command);
@@ -6384,6 +6615,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 
         tel = ForceControlTelemetry{};
         tel.enabled = config_.force_control.enable;
+        const auto& reference_dp = overlay.deviation();
+        const auto& reference_er = overlay.deviationRot();
+        tel.reference_deviation_m = {reference_dp.x(), reference_dp.y(), reference_dp.z()};
+        tel.reference_deviation_rad = {reference_er.x(), reference_er.y(), reference_er.z()};
+        tel.reference_reset_count = force_reference_reset_count_[static_cast<std::size_t>(i)];
 
         std::string reason;
         bool covered = forceControlCovered(fc_arm, eff, fc_state, &reason);
@@ -6419,6 +6655,23 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 tel.coverage_recover_needed = need;
             }
         }
+        // These execution guards must run BEFORE any nominal reference is stripped.
+        // A frozen deviation is retained during coverage loss, but cannot be removed
+        // from a hold target unless the downstream compose will put it back.
+        if (covered && qsyncSettlingHoldActive(fc_arm)) {
+            covered = false;
+            reason = "queue-sync settling hold pins this arm's output - compliance resumes on track";
+        }
+        if (covered && eff.mode == ControlMode::TcpPoseTarget && !eff.has_tcp_target) {
+            covered = false;
+            reason = "no Cartesian target on this tick";
+        }
+        if (covered && eff.mode != ControlMode::Hold &&
+            !servo_stream_armed_.load(std::memory_order_relaxed)) {
+            covered = false;
+            reason = "servo stream is not armed (no motion command yet)";
+        }
+        // A compliant Hold can arm the stream below when it latches its reference.
         tel.coverage_reason = covered ? "covered" : reason;
         // FORCE CONTROL THAT IS ON AND COVERING NOTHING MAY NOT BE SILENT. The config
         // says the arm is compliant; if it is not, the operator pushes it, nothing
@@ -6558,6 +6811,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         eff.has_tcp_target = true;
     }
 
+    for (int i = 0; i < 2; ++i) {
+        auto& tel = i == 0 ? left_force_control_telemetry_ : right_force_control_telemetry_;
+        const auto& eff = i == 0 ? effective_command.left : effective_command.right;
+        // Latch one decision for the reference and compose stages. In worker mode
+        // queue-sync may change asynchronously; re-reading it between these stages
+        // could strip an offset and then skip its inverse in the very same tick.
+        tel.reference_strip_enabled = tel.coverage_reason == "covered" &&
+            eff.mode == ControlMode::TcpPoseTarget && eff.has_tcp_target &&
+            servo_stream_armed_.load(std::memory_order_relaxed);
+    }
+
     // effective_command is final here.
     const ControlMode arm_effective_mode[2] =
         {effective_command.left.mode, effective_command.right.mode};
@@ -6584,7 +6848,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             return false;
         }
         const double now_sec = ChunkFrameReceiver::steadyNowSec();
-        follower.pauseForHold(now_sec);
+        if (built_config.controller == RuckigFollowerController::DeltaPreview &&
+            built_config.continuous_hold_resume && kinematics_) {
+            follower.holdAtSentReference(nominalOfEmitted(arm_id,
+                kinematics_->computeTcpStand(arm_id, ctx.prev_sent_q_deg, ctx.mount)), now_sec);
+        } else {
+            follower.pauseForHold(now_sec);
+        }
         if (follower.expireHoldPause(now_sec, built_config.hold_bounce_resume_sec)) {
             resetChunkFollowerEngageWait(arm_id);
             return false;
@@ -6958,40 +7228,21 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             const bool left_arm = i == 0;
             ForceControlTelemetry& tel =
                 left_arm ? left_force_control_telemetry_ : right_force_control_telemetry_;
-            if (tel.coverage_reason != "covered") continue;
+            if (!tel.reference_strip_enabled) continue;
             ArmCommand& track = arm_pose_track_command[i];
             if (!track.has_tcp_target) {
                 tel.coverage_reason = "no Cartesian target on this tick";
                 (left_arm ? left_overlay_ : right_overlay_).freeze();
                 continue;
             }
-            // *** THE COMPOSED COMMAND MUST BE ABLE TO REACH THE ROBOT. *** The
-            // overlay is an open-loop integrator on the measured wrench; while the
-            // wire is pinned (startup posture before the first motion command, or the
-            // queue-sync settling hold) nothing it composes lands, the wrench never
-            // answers, and the deviation - or, with the fold, the plan itself - winds
-            // away from the arm. The rate-based execution guard in
-            // forceControlCovered cannot see this case (a pinned command has no rate),
-            // so it is refused here by name. Freeze, do not integrate.
-            if (!servo_stream_armed_.load(std::memory_order_relaxed)) {
-                tel.coverage_reason =
-                    "servo stream is not armed (no motion command yet) - the composed "
-                    "command would not reach the robot";
-                (left_arm ? left_overlay_ : right_overlay_).freeze();
-                continue;
-            }
-            if (qsyncSettlingHoldActive(arm_id)) {
-                tel.coverage_reason =
-                    "queue-sync settling hold pins this arm's output - compliance resumes "
-                    "on track";
-                (left_arm ? left_overlay_ : right_overlay_).freeze();
-                continue;
-            }
+            // Coverage, stream arming and queue-sync eligibility were latched before
+            // reference conversion. The final safety/send gates still own the wire.
             const RobotState& arm_state = left_arm ? left_state : right_state;
             Pose6D target = track.tcp_target_stand;
-            if (applyForceOverlay(arm_id, arm_state, &target)) {
-                track.tcp_target_stand = target;
-            }
+            applyForceOverlay(arm_id, arm_state, &target);
+            // Even sub-micrometre frozen offsets must cancel the reference strip.
+            // quiescent()/compose_applied are diagnostics, not a target-write gate.
+            track.tcp_target_stand = target;
             // THE FOLD: the composed target above is final for this tick; what moves
             // here is only where the deviation is BOOKED for the next one.
             foldForceDeviation(arm_id, arm_ctx[i].chunk_follower, arm_ctx[i].follower_output_smd,
@@ -9773,9 +10024,51 @@ bool DualArmServoLoop::forceControlCovered(
     return false;
 }
 
+const control::AdmittanceOverlay* DualArmServoLoop::forceOverlayForReference(ArmId arm) const {
+    const bool left = arm == ArmId::Left;
+    const auto& tel = left ? left_force_control_telemetry_ : right_force_control_telemetry_;
+    if (!tel.reference_strip_enabled) return nullptr;
+    return left ? &left_overlay_ : &right_overlay_;
+}
+
 Pose6D DualArmServoLoop::nominalOfEmitted(ArmId arm, const Pose6D& emitted_stand) const {
-    const control::AdmittanceOverlay& overlay = arm == ArmId::Left ? left_overlay_ : right_overlay_;
-    return overlay.hasDeviation() ? overlay.strip(emitted_stand) : emitted_stand;
+    const auto* overlay = forceOverlayForReference(arm);
+    return overlay ? overlay->strip(emitted_stand) : emitted_stand;
+}
+
+void DualArmServoLoop::resetForceReferenceForInit(ArmId arm) {
+    const bool left = arm == ArmId::Left;
+    const std::size_t i = left ? 0 : 1;
+    // The accepted InitMotion owns the existing sent joint pose, including the old
+    // compliance displacement. Its brake keeps that joint pose/velocity intact.
+    // Retaining a Cartesian reference from the preceding episode would replay it
+    // on no-op completion, or after tare/coverage recovery at the new joint pose.
+    (left ? left_overlay_ : right_overlay_).reset();
+    (left ? left_force_gate_ : right_force_gate_).reset();
+    (left ? left_hold_compliance_nominal_ : right_hold_compliance_nominal_).reset();
+    (left ? left_hold_engage_ : right_hold_engage_).reset();
+    (left ? left_wrench_filter_primed_ : right_wrench_filter_primed_) = false;
+    (left ? left_gate_force_filt_n_ : right_gate_force_filt_n_) = 0.0;
+    (left ? left_gate_torque_filt_nm_ : right_gate_torque_filt_nm_) = 0.0;
+    clearLatchedCartesianTarget(arm);
+    auto ctx = armContext(arm);
+    ctx.chunk_follower.deactivate();
+    ctx.chunk_follower.setAdvanceGate(1.0, Eigen::Vector3d::Zero());
+    ctx.chunk_follower.setPlanRateGate(1.0);
+    ctx.follower_output_smd.deactivate();
+    ctx.pose_track_smd.deactivate();
+    (left ? left_delta_twist_follower_ : right_delta_twist_follower_).deactivate();
+    (left ? left_chunk_submitted_recv_seq_ : right_chunk_submitted_recv_seq_) = chunk_frame_cache_recv_seq_;
+    resetChunkFollowerEngageWait(arm);
+    pending_collision_fold_[i] = PendingCollisionFold{};
+    hold_fold_emitted_pose_[i].reset();
+    collision_fold_active_[i] = false;
+    (left ? left_roi_fold_active_ : right_roi_fold_active_) = false;
+    (left ? left_command_track_window_ : right_command_track_window_).clear();
+    ++force_reference_reset_count_[i];
+    std::cout << "[force_reference_reset] mono_ns=" << nowSteadyNs()
+              << " arm=" << toString(arm) << " reason=fresh_init_motion count="
+              << force_reference_reset_count_[i] << '\n';
 }
 
 bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target) {
@@ -9938,9 +10231,11 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
 
     tel.enabled = config_.force_control.enable;
     tel.covered = true;
-    tel.compose_applied = !overlay.quiescent();
     const math::Vector3& d = overlay.deviation();
     const math::Vector3& dr = overlay.deviationRot();
+    // Report the transform actually written, including sub-micrometre offsets.
+    // compose() adds every nonzero translation and rotates at >= 1e-9 rad.
+    tel.compose_applied = !d.isZero(0.0) || dr.norm() >= 1e-9;
     tel.deviation_m = {d.x(), d.y(), d.z()};
     tel.deviation_rad = {dr.x(), dr.y(), dr.z()};
     tel.deviation_norm_m = d.norm();
@@ -10861,8 +11156,14 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             // THIS IS "INIT MOTION STARTS" for the automatic F/T tare
             // (force_torque.auto_tare_after_init_motion). It only ARMS here - see
             // armAutoTareAfterInit for why the samples cannot be taken yet.
-            if (request_left) armAutoTareAfterInit(ArmId::Left);
-            if (request_right) armAutoTareAfterInit(ArmId::Right);
+            if (request_left) {
+                resetForceReferenceForInit(ArmId::Left);
+                armAutoTareAfterInit(ArmId::Left);
+            }
+            if (request_right) {
+                resetForceReferenceForInit(ArmId::Right);
+                armAutoTareAfterInit(ArmId::Right);
+            }
             const JointArray target_left =
                 request_left ? command.left.q_target_deg : current_left_q;
             const JointArray target_right =

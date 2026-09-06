@@ -16,6 +16,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <set>
 #include <utility>
@@ -27,6 +28,119 @@ namespace rb_servo {
 namespace {
 
 constexpr int kStateSchemaVersion = 1;
+// IPv4 UDP's length includes its 8-byte header. Keep 1,507 bytes below the
+// 65,507-byte payload limit for normal state growth; this is a wire budget,
+// never a collision-monitor / safety constraint count.
+constexpr std::size_t kStatePayloadBudgetBytes = 64'000;
+constexpr std::size_t kIpv4UdpPayloadMaxBytes = 65'507;
+constexpr uint64_t kPublicationWarningPeriodNs = 5'000'000'000ULL;
+
+uint64_t publicationNowNs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+std::string dumpStateWithSize(nlohmann::json& message) {
+    auto& recorded = message["state_publication"]["payload_bytes"];
+    recorded = 0;
+    std::string payload = message.dump();
+    // Including the size's own decimal representation takes at most another
+    // digit-width correction. No state is sampled again during this operation.
+    while (recorded.get<std::size_t>() != payload.size()) {
+        recorded = payload.size();
+        payload = message.dump();
+    }
+    return payload;
+}
+
+std::string boundStateWitnessPayload(nlohmann::json& message) {
+    auto& collision = message["self_collision"];
+    auto& pairs = collision["near_pairs"];
+    const std::size_t total = pairs.is_array() ? pairs.size() : 0;
+    const auto is_hard = [](const nlohmann::json& p) {
+        if (!p["clearance_m"].is_number() || !p["d_hard_m"].is_number()) return false;
+        const double clearance = p["clearance_m"].get<double>();
+        const double floor = p["d_hard_m"].get<double>();
+        return std::isfinite(clearance) && std::isfinite(floor) && clearance < floor;
+    };
+    std::size_t hard_total = 0;
+    if (pairs.is_array()) {
+        for (const auto& pair : pairs) hard_total += is_hard(pair);
+    }
+    const auto set_counts = [&](std::size_t count, std::size_t hard_count) {
+        collision["near_pairs_total"] = total;
+        collision["near_pairs_published"] = count;
+        collision["near_pairs_truncated"] = count < total;
+        collision["near_pairs_hard_total"] = hard_total;
+        collision["near_pairs_hard_published"] = hard_count;
+        collision["near_pairs_hard_truncated"] = hard_count < hard_total;
+    };
+    set_counts(total, hard_total);
+    std::string payload = dumpStateWithSize(message);
+    if (payload.size() <= kStatePayloadBudgetBytes || total == 0) return payload;
+
+    // Only the visualization copy is eligible for shedding. Keep every core
+    // field, including the full aggregate safety verdict and static manifest.
+    const auto original = std::move(pairs);
+    pairs = nullptr;
+    set_counts(0, 0);
+    payload = dumpStateWithSize(message);
+    // Reserve room for published-count digit growth and null -> [] changes;
+    // verify the complete serialization below rather than trusting this estimate.
+    constexpr std::size_t kCountGrowthReserve = 64;
+    const std::size_t available = payload.size() + kCountGrowthReserve < kStatePayloadBudgetBytes
+        ? kStatePayloadBudgetBytes - payload.size() - kCountGrowthReserve : 0;
+    std::vector<std::size_t> priority;
+    for (std::size_t i = 0; i < total; ++i) priority.push_back(i);
+    std::stable_sort(priority.begin(), priority.end(), [&](std::size_t a, std::size_t b) {
+        const bool hard_a = is_hard(original[a]), hard_b = is_hard(original[b]);
+        if (hard_a != hard_b) return hard_a;
+        const auto rank_clearance = [&](std::size_t i) {
+            const auto& value = original[i]["clearance_m"];
+            if (value.is_number()) {
+                const double distance = value.get<double>();
+                if (std::isfinite(distance)) return distance;
+            }
+            return std::numeric_limits<double>::infinity();
+        };
+        return rank_clearance(a) < rank_clearance(b);
+    });
+    std::vector<bool> selected(total, false);
+    std::size_t bytes = 0, count = 0, hard_count = 0;
+    for (const std::size_t i : priority) {
+        const std::size_t added = original[i].dump().size() + (count ? 1 : 0);
+        if (added > available - bytes) continue;
+        selected[i] = true;
+        bytes += added;
+        ++count;
+        hard_count += is_hard(original[i]);
+    }
+    const auto rebuild = [&]() {
+        pairs = nullptr;
+        // Retain original order among selected pairs: ordinary snapshots and
+        // the GUI's legacy nearest-pair convention do not change ordering.
+        for (std::size_t i = 0; i < total; ++i) {
+            if (selected[i]) {
+                if (pairs.is_null()) pairs = nlohmann::json::array();
+                pairs.push_back(original[i]);
+            }
+        }
+        set_counts(count, hard_count);
+        return dumpStateWithSize(message);
+    };
+    payload = rebuild();
+    for (auto it = priority.rbegin(); payload.size() > kStatePayloadBudgetBytes &&
+         count && it != priority.rend(); ++it) {
+        if (!selected[*it]) continue;
+        selected[*it] = false;
+        --count;
+        hard_count -= is_hard(original[*it]);
+        payload = rebuild();
+    }
+    // A core-only oversize result remains intact. threadMain refuses that
+    // datagram with a timestamped diagnostic instead of silently dropping core.
+    return payload;
+}
 
 struct UdpDestination {
     std::string endpoint;
@@ -96,6 +210,10 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& t) {
         {"coverage_reason", t.coverage_reason},
         {"law", t.law},
         {"compose_applied", t.compose_applied},
+        {"reference_deviation_stand_m", t.reference_deviation_m},
+        {"reference_deviation_stand_rad", t.reference_deviation_rad},
+        {"reference_strip_enabled", t.reference_strip_enabled},
+        {"reference_reset_count", t.reference_reset_count},
         {"deviation_stand_m", t.deviation_m},
         {"deviation_stand_rad", t.deviation_rad},
         {"deviation_norm_m", t.deviation_norm_m},
@@ -1576,6 +1694,36 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["async_streaming_policy"] =
         rbpodoAsyncQueuePolicyString(config_.servo.rbpodo_async_streaming.queue_policy);
     message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
+    // Advertise the server's selected execution contract before a client sends
+    // its first Cartesian target. A new client must not mistake an old server's
+    // unknown-profile fallback for an enabled experimental follower.
+    message["chunk_execution_profiles"] = nlohmann::json::array();
+    for (const auto& profile : config_.cartesian_control.tcp_pose_target_profiles) {
+        const auto& follower = profile.ruckig_follower;
+        const char* controller = "unknown";
+        switch (follower.controller) {
+            case RuckigFollowerController::RuckigWaypoint: controller = "ruckig_waypoint"; break;
+            case RuckigFollowerController::DeltaTwist: controller = "delta_twist"; break;
+            case RuckigFollowerController::DeltaPreview: controller = "delta_preview"; break;
+        }
+        message["chunk_execution_profiles"].push_back({
+            {"name", profile.name},
+            {"controller", controller},
+            {"enabled", config_.cartesian_control.enable && follower.enable},
+            {"fresh_chunk_replan", follower.fresh_chunk_replan},
+            {"continuous_hold_resume", follower.continuous_hold_resume},
+            {"output_smd", {
+                {"enabled", follower.output_smd.enable},
+                {"nf_linear_hz", follower.output_smd.nf_linear_hz},
+                {"nf_angular_hz", follower.output_smd.nf_angular_hz},
+                {"damping_ratio", follower.output_smd.damping_ratio},
+                {"velocity_ff", follower.output_smd.velocity_ff},
+                {"velocity_ff_lpf_hz", follower.output_smd.velocity_ff_lpf_hz},
+                {"velocity_ff_linear_gain", follower.output_smd.velocity_ff_linear_gain},
+                {"profile_feedforward", follower.output_smd.profile_feedforward},
+            }},
+        });
+    }
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
     message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
     const bool worker_enabled =
@@ -1856,6 +2004,15 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
                 entry["clearance_m"] = p.clearance_m;
                 entry["external"] = p.external;
                 entry["external_box"] = p.external_box;
+                entry["intra_arm"] = p.intra_arm;
+                entry["gripper_gripper"] = p.gripper_gripper;
+                entry["environment"] = p.environment;
+                // This pair's OWN barrier band. The near list is ordered by raw
+                // clearance, so `clearance_m < d_hard_m` is the only way a consumer can
+                // tell which pairs are actually in hard violation — nearest != violating
+                // once the categories carry different floors.
+                entry["d_hard_m"] = p.d_hard_m;
+                entry["d_slow_m"] = p.d_slow_m;
                 arr.push_back(std::move(entry));
             }
             self_collision["near_pairs"] = std::move(arr);
@@ -2095,7 +2252,15 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     };
     message["tcp_fields_deferred"] =
         snapshot.left_state.tcp_deferred || snapshot.right_state.tcp_deferred;
-    return message.dump();
+    message["state_publication"] = {
+        {"payload_budget_bytes", kStatePayloadBudgetBytes},
+        {"udp_max_payload_bytes", kIpv4UdpPayloadMaxBytes},
+        {"oversize_dropped_total", publication_oversize_dropped_total_.load()},
+        {"send_errors_total", publication_send_errors_total_.load()},
+        {"last_error_time_ns", publication_last_error_time_ns_.load()},
+        {"last_error_code", publication_last_error_code_.load()},
+    };
+    return boundStateWitnessPayload(message);
 }
 
 bool StatePublisher::start() {
@@ -2139,7 +2304,13 @@ void StatePublisher::threadMain() {
         running_ = false;
         return;
     }
-    std::set<std::string> send_warned_endpoints;
+    struct FailureNotice {
+        uint64_t consecutive = 0;
+        uint64_t first_ns = 0;
+        uint64_t last_warning_ns = 0;
+    };
+    FailureNotice oversized;
+    std::map<std::string, FailureNotice> send_failures;
     while (running_) {
         ServoSnapshot snapshot;
         if (snapshot_provider_) {
@@ -2167,6 +2338,32 @@ void StatePublisher::threadMain() {
         }
 
         const std::string payload = serializeSnapshot(snapshot);
+        const uint64_t now_ns = publicationNowNs();
+        if (payload.size() > kIpv4UdpPayloadMaxBytes) {
+            ++publication_oversize_dropped_total_;
+            publication_last_error_time_ns_ = now_ns;
+            publication_last_error_code_ = EMSGSIZE;
+            if (!oversized.consecutive++) oversized.first_ns = now_ns;
+            if (oversized.consecutive == 1 ||
+                now_ns - oversized.last_warning_ns >= kPublicationWarningPeriodNs) {
+                oversized.last_warning_ns = now_ns;
+                std::cerr << "[ERROR] StatePublisher core payload exceeds IPv4 UDP limit"
+                          << " tick=" << snapshot.tick << " monotonic_ns=" << now_ns
+                          << " loop_start_time_ns=" << snapshot.loop_start_time_ns
+                          << " bytes=" << payload.size() << " max_bytes=" << kIpv4UdpPayloadMaxBytes
+                          << " consecutive=" << oversized.consecutive
+                          << " dropped_total=" << publication_oversize_dropped_total_.load() << "\n";
+            }
+            std::this_thread::sleep_for(publish_period);
+            continue;
+        }
+        if (oversized.consecutive) {
+            std::cerr << "[INFO] StatePublisher payload size recovered"
+                      << " tick=" << snapshot.tick << " monotonic_ns=" << now_ns
+                      << " bytes=" << payload.size() << " dropped=" << oversized.consecutive
+                      << " duration_ms=" << (now_ns - oversized.first_ns) / 1e6 << "\n";
+            oversized = {};
+        }
         for (const UdpDestination& destination : destinations) {
             const ssize_t sent = ::sendto(
                 fd,
@@ -2176,9 +2373,31 @@ void StatePublisher::threadMain() {
                 destination.addr(),
                 destination.len
             );
-            if (sent < 0 && send_warned_endpoints.insert(destination.endpoint).second) {
-                std::cerr << "[WARN] StatePublisher send failed to "
-                          << destination.endpoint << ": " << std::strerror(errno) << "\n";
+            const int send_error = sent < 0 ? errno : 0;
+            auto& failure = send_failures[destination.endpoint];
+            if (sent < 0) {
+                const int error = send_error;
+                ++publication_send_errors_total_;
+                publication_last_error_time_ns_ = now_ns;
+                publication_last_error_code_ = error;
+                if (!failure.consecutive++) failure.first_ns = now_ns;
+                if (failure.consecutive == 1 ||
+                    now_ns - failure.last_warning_ns >= kPublicationWarningPeriodNs) {
+                    failure.last_warning_ns = now_ns;
+                    std::cerr << "[WARN] StatePublisher send failed to " << destination.endpoint
+                              << " tick=" << snapshot.tick << " monotonic_ns=" << now_ns
+                              << " loop_start_time_ns=" << snapshot.loop_start_time_ns
+                              << " bytes=" << payload.size() << " errno=" << error
+                              << " consecutive=" << failure.consecutive
+                              << " errors_total=" << publication_send_errors_total_.load()
+                              << ": " << std::strerror(error) << "\n";
+                }
+            } else if (failure.consecutive) {
+                std::cerr << "[INFO] StatePublisher send recovered to " << destination.endpoint
+                          << " tick=" << snapshot.tick << " monotonic_ns=" << now_ns
+                          << " errors=" << failure.consecutive
+                          << " duration_ms=" << (now_ns - failure.first_ns) / 1e6 << "\n";
+                failure = {};
             }
         }
         std::this_thread::sleep_for(publish_period);

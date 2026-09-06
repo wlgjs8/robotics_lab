@@ -52,6 +52,13 @@ private:
     // RT control loop.
     std::unique_ptr<GripperBridge> gripper_bridge_;
 
+    // Publisher-thread failures, copied into later successful state packets.
+    // Atomics also permit passive serializeSnapshot callers while publishing.
+    std::atomic<uint64_t> publication_oversize_dropped_total_{0};
+    std::atomic<uint64_t> publication_send_errors_total_{0};
+    std::atomic<uint64_t> publication_last_error_time_ns_{0};
+    std::atomic<int> publication_last_error_code_{0};
+
     std::atomic<bool> running_{false};
     std::thread thread_;
 };

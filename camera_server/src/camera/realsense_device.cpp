@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -25,6 +26,23 @@
 namespace camera_server {
 
 namespace {
+
+#if CAMERA_SERVER_HAVE_REALSENSE
+RealSenseDeviceInfo read_realsense_device_info(const rs2::device& dev) {
+  const auto get = [&](rs2_camera_info field) -> std::string {
+    return dev.supports(field) ? dev.get_info(field) : std::string();
+  };
+  RealSenseDeviceInfo info;
+  info.name = get(RS2_CAMERA_INFO_NAME);
+  info.serial = get(RS2_CAMERA_INFO_SERIAL_NUMBER);
+  info.firmware_version = get(RS2_CAMERA_INFO_FIRMWARE_VERSION);
+  info.recommended_firmware_version = get(RS2_CAMERA_INFO_RECOMMENDED_FIRMWARE_VERSION);
+  info.physical_port = get(RS2_CAMERA_INFO_PHYSICAL_PORT);
+  info.product_id = get(RS2_CAMERA_INFO_PRODUCT_ID);
+  info.usb_type = get(RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR);
+  return info;
+}
+#endif
 
 std::tuple<int, int, int, int> parse_version(const std::string& text) {
   std::tuple<int, int, int, int> out{0, 0, 0, 0};
@@ -50,18 +68,7 @@ std::vector<RealSenseDeviceInfo> discover_realsense_devices() {
 #if CAMERA_SERVER_HAVE_REALSENSE
   rs2::context ctx;
   for (auto&& dev : ctx.query_devices()) {
-    auto get = [&](rs2_camera_info field) -> std::string {
-      return dev.supports(field) ? dev.get_info(field) : std::string();
-    };
-    RealSenseDeviceInfo info;
-    info.name = get(RS2_CAMERA_INFO_NAME);
-    info.serial = get(RS2_CAMERA_INFO_SERIAL_NUMBER);
-    info.firmware_version = get(RS2_CAMERA_INFO_FIRMWARE_VERSION);
-    info.recommended_firmware_version = get(RS2_CAMERA_INFO_RECOMMENDED_FIRMWARE_VERSION);
-    info.physical_port = get(RS2_CAMERA_INFO_PHYSICAL_PORT);
-    info.product_id = get(RS2_CAMERA_INFO_PRODUCT_ID);
-    info.usb_type = get(RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR);
-    devices.push_back(std::move(info));
+    devices.push_back(read_realsense_device_info(dev));
   }
 #endif
   return devices;
@@ -243,6 +250,10 @@ class RealSenseDevice final : public ICameraDevice {
 
   void start(FrameCallback cb) override {
     if (running_.load()) return;
+    {
+      std::lock_guard<std::mutex> lk(device_info_mu_);
+      active_device_info_.reset();
+    }
     cb_ = std::move(cb);
     configure_hardware_sync_if_requested();
     maybe_load_advanced_json();
@@ -268,20 +279,34 @@ class RealSenseDevice final : public ICameraDevice {
     rs2::pipeline_profile profile;
     try {
       profile = pipe_.start(rs_cfg, [this](const rs2::frame& frame) { enqueue_frame(frame); });
+      auto info = read_realsense_device_info(profile.get_device());
+      if (info.serial.empty() || info.serial != cfg_.serial) {
+        throw std::runtime_error("active RealSense serial mismatch for " + cfg_.name +
+                                 ": expected=" + cfg_.serial + " actual=" + info.serial);
+      }
+      apply_controls(profile);
+      std::lock_guard<std::mutex> lk(device_info_mu_);
+      active_device_info_ = std::move(info);
     } catch (...) {
-      running_ = false;
-      frame_queue_.close();
-      if (frame_thread_.joinable()) frame_thread_.join();
+      stop();
       throw;
     }
-    apply_controls(profile);
   }
 
   void stop() override {
+    {
+      std::lock_guard<std::mutex> lk(device_info_mu_);
+      active_device_info_.reset();
+    }
     if (!running_.exchange(false)) return;
     try { pipe_.stop(); } catch (...) {}
     frame_queue_.close();
     if (frame_thread_.joinable()) frame_thread_.join();
+  }
+
+  std::optional<RealSenseDeviceInfo> active_device_info() const override {
+    std::lock_guard<std::mutex> lk(device_info_mu_);
+    return active_device_info_;
   }
 
   CameraCaptureStats capture_stats() const override {
@@ -598,6 +623,8 @@ class RealSenseDevice final : public ICameraDevice {
   SyncConfig sync_;
   FrameCallback cb_;
   rs2::pipeline pipe_;
+  mutable std::mutex device_info_mu_;
+  std::optional<RealSenseDeviceInfo> active_device_info_;
   BoundedQueue<QueuedFrame> frame_queue_{2};
   std::atomic<bool> running_{false};
   std::atomic<uint64_t> queue_drop_count_{0};

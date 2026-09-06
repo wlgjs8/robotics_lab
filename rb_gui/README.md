@@ -62,6 +62,71 @@ the server with lifecycle commands that the configured safety capability cannot
 accept. If the config cannot be read, capability remains unknown and the server
 still makes the authoritative accept/reject decision.
 
+## Self-Collision Highlight
+
+While `self_collision.violated`, the viewer paints the colliding parts
+translucent red. The collision model has FIVE body groups and only the ones the
+violating pair names light up:
+
+| group | monitor geometry |
+| --- | --- |
+| left arm / right arm | `<left_prefix>`/`<right_prefix>` arm links (`link0`..`link6`) |
+| left gripper / right gripper | the Pika hulls the monitor attaches at `attachment_site` — `<prefix>pika_gripper_base`, `<prefix>pika_finger_left/right` (legacy single `<prefix>pika_gripper`) |
+| stand | everything with no arm prefix: stand hulls, `ground_plane`, `external_box_*` |
+| cell structure | the unified URDF's `env_*` links that carry a `<collision>` — the riser under the stand base plate |
+
+So two grippers touching lights the two grippers, not two whole arms, and an arm
+folding onto the stand leaves that arm's gripper normal. `env_*` boxes are `add_box`
+handles rather than URDF meshes, so their highlight is the box's own colour swapped to
+red and restored from `environment_rgb`; they share one group because the server gives
+them one barrier class.
+
+The groups come from the geometry NAMES of the near pairs that are IN HARD
+VIOLATION — `clearance_m < d_hard_m`, each pair against **its own** published floor.
+Side is decided by the manifest's `left_prefix`/`right_prefix`, not by searching for
+the words "left"/"right": the unified URDF has stand links named `stand_left_arm_base`,
+and the articulated gripper has `<right_prefix>pika_finger_left`.
+
+`d_hard_m` / `d_slow_m` (and the `intra_arm` / `gripper_gripper` flags) are published
+per near pair by the server because **nearest is not violating**. `near_pairs` is
+ordered by RAW clearance while the monitor enforces five bands with floors an order of
+magnitude apart:
+
+| band | floor (`stack_real.yaml`) |
+| --- | --- |
+| self — arm↔arm, arm↔stand | 40 mm |
+| cell structure (`env_*`) | 25 mm |
+| gripper↔gripper | 25 mm |
+| intra-arm (same arm folding) | 5 mm |
+| external (floor / `ground_plane`) | 3 mm |
+| external keep-out box | 10 mm |
+
+Measured 2026-09-06 (`servo_log_20260906_131740.csv`, 53,795 ticks): the RB5's
+structural intra-arm `link3_1 ↔ link5_0` pair sits at 22.9–23.6 mm — never violating
+its own 5 mm floor — yet is the *nearest* pair on **99.4 %** of ticks. Keying off
+`near_pairs[0]`, or banding every pair against the single 40 mm self floor, therefore
+(a) painted that structural pair hard-red continuously and (b) named one arm as the
+collider while an arm↔stand pair breaching its 40 mm floor anywhere in 40…23 mm went
+unmarked. The per-pair floor is the fix; the same numbers come from
+`nearPairHardFloorM`/`nearPairSlowBandM`, which `buildCollisionConstraints` enforces
+with, so display and enforcement cannot drift.
+
+Fallbacks, each strictly more conservative than the last: no pair carries a usable
+`d_hard_m` (older server) → `near_pairs[0]`; no `near_pairs` → the coarse `pair`
+category, where the arm groups include their gripper; unknown `pair`, or a violated
+verdict whose breaching pair fell outside the published near list → all red.
+External-box hits stay both-arms (that telemetry is per-box, so it cannot name a
+side). If the viewer's arm URDF cannot be split into arm and gripper mesh nodes, the
+pair of groups collapses back to the whole arm.
+
+Enforcement was never affected: `violated` is a per-category OR over **every** checked
+pair. Only the display's "which parts" answer used the nearest pair.
+
+The red overlay REPLACES what it represents rather than overlapping it (z-fighting
+at an identical configuration): in pgmode real it replaces the matching solid
+links at `q_actual`; in pgmode simulation it replaces the commanded ghost at
+`q_sent` and the solid robot keeps showing the true state.
+
 ## F/T Sensor Visualization
 
 The `FT Monitor` card in the fixed operator overlay is back, reading the
@@ -224,6 +289,39 @@ RB_GUI_HEAD_PREVIEW_ENDPOINT=tcp://127.0.0.1:5600
 RB_GUI_HEAD_PREVIEW_TOPIC=camera.bundle.stereo
 RB_GUI_HEAD_PREVIEW_STREAM=head.color
 ```
+
+## Cell Furniture (Work Tables And Stand Riser)
+
+The viewer draws the room the arms actually stand in: two 800 mm work tables and
+the riser that carries the stand base plate above them. 안전 탭 → **작업 셀 구조물
+(테이블/라이저)** toggles them (default ON; solid geometry occludes the arms from
+below, which is why the toggle exists).
+
+The geometry is NOT in this package. Any link named `env_*` that is rigidly fixed
+to the `stand` link of the unified URDF is picked up and drawn, with its `<box>` /
+`<mesh>` and its `<material><color>`; adding a third table is a URDF edit, not a
+code edit. The definitions live in `rb_servo_server/tools/make_rb5_850e_urdfs.py`
+(`ENVIRONMENT`), which records how each dimension was obtained. Hardcoding
+furniture poses here is the mistake the stand already taught us — see
+`_stand_visual_from_urdf` in `scene.py`.
+
+**Visual only.** `CollisionMonitor` builds from
+`buildGeom(..., pinocchio::COLLISION, ...)`, so links carrying only `<visual>`
+add zero geoms and the checked pair set is unchanged (verified: 49 collision
+geoms before and after). The tables do not brake the arms and must not be read as
+clearance.
+
+**라이저 높이 (mm)** in the same folder retunes the riser live: it grows downward
+from the stand base plate's underside and the tables travel with it, so the status
+line shows the resulting table-top z. The value persists to `env_riser_height_m`
+in `~/.rb_servo_gui/settings.json` and is re-applied at startup; every adjustment
+recomputes from the URDF baseline, so repeated edits never compound.
+
+The URDF now ships the measured 295 mm (table top z -310 mm), taken by parking
+both gripper tips down on the table: the TCP *is* the fingertip plane, so a flat
+tip reads the surface. Re-measure the same way rather than by tape — the tape
+reads the columns alone and missed the end plates by ~10 mm. Anything the
+operator dials in here should go back into `ENVIRONMENT` with its evidence.
 
 ## Running Tests
 

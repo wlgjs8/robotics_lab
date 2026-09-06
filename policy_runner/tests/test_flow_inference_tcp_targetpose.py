@@ -211,6 +211,41 @@ class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
         self.assertLess(xs[0], xs[1])
         self.assertLess(xs[1], xs[2])
 
+    def test_ready_event_selected_profile_reaches_held_and_foh_command_paths(self) -> None:
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))[0].numpy()
+        for conditioning in ("legacy_step_hold", "foh_se3"):
+            with self.subTest(conditioning=conditioning), tempfile.TemporaryDirectory() as tmp:
+                source = self._streamed_source(tmp, conditioning, chunk_execute_steps=4)
+                source.configure_chunk_activation("ready_event")
+                source.tcp_target_profile = "flow_infer_fresh"
+                source.nonblocking_stream_inference = True
+                source._ensure_stream_state()
+                try:
+                    state = _sample_state(left_pose=measured)
+                    state.payload["chunk_execution_profiles"] = [{
+                        "name": "flow_infer_fresh", "enabled": True, "controller": "delta_preview",
+                        "fresh_chunk_replan": True, "continuous_hold_resume": True,
+                    }]
+                    # Inject ready arrays at the worker boundary; exercise the
+                    # real dispatcher, conditioner and command serialization.
+                    with mock.patch.object(source, "_request_prefetch"):
+                        source._stream_next_chunk = chunk.copy()
+                        source._stream_next_chunk_metadata = {"observation_step_seq": 0, "generation": 0}
+                        first = source.next_intent(state, 0.0)
+                        between = source.next_intent(state, 0.018)
+                        source._stream_next_chunk = chunk.copy()
+                        source._stream_next_chunk_metadata = {"observation_step_seq": 0, "generation": 0}
+                        second = source.next_intent(state, 0.02)
+                    for intent in (first, between, second):
+                        self.assertEqual(intent.tcp_target_profile, "flow_infer_fresh")
+                    self.assertEqual(source._active_chunk_metadata["source_start_index"], 1)
+                    self.assertEqual(source._active_chunk_metadata["replaced_chunk_steps"], 1)
+                    self.assertEqual(source._active_chunk_metadata["tcp_target_profile"], "flow_infer_fresh")
+                    self.assertEqual(source._stream_emitted_policy_steps, 2)
+                finally:
+                    source.close()
+
     def test_legacy_step_hold_holds_target_between_policy_steps(self) -> None:
         assert torch is not None and np is not None
         measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])

@@ -698,6 +698,31 @@ struct SelfCollisionConfig {
         };
         GripperGripperConfig gripper_gripper;
 
+        // CELL-STRUCTURE class: the env_* geometry in the unified URDF (the riser
+        // under the stand base plate, and any furniture that later opts into a
+        // <collision> in make_rb5_850e_urdfs.py's ENVIRONMENT). Unset (negative)
+        // values inherit the self set.
+        //
+        // It has its own band because the self set does not fit it in either
+        // direction. The self 40 mm floor is sized for arm<->arm and arm<->stand,
+        // where the model carries ~20 mm of dual-arm relative error; a measured
+        // furniture box is good to ~6 mm (rms 2.50 mm fit + 3.3 mm arm-to-arm bias
+        // on the riser), so 40 mm is far more margin than its uncertainty needs --
+        // and MEASURED, it does not fit: over 1,075 poses sampled from
+        // servo_log_20260906_131740 the left elbow came to 35.7 mm of the riser, so
+        // a 40 mm floor would clamp_hold 1.1% of the postures the cell already uses.
+        // Meanwhile the external set (3/25 mm) belongs to the whole-arm floor plane
+        // and is far too tight to share.
+        struct EnvironmentConfig {
+            double d_hard_m = -1.0;
+            double d_slow_m = -1.0;
+            double a_brake_m_s2 = -1.0;
+            double hyst_m = -1.0;
+            double recover_speed_m_s = -1.0;
+            double latency_s = -1.0;
+        };
+        EnvironmentConfig environment;
+
         // Preallocated external keep-out boxes updated at runtime by the leaseless
         // SetExternalBoxes command. Disabled by default; when enabled the monitor
         // builds exactly max_count box geometries at startup.
@@ -1975,6 +2000,18 @@ struct FollowerOutputSmdConfig {
     bool velocity_ff = true;
     // 0 follows the natural frequency of each domain independently.
     double velocity_ff_lpf_hz = 0.0;
+    // Translation-only gain on the low-passed velocity feedforward. 1 preserves
+    // the legacy response; 0 is position-only critical damping. Angular FF is
+    // unchanged. This does not scale the follower's velocity or motion limits.
+    double velocity_ff_linear_gain = 1.0;
+    // PROFILE FEED-FORWARD (2026-09-06). Feed the SMD the follower's SAMPLED velocity
+    // AND acceleration at the current sample (not the chained end-state velocity
+    // low-passed at nf). A second-order tracker fed the exact v/a of a jerk-limited
+    // profile has no lag under constant acceleration; the legacy path lagged
+    // ~3 a / wn^2 (measured 30 mm behind a 0.38 m/s reach, servo_log_20260906_131740.csv
+    // 56.0-56.2 s) until it hit the reseed snap. nf then shapes only what is NOT in
+    // the profile (knot noise, re-anchor steps). Off = legacy.
+    bool profile_feedforward = false;
 };
 
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
@@ -2092,6 +2129,27 @@ struct RuckigFollowerConfig {
     // Feed-liveness watchdog: with no fresh chunk frame for this long the
     // follower deactivates (falls back to pose_track_smd / hold).
     double chunk_feed_timeout_sec = 1.5;
+    // CHAIN LAG -> TIME, NOT FAULT (2026-09-06, docs/plans/plan_clock_time_stretch_
+    // 20260906.md). Two plan-clock gates, min-combined with safety.plan_gate:
+    //  * core time-stretch: a knot the v/a/j limits cannot reach in one policy period
+    //    is reached in the time the profile needs (<= max_ratio periods) instead of
+    //    being truncated -- the policy's path at the follower's limits.
+    //  * divergence leash: the plan-vs-sent divergence ramps the plan clock from 1.0
+    //    at `start` down to `min_gate` at `full` (== the soft divergence bound).
+    // Both default OFF (legacy). Validation: ratio >= 1; leash distances positive
+    // finite, start < full, 0 <= min_gate < 1.
+    bool core_time_stretch_enable = false;
+    double core_time_stretch_max_ratio = 1.0;
+    // Explicit delta_preview transition policies. Legacy profiles retain their
+    // segment-completion/hold behavior unless these are selected by name.
+    bool fresh_chunk_replan = false;
+    bool continuous_hold_resume = false;
+    bool plan_leash_enable = false;
+    double plan_leash_start_m = 0.0;
+    double plan_leash_start_rad = 0.0;
+    double plan_leash_full_m = 0.0;
+    double plan_leash_full_rad = 0.0;
+    double plan_leash_min_gate = 0.0;
 };
 
 struct TcpPoseTargetProfileConfig {

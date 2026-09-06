@@ -133,5 +133,32 @@ inline double lowpassEngagementStep(double engage, bool gate_on,
     return engage * std::exp(-dt_sec / release_sec);
 }
 
+
+// DIVERGENCE LEASH on the plan clock (2026-09-06, docs/plans/
+// plan_clock_time_stretch_20260906.md). The plan-vs-sent divergence -- the quantity
+// the soft chunk_follower_divergence bound reads -- drives a linear ramp: 1.0 up to
+// `start`, falling to `min_gate` at `full` (the soft bound), per axis, the more
+// restrictive of position and orientation wins. So the plan clock cannot wind the
+// divergence past the soft bound unless the chain stops delivering entirely, and it
+// never stops (min_gate > 0): the chain's lag is absorbed as time, not latched.
+// Stateless: the divergence is an integrated quantity and already smooth.
+struct PlanLeashParams {
+    double start_m = 0.0;
+    double start_rad = 0.0;
+    double full_m = 0.0;
+    double full_rad = 0.0;
+    double min_gate = 0.0;
+};
+
+inline double planLeashGate(double pos_err_m, double ang_err_rad, const PlanLeashParams& p) {
+    const auto ramp = [](double err, double start, double full) {
+        if (!(full > start)) return err > start ? 0.0 : 1.0;   // degenerate: step
+        return std::clamp(1.0 - (err - start) / (full - start), 0.0, 1.0);
+    };
+    const double g = std::min(ramp(pos_err_m, p.start_m, p.full_m),
+                              ramp(ang_err_rad, p.start_rad, p.full_rad));
+    return std::max(std::clamp(p.min_gate, 0.0, 1.0), g);
+}
+
 }  // namespace control
 }  // namespace rb_servo

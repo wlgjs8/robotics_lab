@@ -18,10 +18,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -175,18 +178,34 @@ void test_config_validation_accepts_bounded_reconnect() {
   expect_config_failure([&] { validate_config(short_timeout); }, "frame_timeout_ms must be >= 100");
 }
 
+struct TestDeviceStopGate {
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+};
+
 class ReconnectTestDevice final : public ICameraDevice {
  public:
-  ReconnectTestDevice(CameraConfig cfg, int frames_before_stall)
-      : cfg_(std::move(cfg)), frames_before_stall_(frames_before_stall) {}
+  ReconnectTestDevice(CameraConfig cfg, int frames_before_stall,
+                      std::optional<RealSenseDeviceInfo> info = std::nullopt,
+                      bool fail_start = false,
+                      std::shared_ptr<std::atomic<bool>> frames_allowed = {},
+                      std::shared_ptr<TestDeviceStopGate> stop_gate = {})
+      : cfg_(std::move(cfg)), frames_before_stall_(frames_before_stall),
+        info_(std::move(info)), fail_start_(fail_start),
+        frames_allowed_(std::move(frames_allowed)), stop_gate_(std::move(stop_gate)) {}
   ~ReconnectTestDevice() override { stop(); }
 
   void start(FrameCallback cb) override {
+    if (fail_start_) throw std::runtime_error("synthetic pipeline start failure");
     cb_ = std::move(cb);
     running_ = true;
     thread_ = std::thread([this] {
       uint64_t frame_number = 0;
       while (running_) {
+        if (frames_allowed_ && !frames_allowed_->load()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+          continue;
+        }
         if (frames_before_stall_ >= 0 &&
             frame_number >= static_cast<uint64_t>(frames_before_stall_)) {
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -213,13 +232,27 @@ class ReconnectTestDevice final : public ICameraDevice {
   }
 
   void stop() override {
-    running_ = false;
+    const bool was_running = running_.exchange(false);
     if (thread_.joinable()) thread_.join();
+    if (was_running && stop_gate_) {
+      stop_gate_->entered = true;
+      while (!stop_gate_->release) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    }
+  }
+
+  std::optional<RealSenseDeviceInfo> active_device_info() const override {
+    return running_.load() ? info_ : std::nullopt;
   }
 
  private:
   CameraConfig cfg_;
   int frames_before_stall_;
+  std::optional<RealSenseDeviceInfo> info_;
+  bool fail_start_;
+  std::shared_ptr<std::atomic<bool>> frames_allowed_;
+  std::shared_ptr<TestDeviceStopGate> stop_gate_;
   FrameCallback cb_;
   std::atomic<bool> running_{false};
   std::thread thread_;
@@ -282,6 +315,248 @@ void test_per_camera_reconnect_keeps_other_camera_streaming() {
   assert(final_snapshot.stream_stats.at(cfg.cameras[1].name + ".color").frame_count >
          right_frames_before_recovery);
   assert(final_snapshot.complete_bundle_count > bundles_before_recovery);
+}
+
+AppConfig make_identity_test_config(const std::string& suffix, bool reconnect) {
+  auto cfg = make_test_config();
+  cfg.cameras.resize(1);
+  cfg.shared_memory.name = "/camera_server_identity_" + suffix;
+  cfg.metadata.pub_bind = "tcp://127.0.0.1:5997";
+  cfg.reconnect.enabled = reconnect;
+  cfg.reconnect.max_attempts = 3;
+  cfg.reconnect.retry_interval_ms = 40;
+  cfg.reconnect.frame_timeout_ms = 120;
+  validate_config(cfg);
+  return cfg;
+}
+
+struct IdentityManagerFixture {
+  AppConfig cfg;
+  SharedMemoryRingBuffer shm;
+  MetadataPublisher publisher;
+  FrameSynchronizerSet synchronizer;
+  Recorder recorder;
+  std::unique_ptr<CameraManager> manager;
+
+  IdentityManagerFixture(AppConfig config, CameraManager::DeviceFactory factory)
+      : cfg(std::move(config)), publisher(cfg.metadata), synchronizer(cfg),
+        recorder(cfg.recording) {
+    shm.create(cfg);
+    manager = std::make_unique<CameraManager>(cfg, shm, publisher, synchronizer,
+                                             recorder, std::move(factory));
+  }
+
+  ~IdentityManagerFixture() {
+    manager.reset();
+    shm.close();
+    ::shm_unlink(cfg.shared_memory.name.c_str());
+  }
+};
+
+RealSenseDeviceInfo test_session_info(const std::string& serial,
+                                     const std::string& port, const std::string& tag) {
+  RealSenseDeviceInfo info;
+  info.name = "RealSense test device";
+  info.serial = serial;
+  info.physical_port = port;
+  info.firmware_version = "firmware-" + tag;
+  info.recommended_firmware_version = "recommended-" + tag;
+  info.product_id = "product-" + tag;
+  info.usb_type = "usb-" + tag;
+  return info;
+}
+
+void assert_no_session_info(const HealthSnapshot& snapshot, const std::string& name) {
+  // Configured camera_serial remains useful while disconnected; session metadata
+  // must be absent, rather than a stale value or an empty routing placeholder.
+  assert(snapshot.camera_physical_port.count(name) == 0);
+  assert(snapshot.camera_firmware_version.count(name) == 0);
+  assert(snapshot.camera_recommended_firmware_version.count(name) == 0);
+  assert(snapshot.camera_product_id.count(name) == 0);
+  assert(snapshot.camera_usb_type.count(name) == 0);
+}
+
+void assert_session_info(const HealthSnapshot& snapshot, const std::string& name,
+                         const RealSenseDeviceInfo& info) {
+  assert(snapshot.camera_connected.at(name));
+  assert(snapshot.camera_serial.at(name) == info.serial);
+  assert(snapshot.camera_physical_port.at(name) == info.physical_port);
+  assert(snapshot.camera_firmware_version.at(name) == info.firmware_version);
+  assert(snapshot.camera_recommended_firmware_version.at(name) == info.recommended_firmware_version);
+  assert(snapshot.camera_product_id.at(name) == info.product_id);
+  assert(snapshot.camera_usb_type.at(name) == info.usb_type);
+}
+
+bool wait_for_test_condition(const std::function<bool()>& predicate,
+                             std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return predicate();
+}
+
+void test_session_identity_refreshes_leaf_and_usb_root_after_reconnect() {
+  auto cfg = make_identity_test_config("reconnect", true);
+  const auto name = cfg.cameras[0].name;
+  const auto serial = cfg.cameras[0].serial;
+  const std::vector<RealSenseDeviceInfo> sessions{
+      test_session_info(serial, "/sys/devices/usb4/4-2/4-2.2/4-2.2:1.0/video4linux/video2", "old"),
+      test_session_info(serial, "/sys/devices/usb4/4-2/4-2.2/4-2.2:1.0/video4linux/video32", "leaf"),
+      test_session_info(serial, "/sys/devices/usb8/8-1/8-1.2/8-1.2:1.0/video4linux/video12", "root")};
+  std::atomic<int> instances{0};
+  IdentityManagerFixture fixture(cfg, [&](const CameraConfig& cam) {
+    const int instance = instances.fetch_add(1);
+    const int session = instance < 2 ? 0 : (instance == 2 ? 1 : 2);
+    return std::make_unique<ReconnectTestDevice>(cam, session < 2 ? 3 : -1,
+                                                sessions[session], instance == 1);
+  });
+  fixture.manager->start();
+  bool seen[3]{false, false, false};
+  bool saw_disconnected = false;
+  bool saw_start_failure = false;
+  const bool recovered = wait_for_test_condition([&] {
+    const auto h = fixture.manager->snapshot();
+    if (!h.camera_connected.at(name)) {
+      assert_no_session_info(h, name);
+      saw_disconnected = true;
+    } else {
+      const auto port = h.camera_physical_port.at(name);
+      bool recognized = false;
+      for (size_t i = 0; i < sessions.size(); ++i) {
+        if (port != sessions[i].physical_port) continue;
+        assert_session_info(h, name, sessions[i]);
+        recognized = true;
+        seen[i] = true;
+      }
+      assert(recognized);
+    }
+    if (h.camera_reconnect_stats.at(name).last_error.find("synthetic pipeline start failure") !=
+        std::string::npos) saw_start_failure = true;
+    return seen[0] && seen[1] && seen[2] && saw_disconnected && saw_start_failure;
+  });
+  fixture.manager->stop();
+  const auto stopped = fixture.manager->snapshot();
+  assert(!stopped.camera_connected.at(name));
+  assert_no_session_info(stopped, name);
+  assert(recovered);
+  assert(instances.load() >= 4);
+}
+
+void test_reconnect_identity_waits_for_first_frame() {
+  auto cfg = make_identity_test_config("pending", true);
+  cfg.reconnect.frame_timeout_ms = 500;
+  const auto name = cfg.cameras[0].name;
+  const auto info = test_session_info(cfg.cameras[0].serial, "/usb8/video32", "pending");
+  auto frames_allowed = std::make_shared<std::atomic<bool>>(false);
+  std::atomic<bool> created{false};
+  IdentityManagerFixture fixture(cfg, [&](const CameraConfig& cam) {
+    created = true;
+    return std::make_unique<ReconnectTestDevice>(cam, -1, info, false, frames_allowed);
+  });
+  std::exception_ptr start_error;
+  std::thread starter([&] {
+    try { fixture.manager->start(); } catch (...) { start_error = std::current_exception(); }
+  });
+  const bool pipeline_created = wait_for_test_condition([&] { return created.load(); });
+  // The opened session has valid identity, but none may be advertised before data.
+  for (int i = 0; i < 10; ++i) {
+    const auto h = fixture.manager->snapshot();
+    assert(!h.camera_connected.at(name));
+    assert_no_session_info(h, name);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  *frames_allowed = true;
+  starter.join();
+  if (start_error) std::rethrow_exception(start_error);
+  assert(pipeline_created);
+  assert(wait_for_test_condition([&] { return fixture.manager->snapshot().camera_connected.at(name); }));
+  assert_session_info(fixture.manager->snapshot(), name, info);
+  fixture.manager->stop();
+  assert_no_session_info(fixture.manager->snapshot(), name);
+}
+
+void test_no_reconnect_identity_start_stop_missing_and_invalid_serial() {
+  for (const bool has_identity : {true, false}) {
+    auto cfg = make_identity_test_config(has_identity ? "direct" : "missing", false);
+    const auto name = cfg.cameras[0].name;
+    const auto info = test_session_info(cfg.cameras[0].serial, "/usb4/video2", "direct");
+    IdentityManagerFixture fixture(cfg, [&](const CameraConfig& cam) {
+      return std::make_unique<ReconnectTestDevice>(cam, 0,
+          has_identity ? std::optional<RealSenseDeviceInfo>(info) : std::nullopt);
+    });
+    fixture.manager->start();
+    const auto h = fixture.manager->snapshot();
+    // Without reconnect, successful start is the established readiness boundary.
+    assert(h.camera_connected.at(name));
+    if (has_identity) assert_session_info(h, name, info);
+    else assert_no_session_info(h, name);  // Mock devices may omit identity.
+    fixture.manager->stop();
+    const auto stopped = fixture.manager->snapshot();
+    assert(!stopped.camera_connected.at(name));
+    assert_no_session_info(stopped, name);
+  }
+  for (const std::string actual_serial : {std::string{}, std::string{"WRONG_SERIAL"}}) {
+    auto cfg = make_identity_test_config(actual_serial.empty() ? "empty" : "wrong", false);
+    const auto name = cfg.cameras[0].name;
+    const auto info = test_session_info(actual_serial, "/usb8/video32", "invalid");
+    IdentityManagerFixture fixture(cfg, [&](const CameraConfig& cam) {
+      return std::make_unique<ReconnectTestDevice>(cam, 0, info);
+    });
+    expect_config_failure([&] { fixture.manager->start(); }, "active camera serial mismatch");
+    const auto failed = fixture.manager->snapshot();
+    assert(!failed.camera_connected.at(name));
+    assert_no_session_info(failed, name);
+  }
+}
+
+void test_partial_start_failure_clears_previous_camera_identity() {
+  auto cfg = make_identity_test_config("partial_failure", false);
+  cfg.cameras = make_test_config().cameras;
+  cfg.cameras.resize(2);
+  IdentityManagerFixture fixture(cfg, [&](const CameraConfig& cam) {
+    const auto info = test_session_info(cam.serial, "/usb4/video2", cam.name);
+    return std::make_unique<ReconnectTestDevice>(cam, 0, info, cam.name == cfg.cameras[1].name);
+  });
+  expect_config_failure([&] { fixture.manager->start(); }, "synthetic pipeline start failure");
+  const auto failed = fixture.manager->snapshot();
+  for (const auto& cam : cfg.cameras) {
+    assert(!failed.camera_connected.at(cam.name));
+    assert_no_session_info(failed, cam.name);
+  }
+}
+
+void test_snapshot_does_not_wait_for_blocked_timeout_teardown() {
+  auto cfg = make_identity_test_config("blocked_stop", true);
+  const auto name = cfg.cameras[0].name;
+  const auto info = test_session_info(cfg.cameras[0].serial, "/usb4/video2", "blocked");
+  auto stop_gate = std::make_shared<TestDeviceStopGate>();
+  IdentityManagerFixture fixture(cfg, [&](const CameraConfig& cam) {
+    return std::make_unique<ReconnectTestDevice>(cam, 3, info, false, nullptr, stop_gate);
+  });
+  fixture.manager->start();
+  assert_session_info(fixture.manager->snapshot(), name, info);
+  const bool teardown_started = wait_for_test_condition([&] { return stop_gate->entered.load(); });
+  HealthSnapshot during_stop;
+  std::atomic<bool> snapshot_done{false};
+  std::thread reader([&] {
+    during_stop = fixture.manager->snapshot();
+    snapshot_done = true;
+  });
+  const bool returned_before_release = wait_for_test_condition(
+      [&] { return snapshot_done.load(); }, std::chrono::milliseconds(100));
+  // Release before joining/asserting so an old blocking implementation fails
+  // cleanly instead of hanging the test process indefinitely.
+  stop_gate->release = true;
+  reader.join();
+  fixture.manager->stop();
+  assert(teardown_started);
+  assert(returned_before_release);
+  assert(!during_stop.camera_connected.at(name));
+  assert_no_session_info(during_stop, name);
+  assert(during_stop.camera_capture_stats.count(name) == 0);
+  assert_no_session_info(fixture.manager->snapshot(), name);
 }
 
 void test_realsense_preflight_contract() {
@@ -893,6 +1168,11 @@ int main() {
   test_config_validation_rejects_invalid_sync_combinations();
   test_config_validation_accepts_bounded_reconnect();
   test_per_camera_reconnect_keeps_other_camera_streaming();
+  test_session_identity_refreshes_leaf_and_usb_root_after_reconnect();
+  test_reconnect_identity_waits_for_first_frame();
+  test_no_reconnect_identity_start_stop_missing_and_invalid_serial();
+  test_partial_start_failure_clears_previous_camera_identity();
+  test_snapshot_does_not_wait_for_blocked_timeout_teardown();
   test_realsense_preflight_contract();
   test_real_placeholder_config_fails();
   test_config_uvc_fisheye_backend();

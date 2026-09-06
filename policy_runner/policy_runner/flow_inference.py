@@ -51,6 +51,43 @@ from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollou
 from .servo_command_client import CommandIntent
 
 
+def validate_chunk_activation_mode(
+    mode: str,
+    *,
+    rtc_enabled: bool = False,
+    stitch_mode: str = "boundary",
+    sequential: bool = False,
+    anchor_source: str = "actual",
+    prefetch_at: int | None = None,
+    training_replay: bool = False,
+) -> str:
+    """Validate scheduling before constructing a source or contacting a model.
+
+    Ready-event activation replaces whole policy rows. Fixed-prefix RTC,
+    ensemble windows, and plan-chain tails need a different execution contract
+    before they can support a variable number of rows per chunk.
+    """
+    if mode not in {"fixed_steps", "ready_event"}:
+        raise ValueError(f"unsupported chunk_activation_mode: {mode!r}")
+    if mode == "ready_event":
+        incompatible = []
+        if rtc_enabled:
+            incompatible.append("RTC")
+        if stitch_mode != "boundary":
+            incompatible.append(f"chunk stitch mode {stitch_mode}")
+        if sequential:
+            incompatible.append("sequential inference")
+        if anchor_source == "chain":
+            incompatible.append("chain anchor")
+        if prefetch_at is not None:
+            incompatible.append("explicit stream_prefetch_at")
+        if training_replay:
+            incompatible.append("teacher-forced training replay")
+        if incompatible:
+            raise ValueError("ready_event activation does not support " + ", ".join(incompatible))
+    return mode
+
+
 def default_action_log_path() -> str | None:
     """Resolve the per-step action-log path.
 
@@ -709,7 +746,37 @@ class FlowMatchingActionSource:
         model.eval()
         return model
 
+    def _require_chunk_execution_profile(self, payload: dict[str, Any] | None) -> None:
+        """Fail before policy work if the server cannot execute the fresh profile.
+
+        Old servers can silently fall back for an unknown target-profile name.
+        Fresh scheduling therefore requires explicit server-advertised support,
+        verified on every snapshot rather than cached across a server restart.
+        """
+        if str(getattr(self, "tcp_target_profile", "flow_infer_smooth")) != "flow_infer_fresh":
+            return
+        profiles = payload.get("chunk_execution_profiles") if isinstance(payload, dict) else None
+        matching = (
+            [item for item in profiles if isinstance(item, dict) and item.get("name") == "flow_infer_fresh"]
+            if isinstance(profiles, list)
+            else []
+        )
+        supported = (
+            len(matching) == 1
+            and matching[0].get("enabled") is True
+            and matching[0].get("controller") == "delta_preview"
+            and matching[0].get("fresh_chunk_replan") is True
+            and matching[0].get("continuous_hold_resume") is True
+        )
+        if not supported:
+            raise ValueError(
+                "flow_infer_fresh requires exactly one enabled server chunk_execution_profiles "
+                "entry with controller=delta_preview, fresh_chunk_replan=true and "
+                "continuous_hold_resume=true; refusing policy inference and motion"
+            )
+
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
+        self._require_chunk_execution_profile(snapshot.payload)
         self._last_overlay_payload = snapshot.payload
         self._handle_server_motion_epoch(snapshot)
         self._before_policy_intent(snapshot, now_monotonic)
@@ -840,6 +907,47 @@ class FlowMatchingActionSource:
             self._reset_right_pose = None
 
     # ----------------------------------------------------------- streamed --
+    def configure_chunk_activation(self, mode: str) -> None:
+        """Select the scheduler before streaming starts; fixed_steps is default."""
+        if bool(getattr(self, "_stream_inited", False)):
+            raise ValueError("chunk activation mode cannot change while streaming")
+        self.chunk_activation_mode = validate_chunk_activation_mode(
+            mode,
+            rtc_enabled=bool(getattr(self, "rtc_enabled", False)),
+            stitch_mode=str(getattr(self, "chunk_stitch_mode", "boundary")),
+            sequential=bool(getattr(self, "sequential_stream_inference", False)),
+            anchor_source=str(getattr(self, "chunk_anchor_source", "actual")),
+            prefetch_at=getattr(self, "stream_prefetch_at", None),
+            training_replay=getattr(self, "episode_observation_provider", None) is not None,
+        )
+
+    def _try_ready_event_activation(self, now_monotonic: float) -> bool:
+        """Replace at a row deadline, never midway through a row or its gripper.
+
+        An expired candidate must not discard a still-executable active chunk.
+        Generation is checked again here so even a queued result cannot cross an
+        InitMotion/reset boundary. The worker also rejects in-flight old work.
+        """
+        chunk = self._take_prefetched()
+        if chunk is None:
+            return False
+        metadata = dict(getattr(self, "_stream_activation_candidate_metadata", None) or {})
+        generation = int(getattr(self, "_stream_generation", 0))
+        emitted = int(getattr(self, "_stream_emitted_policy_steps", 0))
+        observation = int(metadata.get("observation_step_seq", emitted))
+        invalid = (
+            int(metadata.get("generation", generation)) != generation
+            or observation > emitted
+            or emitted - observation >= int(chunk.shape[0])
+        )
+        if invalid:
+            self._stream_ready_discard_count = int(getattr(self, "_stream_ready_discard_count", 0)) + 1
+            self._stream_activation_candidate_metadata = None
+            self._stream_activation_candidate_timing = None
+            return False
+        self._activate_chunk(chunk, now_monotonic, preserve_step_grid=True)
+        return True
+
     def _next_intent_streamed(
         self, snapshot: StateSnapshot, now_monotonic: float
     ) -> CommandIntent | None:
@@ -891,7 +999,12 @@ class FlowMatchingActionSource:
             advanced = True
         elif now_monotonic >= self._step_deadline:
             next_index = self._chunk_index + 1
-            if next_index < self._current_chunk_execute_limit():
+            if (
+                str(getattr(self, "chunk_activation_mode", "fixed_steps")) == "ready_event"
+                and self._try_ready_event_activation(now_monotonic)
+            ):
+                advanced = True
+            elif next_index < self._current_chunk_execute_limit():
                 self._chunk_index = next_index
                 self._step_deadline = self._next_step_deadline(now_monotonic)
                 advanced = True
@@ -1303,9 +1416,21 @@ class FlowMatchingActionSource:
             return now_monotonic + dt
         return deadline
 
-    def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
+    def _activate_chunk(
+        self, chunk: np.ndarray, now_monotonic: float, *, preserve_step_grid: bool = False
+    ) -> None:
         self._record_inference_activation(now_monotonic)
         metadata = dict(getattr(self, "_stream_activation_candidate_metadata", None) or {})
+        replacing = getattr(self, "_chunk", None) is not None
+        activation_reason = "start_or_resume"
+        if replacing:
+            activation_reason = "ready_event" if preserve_step_grid else "fixed_boundary"
+        metadata.update(
+            activation_mode=str(getattr(self, "chunk_activation_mode", "fixed_steps")),
+            tcp_target_profile=str(getattr(self, "tcp_target_profile", "flow_infer_smooth")),
+            activation_reason=activation_reason,
+            replaced_chunk_steps=(int(self._chunk_index) + 1 if replacing else 0),
+        )
         observation_step_seq = int(
             metadata.get(
                 "observation_step_seq",
@@ -1346,7 +1471,11 @@ class FlowMatchingActionSource:
         self._chunk_index = 0
         self._begin_rollout_step_chunk()
         self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
-        self._step_deadline = now_monotonic + float(self.policy_dt_sec)
+        self._step_deadline = (
+            self._next_step_deadline(now_monotonic)
+            if preserve_step_grid
+            else now_monotonic + float(self.policy_dt_sec)
+        )
         self._print_chunk_steps(chunk)
         self._begin_chunk_tracking(chunk, getattr(self, "_last_overlay_payload", None), now_monotonic)
         self._publish_chunk_overlay(now_monotonic)
@@ -1812,6 +1941,11 @@ class FlowMatchingActionSource:
 
     def _stream_prefetch_at(self) -> int:
         limit = self._current_chunk_execute_limit()
+        if str(getattr(self, "chunk_activation_mode", "fixed_steps")) == "ready_event":
+            # Submit at activation, before committing row 0. The request snapshots
+            # this tick's payload and emitted-step count together; only one request
+            # or ready result may exist, so a fast worker cannot build a backlog.
+            return 0
         # Sequential (blocking) chunk mode, set by the runner for step-by-step
         # verification: NEVER kick inference mid-chunk. The chunk is consumed to
         # the end, the boundary stall path then requests inference with the
@@ -1891,14 +2025,23 @@ class FlowMatchingActionSource:
             chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
         return self._apply_rotation_axis_mask(chunk)
 
+    def _freeze_inference_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Freeze subclass request-local inputs after copying the state payload.
+
+        The caller owns this copy. Live command/gripper state must be captured
+        here, before worker dispatch, rather than read after a scheduling delay.
+        """
+        return payload
+
     def _sample_and_align_chunk_timed(self, payload: dict[str, Any]) -> np.ndarray | None:
         """Measure one inline local/remote inference without changing its behavior."""
+        payload_snapshot = self._freeze_inference_payload(copy.deepcopy(payload))
         inference_seq, request_ns = self._begin_inference_request()
         worker_start_ns = self._inference_now_ns()
         observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
         chunk: np.ndarray | None = None
         try:
-            chunk = self._sample_and_align_chunk(payload)
+            chunk = self._sample_and_align_chunk(payload_snapshot)
             return chunk
         finally:
             worker_end_ns = self._inference_now_ns()
@@ -1915,6 +2058,7 @@ class FlowMatchingActionSource:
             self._stream_activation_candidate_metadata = (
                 {
                     "checkpoint_id": str(getattr(self, "checkpoint_id", "unknown")),
+                    "generation": int(getattr(self, "_stream_generation", 0)),
                     "inference_seq": int(inference_seq),
                     "observation_step_seq": observation_step_seq,
                     "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
@@ -1940,6 +2084,7 @@ class FlowMatchingActionSource:
         self._stream_request = None
         self._stream_inflight_generation = None
         self._stream_stall_count = 0
+        self._stream_ready_discard_count = 0
         self._stream_generation = 0
         if not hasattr(self, "_inference_timing_lock"):
             self._init_inference_timing_state()
@@ -1965,18 +2110,22 @@ class FlowMatchingActionSource:
                     self._stream_inflight_generation = int(
                         getattr(self, "_stream_generation", 0)
                     )
-            if isinstance(request, tuple) and len(request) == 4:
+            if isinstance(request, tuple) and len(request) == 5:
+                generation, inference_seq, request_ns, payload, observation_step_seq = request
+            elif isinstance(request, tuple) and len(request) == 4:
                 generation, inference_seq, request_ns, payload = request
+                observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
             elif isinstance(request, tuple) and len(request) == 2:
                 generation, payload = request
                 inference_seq = 0
                 request_ns = self._inference_now_ns()
+                observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
             else:
                 generation, payload = int(getattr(self, "_stream_generation", 0)), request
                 inference_seq = 0
                 request_ns = self._inference_now_ns()
+                observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
             worker_start_ns = self._inference_now_ns()
-            observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
             try:
                 chunk = self._sample_and_align_chunk(payload)
             except Exception as exc:  # noqa: BLE001 - inference must not kill the worker
@@ -2008,6 +2157,7 @@ class FlowMatchingActionSource:
                 self._stream_next_chunk_metadata = (
                     {
                         "checkpoint_id": str(getattr(self, "checkpoint_id", "unknown")),
+                        "generation": int(generation),
                         "inference_seq": int(inference_seq),
                         "observation_step_seq": observation_step_seq,
                         "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
@@ -2024,18 +2174,23 @@ class FlowMatchingActionSource:
 
     def _request_prefetch(self, payload: dict[str, Any]) -> None:
         with self._stream_cv:
-            if self._stream_pending or self._stream_next_chunk is not None:
+            if (
+                bool(getattr(self, "_stream_shutdown", False))
+                or self._stream_pending
+                or self._stream_next_chunk is not None
+            ):
                 return
-            self._stream_pending = True
             # Snapshot the state payload for the worker so a mutable camera/state
             # object cannot be changed by the command loop while inference is reading it.
-            payload_snapshot = copy.deepcopy(payload)
+            payload_snapshot = self._freeze_inference_payload(copy.deepcopy(payload))
             inference_seq, request_ns = self._begin_inference_request()
+            self._stream_pending = True
             self._stream_request = (
                 int(getattr(self, "_stream_generation", 0)),
                 inference_seq,
                 request_ns,
                 payload_snapshot,
+                int(getattr(self, "_stream_emitted_policy_steps", 0)),
             )
             self._stream_cv.notify()
 
@@ -2241,6 +2396,8 @@ class FlowMatchingActionSource:
             return {
                 **latest,
                 "stall_count": int(getattr(self, "_stream_stall_count", 0)),
+                "chunk_activation_mode": str(getattr(self, "chunk_activation_mode", "fixed_steps")),
+                "ready_discard_count": int(getattr(self, "_stream_ready_discard_count", 0)),
                 "rolling_window": 64,
                 "rolling": {name: summary for name, summary in history.items() if summary is not None},
                 "inference_period_jitter": {
@@ -2408,7 +2565,7 @@ class FlowMatchingActionSource:
             left_gripper=gripper_targets.get("left"),
             right_gripper=gripper_targets.get("right"),
             timeout_sec=self.timeout_sec,
-            tcp_target_profile="flow_infer_smooth",
+            tcp_target_profile=str(getattr(self, "tcp_target_profile", "flow_infer_smooth")),
             metadata={
                 "action_source": "flow_infer",
                 "source_conditioning_mode": getattr(self, "_tcp_tp_mode", "legacy_step_hold"),
@@ -2824,7 +2981,7 @@ class FlowMatchingActionSource:
             left_gripper=gripper.get("left"),
             right_gripper=gripper.get("right"),
             timeout_sec=self.timeout_sec,
-            tcp_target_profile="flow_infer_smooth",
+            tcp_target_profile=str(getattr(self, "tcp_target_profile", "flow_infer_smooth")),
             metadata={
                 "action_source": "flow_infer",
                 "source_conditioning_mode": getattr(self, "_tcp_tp_mode", "legacy_step_hold"),
@@ -2847,7 +3004,7 @@ class FlowMatchingActionSource:
             "t_mono": time.monotonic(),
             "t_wall": float(now_monotonic),
             "command_family": self.command_family,
-            "tcp_target_profile": "flow_infer_smooth",
+            "tcp_target_profile": str(getattr(self, "tcp_target_profile", "flow_infer_smooth")),
             "tcp_target_pose_conditioning": getattr(self, "_tcp_tp_mode", "legacy_step_hold"),
             "reanchor_mode": getattr(self, "_tcp_tp_reanchor_mode", "measured_blend"),
             "chunk_index": int(self._chunk_index),

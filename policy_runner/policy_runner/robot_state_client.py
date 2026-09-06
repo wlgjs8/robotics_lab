@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import socket
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
@@ -18,6 +19,9 @@ class UdpEndpoint:
 class StateSnapshot:
     payload: dict[str, Any]
     received_monotonic: float
+    # Opt-in shared read-only-at-sampling history. The payload's own timestamp
+    # remains the immutable cutoff even while this collector receives new data.
+    servo_command_history: Any | None = field(default=None, compare=False, repr=False)
 
     def is_stale(self, now_monotonic: float, stale_timeout_sec: float) -> bool:
         return now_monotonic - self.received_monotonic > stale_timeout_sec
@@ -358,6 +362,18 @@ class RobotStateClient:
         self._running = False
         self._lock = threading.Lock()
         self._latest: StateSnapshot | None = None
+        self._servo_command_history: Any | None = None
+
+    def enable_servo_command_history(self):
+        """Opt in before start(); ordinary state consumers keep stdlib-only imports."""
+        from .servo_command_history import ServoCommandHistory
+
+        with self._lock:
+            if self._servo_command_history is None:
+                self._servo_command_history = ServoCommandHistory(
+                    stale_timeout_sec=self.stale_timeout_sec,
+                )
+            return self._servo_command_history
 
     @property
     def latest(self) -> StateSnapshot | None:
@@ -403,10 +419,18 @@ class RobotStateClient:
         assert self._socket is not None
         self._socket.settimeout(timeout_sec)
         try:
-            data, _addr = self._socket.recvfrom(65536)
+            data, address = self._socket.recvfrom(65536)
         except socket.timeout:
             return None
-        snapshot = StateSnapshot(json.loads(data.decode("utf-8")), time.monotonic())
+        payload, received = json.loads(data.decode("utf-8")), time.monotonic()
+        history = self._servo_command_history
+        if history is not None:
+            try:
+                same_host_clock = ipaddress.ip_address(address[0]).is_loopback
+            except (IndexError, TypeError, ValueError):
+                same_host_clock = False
+            history.record(payload, received, same_host_clock=same_host_clock)
+        snapshot = StateSnapshot(payload, received, history)
         with self._lock:
             self._latest = snapshot
         return snapshot

@@ -26,6 +26,7 @@ rb_servo_gui.egg-info/requires.txt
 rb_servo_gui.egg-info/top_level.txt
 tests/test_camera_quality.py
 tests/test_chunk_overlay.py
+tests/test_environment_visuals.py
 tests/test_gui_contracts.py
 tests/test_head_preview.py
 tests/test_realtime_health.py

@@ -12,6 +12,8 @@ using rb_servo::SafetyPlanGateConfig;
 using rb_servo::control::planGateStep;
 using rb_servo::control::ikThrottlePlanGateStep;
 using rb_servo::control::lowpassEngagementStep;
+using rb_servo::control::planLeashGate;
+using rb_servo::control::PlanLeashParams;
 using rb_servo::SafetyPlanGateConfig;
 
 static int g_failures = 0;
@@ -34,7 +36,37 @@ static SafetyPlanGateConfig shipped() {
 // real streaming step (0.1 deg / 2 ms = 50 deg/s).
 static JointArray zeros() { return JointArray{0, 0, 0, 0, 0, 0}; }
 
+// -- Test L: the divergence leash (2026-09-06). ------------------------------
+static void testPlanLeash() {
+  std::printf("Test L: divergence leash ramps the plan clock, never stops it\n");
+  PlanLeashParams p;  // stack_real.yaml values
+  p.start_m = 0.010; p.start_rad = 0.0349; p.full_m = 0.050; p.full_rad = 0.10; p.min_gate = 0.25;
+  check(planLeashGate(0.0, 0.0, p) == 1.0, "no divergence -> 1.0");
+  check(planLeashGate(0.010, 0.0349, p) == 1.0, "at start -> still 1.0");
+  const double mid = planLeashGate(0.030, 0.0, p);
+  check(std::fabs(mid - 0.5) < 1e-9, "halfway between start and full -> 0.5");
+  check(std::fabs(planLeashGate(0.050, 0.0, p) - 0.25) < 1e-9, "at full -> min_gate");
+  check(std::fabs(planLeashGate(0.500, 0.0, p) - 0.25) < 1e-9, "far beyond full -> min_gate, never 0");
+  check(std::fabs(planLeashGate(0.0, 0.10, p) - 0.25) < 1e-9, "orientation alone reaches min_gate");
+  check(std::fabs(planLeashGate(0.030, 0.06745, p) - 0.5) < 1e-6, "both axes halfway -> 0.5 (min of the two)");
+  check(std::fabs(planLeashGate(0.012, 0.09, p) - planLeashGate(0.0, 0.09, p)) < 1e-12,
+        "the more restrictive axis wins");
+  bool mono = true;
+  double prev = 1.0;
+  for (double e = 0.0; e < 0.08; e += 0.0005) {
+    const double g = planLeashGate(e, 0.0, p);
+    mono &= g <= prev + 1e-12;
+    prev = g;
+  }
+  check(mono, "monotone non-increasing in divergence");
+  PlanLeashParams degenerate = p;
+  degenerate.full_m = degenerate.start_m;
+  check(planLeashGate(0.011, 0.0, degenerate) == 0.25 && planLeashGate(0.009, 0.0, degenerate) == 1.0,
+        "a degenerate ramp (full == start) steps at start");
+}
+
 int main() {
+  testPlanLeash();
   const SafetyPlanGateConfig cfg = shipped();
 
   // -- Test 1: nothing removed -> the gate opens, never closes. ---------------

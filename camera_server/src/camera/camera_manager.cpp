@@ -44,10 +44,10 @@ void CameraManager::ensure_required_cameras_present() {
 #if CAMERA_SERVER_HAVE_REALSENSE
   const auto devices = discover_realsense_devices();
   std::vector<std::string> serials;
-  realsense_device_info_.clear();
+  std::map<std::string, RealSenseDeviceInfo> discovered_info;
   for (const auto& device : devices) {
     serials.push_back(device.serial);
-    realsense_device_info_[device.serial] = device;
+    discovered_info[device.serial] = device;
   }
   realsense_sdk_version_ = librealsense_sdk_version();
   realsense_backend_ = librealsense_backend();
@@ -74,8 +74,8 @@ void CameraManager::ensure_required_cameras_present() {
             << " backend=" << realsense_backend_ << '\n';
   for (const auto& cam : cfg_.cameras) {
     if (cam.backend != "realsense") continue;
-    const auto found = realsense_device_info_.find(cam.serial);
-    if (found == realsense_device_info_.end()) continue;
+    const auto found = discovered_info.find(cam.serial);
+    if (found == discovered_info.end()) continue;
     const auto& device = found->second;
     std::cerr << "[CAM] device " << cam.name << " serial=" << device.serial
               << " product_id=" << device.product_id << " firmware=" << device.firmware_version
@@ -123,15 +123,21 @@ void CameraManager::start() {
       return;
     }
     for (auto& runtime : camera_runtimes_) {
+      if (!running_) break;
+      std::optional<RealSenseDeviceInfo> device_info;
       {
         std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
         auto dev = make_device(runtime->cfg);
         dev->start([this](CapturedFrame&& f) { handle_frame(std::move(f)); });
+        device_info = validated_device_info(runtime->cfg, *dev);
         std::lock_guard<std::mutex> device_lk(runtime->device_mu);
         runtime->device = std::move(dev);
       }
       {
         std::lock_guard<std::mutex> lk(mu_);
+        if (!running_) break;
+        if (device_info) realsense_device_info_[runtime->cfg.serial] = *device_info;
+        else realsense_device_info_.erase(runtime->cfg.serial);
         connected_[runtime->cfg.name] = true;
       }
       std::cerr << "[CAM] started " << runtime->cfg.name << " serial="
@@ -139,6 +145,11 @@ void CameraManager::start() {
     }
   } catch (...) {
     running_ = false;
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      for (auto& [_, connected] : connected_) connected = false;
+      realsense_device_info_.clear();
+    }
     for (auto& runtime : camera_runtimes_) {
       std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
       std::lock_guard<std::mutex> lk(runtime->device_mu);
@@ -153,6 +164,11 @@ void CameraManager::start() {
 
 void CameraManager::stop() {
   if (!running_.exchange(false)) return;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (auto& [_, connected] : connected_) connected = false;
+    realsense_device_info_.clear();
+  }
   for (auto& runtime : camera_runtimes_) runtime->wake_cv.notify_all();
   for (auto& runtime : camera_runtimes_) {
     if (runtime->supervisor_thread.joinable()) runtime->supervisor_thread.join();
@@ -164,7 +180,8 @@ void CameraManager::stop() {
   metadata_queue_.close();
   if (metadata_thread_.joinable()) metadata_thread_.join();
   std::lock_guard<std::mutex> lk(mu_);
-  for (auto& [_, v] : connected_) v = false;
+  for (auto& [_, connected] : connected_) connected = false;
+  realsense_device_info_.clear();
 }
 
 std::unique_ptr<ICameraDevice> CameraManager::make_device(const CameraConfig& cam) const {
@@ -172,6 +189,19 @@ std::unique_ptr<ICameraDevice> CameraManager::make_device(const CameraConfig& ca
   if (cfg_.server.simulate_cameras) return make_mock_camera_device(cam, cfg_.server.clock);
   if (cam.backend == "uvc") return make_uvc_device(cam, cfg_.server.clock);
   return make_realsense_device(cam, cfg_.server.clock, cfg_.sync);
+}
+
+std::optional<RealSenseDeviceInfo> CameraManager::validated_device_info(
+    const CameraConfig& cam, const ICameraDevice& device) const {
+  const auto info = device.active_device_info();
+  if (info && (info->serial.empty() || info->serial != cam.serial)) {
+    throw std::runtime_error("active camera serial mismatch for " + cam.name +
+                             ": expected=" + cam.serial + " actual=" + info->serial);
+  }
+  if (!info && cam.backend == "realsense" && !cfg_.server.simulate_cameras) {
+    throw std::runtime_error("active RealSense device info unavailable for " + cam.name);
+  }
+  return info;
 }
 
 bool CameraManager::wait_or_stopping(CameraRuntime& runtime,
@@ -210,8 +240,14 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
     }
 
     runtime.last_frame_time_ns = 0;
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      connected_[runtime.cfg.name] = false;
+      realsense_device_info_.erase(runtime.cfg.serial);
+    }
     const uint64_t start_ns = now_ns(cfg_.server.clock);
     try {
+      std::optional<RealSenseDeviceInfo> device_info;
       CameraConfig attempt_cfg = runtime.cfg;
       if (retry && attempt_cfg.backend == "realsense") {
         // Sensor controls and intrinsics are persistent for the device session
@@ -224,6 +260,7 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
         std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
         auto dev = make_device(attempt_cfg);
         dev->start([this](CapturedFrame&& frame) { handle_frame(std::move(frame)); });
+        device_info = validated_device_info(runtime.cfg, *dev);
         std::lock_guard<std::mutex> device_lk(runtime.device_mu);
         runtime.device = std::move(dev);
       }
@@ -248,6 +285,12 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
           reported_connected = true;
           {
             std::lock_guard<std::mutex> lk(mu_);
+            // Publish identity from this opened pipeline atomically with its
+            // first-frame readiness; discovery before start can be stale after
+            // advanced-mode toggling or USB disconnect/re-enumeration.
+            if (!running_) break;
+            if (device_info) realsense_device_info_[runtime.cfg.serial] = *device_info;
+            else realsense_device_info_.erase(runtime.cfg.serial);
             connected_[runtime.cfg.name] = true;
             auto& stats = reconnect_stats_[runtime.cfg.name];
             stats.consecutive_failures = 0;
@@ -263,6 +306,7 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
           std::cerr << "[CAM] streaming " << runtime.cfg.name
                     << (reconnected ? " (reconnected)" : "");
           if (reconnected) std::cerr << " reset_bundle_groups=" << reset_bundle_groups;
+          if (device_info) std::cerr << " port=" << device_info->physical_port;
           std::cerr << '\n';
         }
         const uint64_t reference_ns = last_frame_ns == 0 ? start_ns : last_frame_ns;
@@ -273,6 +317,7 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
           {
             std::lock_guard<std::mutex> lk(mu_);
             connected_[runtime.cfg.name] = false;
+            realsense_device_info_.erase(runtime.cfg.serial);
             auto& stats = reconnect_stats_[runtime.cfg.name];
             ++stats.disconnect_count;
             stats.last_disconnect_time_ns = current_ns;
@@ -294,17 +339,18 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
       retry = timed_out;
     } catch (const std::exception& e) {
       {
+        std::lock_guard<std::mutex> lk(mu_);
+        connected_[runtime.cfg.name] = false;
+        realsense_device_info_.erase(runtime.cfg.serial);
+        auto& stats = reconnect_stats_[runtime.cfg.name];
+        stats.last_error = e.what();
+        stats.last_disconnect_time_ns = now_ns(cfg_.server.clock);
+      }
+      {
         std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
         std::lock_guard<std::mutex> lk(runtime.device_mu);
         if (runtime.device) runtime.device->stop();
         runtime.device.reset();
-      }
-      {
-        std::lock_guard<std::mutex> lk(mu_);
-        connected_[runtime.cfg.name] = false;
-        auto& stats = reconnect_stats_[runtime.cfg.name];
-        stats.last_error = e.what();
-        stats.last_disconnect_time_ns = now_ns(cfg_.server.clock);
       }
       recovery_pending = true;
       retry = true;
@@ -397,8 +443,18 @@ void CameraManager::process_frame_metadata(ProcessedFrame&& frame) {
 }
 
 HealthSnapshot CameraManager::snapshot() const {
-  std::lock_guard<std::mutex> lk(mu_);
   HealthSnapshot h;
+  // Capture diagnostics first and never wait for a device undergoing teardown.
+  // Identity must be copied afterward: copying connected/routing and then
+  // waiting for device_mu could return an old connected=true path after stop.
+  // Do not nest device_mu and mu_: stop joins a frame thread that may need mu_.
+  for (const auto& runtime : camera_runtimes_) {
+    std::unique_lock<std::mutex> device_lk(runtime->device_mu, std::try_to_lock);
+    if (device_lk.owns_lock() && runtime->device) {
+      h.camera_capture_stats[runtime->cfg.name] = runtime->device->capture_stats();
+    }
+  }
+  std::lock_guard<std::mutex> lk(mu_);
   h.host_time_ns = now_ns(cfg_.server.clock);
   h.uptime_sec = start_time_ns_ == 0 ? 0.0 : static_cast<double>(h.host_time_ns - start_time_ns_) / 1e9;
   h.mode = cfg_.server.mode;
@@ -435,12 +491,6 @@ HealthSnapshot CameraManager::snapshot() const {
   h.complete_bundle_count = compat.complete_bundle_count;
   h.incomplete_bundle_count = compat.dropped_master_count;
   h.max_time_diff_ms = compat.last_skew_ms;
-  for (const auto& runtime : camera_runtimes_) {
-    std::lock_guard<std::mutex> device_lk(runtime->device_mu);
-    if (runtime->device) {
-      h.camera_capture_stats[runtime->cfg.name] = runtime->device->capture_stats();
-    }
-  }
   h.shm_name = shm_.name();
   h.shm_size_bytes = shm_.size_bytes();
   h.metadata_publish_count = publisher_.publish_count();

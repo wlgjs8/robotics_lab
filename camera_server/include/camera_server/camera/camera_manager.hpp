@@ -54,6 +54,8 @@ class CameraManager {
   void process_frame_metadata(ProcessedFrame&& frame);
   void ensure_required_cameras_present();
   std::unique_ptr<ICameraDevice> make_device(const CameraConfig& cam) const;
+  std::optional<RealSenseDeviceInfo> validated_device_info(
+      const CameraConfig& cam, const ICameraDevice& device) const;
   void supervise_camera(CameraRuntime& runtime);
   bool wait_or_stopping(CameraRuntime& runtime, std::chrono::milliseconds duration);
 
@@ -72,6 +74,8 @@ class CameraManager {
   std::map<std::string, StreamStats> stats_;
   std::map<std::string, bool> connected_;
   std::map<std::string, CameraReconnectStats> reconnect_stats_;
+  // Active-pipeline identity only, guarded by mu_ together with connected_.
+  // Preflight discovery is deliberately not a routing authority.
   std::map<std::string, RealSenseDeviceInfo> realsense_device_info_;
   std::string realsense_sdk_version_;
   std::string realsense_backend_;

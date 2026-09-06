@@ -16,6 +16,7 @@
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/arm_worker.hpp"
 #include "rb_servo/control/cartesian_chunk_follower.hpp"
+#include "rb_servo/control/command_tracking_window.hpp"
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
@@ -877,6 +878,18 @@ private:
     // Per-cause re-anchor tallies (the aggregate stays in *_chunk_follower_reanchor_count_).
     std::uint64_t left_divergence_reanchor_count_ = 0;
     std::uint64_t right_divergence_reanchor_count_ = 0;
+    // Soft divergence breaches excused because the robot tracked its command
+    // (2026-09-06): the plan-vs-sent gap was this chain's own lag, not a runaway.
+    std::uint64_t left_divergence_excused_count_ = 0;
+    std::uint64_t right_divergence_excused_count_ = 0;
+    // Recent SENT (nominal) commands per arm for the dead-time tolerant
+    // "robot tracks its command" test in applyChunkFollowerStage. 25 ticks = 50 ms at
+    // 500 Hz, more than twice the measured sent->actual chain delay (~22 ms), so a
+    // tracking arm always finds its match while a pinned arm can be excused for at
+    // most 50 ms.
+    static constexpr std::size_t kCommandTrackingWindowTicks = 25;
+    control::CommandTrackingWindow<kCommandTrackingWindowTicks> left_command_track_window_;
+    control::CommandTrackingWindow<kCommandTrackingWindowTicks> right_command_track_window_;
     std::uint64_t left_lead_reanchor_explained_count_ = 0;
     std::uint64_t right_lead_reanchor_explained_count_ = 0;
     std::uint64_t left_lead_reanchor_unexplained_count_ = 0;
@@ -917,6 +930,7 @@ private:
     sensor::FtPipeline right_ft_pipeline_;
     control::AdmittanceOverlay left_overlay_;
     control::AdmittanceOverlay right_overlay_;
+    std::array<std::uint64_t, 2> force_reference_reset_count_{};
     control::ForceGate left_force_gate_;
     control::ForceGate right_force_gate_;
     FtTelemetry left_ft_telemetry_{};
@@ -1141,6 +1155,9 @@ private:
         int follower_segments = 0;
         double follower_advance_gate = 1.0;
         double follower_plan_rate_gate = 1.0;
+        double follower_core_gate = 1.0;
+        double follower_leash_gate = 1.0;
+        int follower_solve_failures = 0;
         std::array<double, 3> follower_advance_direction{};
         bool follower_output_smd_reseeded = false;
         double follower_alpha = 1.0;
@@ -1153,6 +1170,9 @@ private:
         double follower_output_smd_lag_m = 0.0;
         double follower_output_smd_lag_rad = 0.0;
         std::optional<Pose6D> follower_prefilter_stand;
+        // Physical wall-time derivatives: stand linear / reference-body angular.
+        std::optional<Vec6> follower_sample_velocity;
+        std::optional<Vec6> follower_sample_acceleration;
         double follower_divergence_pos_m = 0.0;
         double follower_divergence_ang_rad = 0.0;
         double follower_projection_error_m = 0.0;
@@ -1163,6 +1183,11 @@ private:
         int follower_actual_lead_error_count = 0;
         std::uint64_t follower_reanchor_count = 0;
         std::uint64_t follower_divergence_reanchor_count = 0;
+        std::uint64_t follower_divergence_excused_count = 0;
+        double follower_cmd_track_pos_m = 0.0;
+        double follower_cmd_track_rad = 0.0;
+        int follower_cmd_track_lag_ticks = -1;
+        bool follower_cmd_tracks = false;
         std::uint64_t follower_lead_reanchor_explained_count = 0;
         std::uint64_t follower_lead_reanchor_unexplained_count = 0;
         std::uint64_t follower_warm_resume_count = 0;
@@ -1281,10 +1306,14 @@ private:
     // in place. `nominal` is the pose the deviation is measured FROM. Returns true
     // when the composed pose differs from the nominal.
     bool applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target);
-    // The nominal an EMITTED pose (FK of sent joints, or the measured TCP) was composed
-    // from, given this arm's standing overlay deviation. Identity when nothing stands
-    // (the k = 0 fold path). See AdmittanceOverlay::strip.
+    // A valid Cartesian target uses the same eligibility for inverse reference
+    // conversion and downstream compose. Frozen state alone is not eligibility.
+    const control::AdmittanceOverlay* forceOverlayForReference(ArmId arm) const;
+    // Inverse of the compose planned for this tick, identity while uncovered.
     Pose6D nominalOfEmitted(ArmId arm, const Pose6D& emitted_stand) const;
+    // Explicit new joint authority: discard only the selected arm's old Cartesian
+    // and force reference. Preserve sent joints/velocity and joint brake state.
+    void resetForceReferenceForInit(ArmId arm);
     // THE FOLD (force_control.fold_deviation): hand this tick's overlay deviation to
     // the plan that produced the nominal, then drop the overlay's copy. Runs AFTER
     // applyForceOverlay composed the target, so the emitted pose is unchanged -

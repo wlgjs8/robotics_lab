@@ -226,6 +226,25 @@ J3/elbow is fixed to `[-150 deg, +150 deg]` in the tracked safety limits,
 joint-limit barrier, and URDF/Pinocchio IK model. Do not widen it to make an
 unreachable Cartesian pose appear solvable.
 
+## Fresh chunk execution profile
+
+The optional `flow_infer_fresh` profile preserves each stack's motion limits
+and enables `fresh_chunk_replan` and `continuous_hold_resume`. Both flags require
+enabled `delta_preview` and default to false. The real profile additionally
+sets `output_smd.velocity_ff_linear_gain: 0.8` (legacy/default `1.0`), reducing
+translation velocity feedforward while preserving angular conditioning. The
+controller-simulation profile keeps its existing disabled output conditioner. Fresh frames replan from the current sampled p/v/a instead
+of waiting for the previous segment endpoint; repeated IK refusal holds the
+nominal sent reference without repeatedly cold-starting the output filter.
+State JSON advertises these capabilities in `chunk_execution_profiles` so
+the policy can reject an unsupported profile before emitting commands.
+
+See [design, selection and limits](../docs/plans/plan_fresh_chunk_execution_20260906.md).
+Plan splice continuity does not imply continuity across hard safety holds or
+prove physical vibration reduction. Force/tare and motion limits are unchanged.
+See [conditioner tradeoff and replay limits](../docs/reference/follower_output_conditioning.md)
+and [bounded state publication](../docs/reference/state_udp_payload_budget.md).
+
 ## Command channel
 
 Current stack command endpoint:
@@ -271,6 +290,17 @@ An untared arm is never covered. The GUI's leaseless `TareForceSensor` and
 `raw - gravity` average. Automatic tare invalidates the previous bias at the
 InitMotion request, then waits for arrival, settle time, and a low sent-speed
 condition before sampling.
+
+Fresh planner-backed InitMotion requests also discard the selected arm's previous force and
+Cartesian reference, including a no-op request, while retaining sent-joint
+history for the joint brake. Repeated packets for the same logical request do
+not repeat that reset. First-chunk waiting targets use the same force-compose
+eligibility as their reference conversion, so a frozen deviation cannot be
+subtracted repeatedly while coverage is recovering. The internal reference
+deviation, strip eligibility and reset count are available in state/CSV logs;
+see the root `docs/servo_backend_contract.md`. From the repository root, run
+`ctest --test-dir rb_servo_server/build -R '^force_overlay_resume$' --output-on-failure`
+for the hardware-free regression.
 
 A command packet carrying a `force_control` object is still rejected because
 the law is owned by tracked server config, not the client payload. Archived v1

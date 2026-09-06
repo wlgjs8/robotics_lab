@@ -464,6 +464,9 @@ struct CartesianSolveTelemetry {
     int follower_segments = 0;
     double follower_advance_gate = 1.0;
     double follower_plan_rate_gate = 1.0;
+    double follower_core_gate = 1.0;    // policy period / stretched segment length (core time-stretch)
+    double follower_leash_gate = 1.0;   // divergence leash on the plan clock
+    int follower_solve_failures = 0;    // Ruckig-refused segment solves (served by ring-down)
     std::array<double, 3> follower_advance_direction{};
     bool follower_output_smd_reseeded = false;
     double follower_alpha = 1.0;        // sacrifice-ladder time dilation applied
@@ -476,6 +479,9 @@ struct CartesianSolveTelemetry {
     double follower_output_smd_lag_m = 0.0;
     double follower_output_smd_lag_rad = 0.0;
     std::optional<Pose6D> follower_prefilter_stand;  // raw per-tick follower emission
+    // Physical wall-time derivatives: stand linear / reference-body angular.
+    std::optional<Vec6> follower_sample_velocity;
+    std::optional<Vec6> follower_sample_acceleration;
     double follower_divergence_pos_m = 0.0;
     double follower_divergence_ang_rad = 0.0;
     double follower_projection_error_m = 0.0;
@@ -492,6 +498,13 @@ struct CartesianSolveTelemetry {
     // fidelity loss that re-anchoring HIDES by skipping trajectory content)?
     // Only the unexplained kind consumes the lead re-anchor rate budget.
     uint64_t follower_divergence_reanchor_count = 0;        // sent target drifted from the plan
+    uint64_t follower_divergence_excused_count = 0;         // soft divergence while the robot tracked its command
+    // Dead-time tolerant robot-vs-command tracking (best match among the commands sent
+    // in the last 50 ms): the question the divergence/lead gates are excused on.
+    double follower_cmd_track_pos_m = 0.0;
+    double follower_cmd_track_rad = 0.0;
+    int follower_cmd_track_lag_ticks = -1;
+    bool follower_cmd_tracks = false;
     uint64_t follower_lead_reanchor_explained_count = 0;    // lead while throttled/blocked/projected
     uint64_t follower_lead_reanchor_unexplained_count = 0;  // lead with no safety cause -> real
     uint64_t follower_warm_resume_count = 0;       // brief Hold resumes preserving chained p/v/a
@@ -651,6 +664,12 @@ struct ForceControlTelemetry {
     // be judged against either.
     std::string law;
     bool compose_applied = false;      // the deviation reached the commanded target
+    // Tick-entry overlay state, including a frozen deviation while uncovered.
+    // Unlike deviation_m/rad below, these are populated even when the law cannot run.
+    std::array<double, 3> reference_deviation_m{};
+    std::array<double, 3> reference_deviation_rad{};
+    bool reference_strip_enabled = false;  // valid Cartesian targets will be composed this tick
+    std::uint64_t reference_reset_count = 0; // fresh InitMotion requests for this arm
     // THE DEVIATION from the nominal (followed) pose, STAND frame. Translation [m],
     // rotation as a rotation vector [rad].
     std::array<double, 3> deviation_m{};
@@ -1462,6 +1481,20 @@ struct SelfCollisionNearPairViz {
     double clearance_m = 0.0;
     bool external = false;  // arm<->external obstacle (floor) vs robot self-collision
     bool external_box = false;  // arm<->runtime external keep-out box
+    bool intra_arm = false;     // same-arm non-adjacent link pair
+    bool gripper_gripper = false;  // cross-arm pair of two Pika hulls
+    bool environment = false;      // arm<->cell structure (env_* geometry)
+    // THIS PAIR'S OWN barrier thresholds, resolved by the same per-category selection
+    // the monitor enforces with (collision_monitor.cpp: external_box -> external ->
+    // intra_arm -> gripper_gripper -> self). Published because a consumer CANNOT derive
+    // them: the near list is sorted by RAW clearance, so "nearest" is not "violating"
+    // when the categories have different floors — on the RB5 the structural intra-arm
+    // link3<->link5 pair sits at ~23 mm (floor 5 mm) and owns near[0] on 99% of ticks,
+    // while an arm<->stand pair violating its own 40 mm floor ranks below it. A viewer
+    // banding every pair against the single self d_hard_m therefore both mis-colors the
+    // structural pairs red and names the wrong parts as the colliding ones.
+    double d_hard_m = 0.0;
+    double d_slow_m = 0.0;
 };
 
 struct ServoSnapshot {

@@ -125,7 +125,10 @@ static bool run() {
 
     // geometry: link0..6 hulls (left 12 / right 12) + stand 7 + 2 gripper = 33
     std::cout << "geoms=" << mon.numGeometries() << " pairs=" << mon.numPairs() << "\n";
-    RB_CHECK(mon.numGeometries() == 51);  // see the breakdown in runArticulatedGripper
+    // 52, not 51: env_stand_riser carries a <collision> since 2026-09-06 (it is the
+    // one cell structure the arms approach — 35.7 mm measured), so it is a checked
+    // stand-side geometry in its own `environment` barrier class.
+    RB_CHECK(mon.numGeometries() == 52);  // see the breakdown in runArticulatedGripper
     RB_CHECK(mon.numPairs() > 0);
 
     {
@@ -991,7 +994,10 @@ static bool runArticulatedGripper() {
     // The gripper bolts straight to the flange -- the F/T sensor is inside
     // pika_gripper.STL, not a separate body (docs/reference/pika_tool_geometry.md).
     std::cout << "articulated geoms=" << mon.numGeometries() << "\n";
-    RB_CHECK(mon.numGeometries() == 55);
+    // 56, not 55: env_stand_riser carries a <collision> since 2026-09-06, so the
+    // cell riser is a checked stand-side geometry (its own `environment` barrier
+    // class). 11 arm-link + 3 pika hulls per arm, 28 stand-side.
+    RB_CHECK(mon.numGeometries() == 56);
 
     const JointArray init = kInitPose;
     auto fingerClears = [](const CollisionVerdict& v) {
@@ -1276,6 +1282,122 @@ static bool runNearBandInclusion() {
     return true;
 }
 
+// Every consumer must band a near pair against ITS OWN category floor. Measured on
+// the RB5 (2026-09-06, servo_log_20260906_131740.csv): the structural intra-arm
+// link3<->link5 pair sits at 22.9-23.6 mm and is the globally nearest pair on 99.4% of
+// 53,795 ticks, while the gripper<->gripper pair that reached 8.5 mm IS in hard
+// violation of its own 25 mm floor. Banding both against the self d_hard_m (40 mm)
+// inverts both answers: the permanently-near structural pair reads as a violation and
+// the pair that actually breached is not identified.
+static bool runNearPairBandSelection() {
+    CollisionMonitorConfig cfg;
+    cfg.d_hard_m = 0.040;              // self: arm<->arm, arm<->stand
+    cfg.d_slow_m = 0.090;
+    cfg.intra_arm_d_hard_m = 0.005;
+    cfg.intra_arm_d_slow_m = 0.015;
+    cfg.gripper_gripper_d_hard_m = 0.025;
+    cfg.gripper_gripper_d_slow_m = 0.067;
+    cfg.external_d_hard_m = 0.003;
+    cfg.external_d_slow_m = 0.025;
+    cfg.external_box_d_hard_m = 0.010;
+    cfg.external_box_d_slow_m = 0.080;
+    cfg.environment_d_hard_m = 0.025;
+    cfg.environment_d_slow_m = 0.067;
+
+    CollisionNearPair self_pair;  // no category flags -> the self set
+    RB_CHECK(nearPairHardFloorM(cfg, self_pair) == 0.040);
+    RB_CHECK(nearPairSlowBandM(cfg, self_pair) == 0.090);
+
+    CollisionNearPair intra;
+    intra.intra_arm = true;
+    intra.d_m = 0.0229;  // the measured structural link3<->link5 clearance
+    RB_CHECK(nearPairHardFloorM(cfg, intra) == 0.005);
+    RB_CHECK(nearPairSlowBandM(cfg, intra) == 0.015);
+    RB_CHECK(intra.d_m >= nearPairHardFloorM(cfg, intra));   // NOT violating...
+    RB_CHECK(intra.d_m < cfg.d_hard_m);                      // ...but under the self floor
+
+    CollisionNearPair grip;
+    grip.gripper_gripper = true;
+    grip.d_m = 0.0085;  // the measured gripper-base<->gripper-base approach
+    RB_CHECK(nearPairHardFloorM(cfg, grip) == 0.025);
+    RB_CHECK(nearPairSlowBandM(cfg, grip) == 0.067);
+    RB_CHECK(grip.d_m < nearPairHardFloorM(cfg, grip));      // this one IS violating
+
+    // Cell structure (env_* geometry) is its own class: the riser's measured 35.7 mm
+    // closest approach clears its 25 mm floor but NOT the 40 mm self floor.
+    CollisionNearPair env;
+    env.environment = true;
+    env.d_m = 0.0357;
+    RB_CHECK(nearPairHardFloorM(cfg, env) == 0.025);
+    RB_CHECK(nearPairSlowBandM(cfg, env) == 0.067);
+    RB_CHECK(env.d_m >= nearPairHardFloorM(cfg, env));   // clears its own floor...
+    RB_CHECK(env.d_m < cfg.d_hard_m);                    // ...but not the self floor
+
+    CollisionNearPair ext;
+    ext.external = true;
+    RB_CHECK(nearPairHardFloorM(cfg, ext) == 0.003);
+    RB_CHECK(nearPairSlowBandM(cfg, ext) == 0.025);
+
+    CollisionNearPair box;
+    box.external_box = true;
+    RB_CHECK(nearPairHardFloorM(cfg, box) == 0.010);
+    RB_CHECK(nearPairSlowBandM(cfg, box) == 0.080);
+
+    // external_box wins over every other flag (selection order is part of the contract).
+    CollisionNearPair both;
+    both.external_box = true;
+    both.external = true;
+    both.intra_arm = true;
+    both.gripper_gripper = true;
+    both.environment = true;
+    RB_CHECK(nearPairHardFloorM(cfg, both) == 0.010);
+    RB_CHECK(nearPairSlowBandM(cfg, both) == 0.080);
+    return true;
+}
+
+// The riser is really in the built model, on its own barrier class -- the end-to-end
+// check that the URDF <collision>, the env_ prefix contract and curatePairs line up.
+static bool runCellStructurePairs() {
+    const fs::path ws = workspaceRoot();
+    CollisionMonitorConfig cfg = makeConfig(ws);
+    if (!fs::is_regular_file(cfg.unified_urdf)) {
+        std::cout << "SKIP: unified URDF not found (" << cfg.unified_urdf << ")\n";
+        return true;
+    }
+    cfg.max_near_pairs = 10000;
+    cfg.environment_d_hard_m = 0.025;
+    cfg.environment_d_slow_m = 0.067;
+    CollisionMonitor mon(cfg);
+    const CollisionVerdict v = mon.evalOnce(kInitPose, kInitPose);
+    RB_CHECK(v.valid);
+
+    bool saw_riser = false;
+    for (const auto& p : v.near) {
+        const bool a_env = p.name_a.rfind("env_", 0) == 0;
+        const bool b_env = p.name_b.rfind("env_", 0) == 0;
+        if (!a_env && !b_env) {
+            RB_CHECK(!p.environment);   // no other pair may claim the class
+            continue;
+        }
+        saw_riser = true;
+        // Classified as cell structure, not as a plain arm<->stand pair, so it is
+        // banded at 25/67 rather than the 40/90 self set.
+        RB_CHECK(p.environment);
+        RB_CHECK(!p.intra_arm && !p.gripper_gripper && !p.external && !p.external_box);
+        RB_CHECK(nearPairHardFloorM(cfg, p) == cfg.environment_d_hard_m);
+        RB_CHECK(nearPairSlowBandM(cfg, p) == cfg.environment_d_slow_m);
+        // The other member is an arm link (the riser is stand-side; stand<->stand
+        // pairs are never generated), and never link0 (stand_ignore_arm_substrings).
+        const std::string& arm = a_env ? p.name_b : p.name_a;
+        RB_CHECK(arm.find("link0") == std::string::npos);
+    }
+    RB_CHECK(saw_riser);
+    // At the init pose the riser is ~262 mm away, so nothing about it is violated.
+    RB_CHECK(!v.hard_violation);
+    RB_CHECK(v.environment_min_clearance_m > cfg.environment_d_hard_m);
+    return true;
+}
+
 int main() {
     if (!runExternalBoxFeedLiveness()) {
         std::cerr << "test_collision_monitor (external box feed liveness) FAILED\n";
@@ -1283,6 +1405,14 @@ int main() {
     }
     if (!runExternalBoxBarrierRouting()) {
         std::cerr << "test_collision_monitor (external box barrier routing) FAILED\n";
+        return 1;
+    }
+    if (!runCellStructurePairs()) {
+        std::cerr << "test_collision_monitor (cell structure pairs) FAILED\n";
+        return 1;
+    }
+    if (!runNearPairBandSelection()) {
+        std::cerr << "test_collision_monitor (near pair band selection) FAILED\n";
         return 1;
     }
     if (!runPairPatternMatching()) {

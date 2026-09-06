@@ -120,12 +120,24 @@ If camera disconnects:
 2. stop that device pipeline
 3. attempt reconnect if enabled
 4. after the first recovered frame, reset every affected bundle group's
-   buffered generation state before reporting the camera connected
+   buffered generation state before reporting the camera connected, and
+   publish serial-validated identity from the newly opened pipeline in the
+   same health-state transition
 5. mark bundles incomplete while camera unavailable
 6. keep other camera pipelines alive; with reconnect disabled, retain startup
    fail-fast for missing required devices
 
 For real robot experiments, fail-fast may be safer during early development.
+
+Device discovery is only preflight validation/logging. Active device metadata
+is captured after stream startup, so advanced-mode USB re-enumeration during
+startup and later pipeline reconnects cannot leave an earlier `videoN` path in
+health. `ICameraDevice::active_device_info()` returns this cached current-session
+snapshot without querying USB in the health or frame callback threads. Failed
+or disconnected sessions expose no routing metadata. Metadata snapshots and
+the connected flag share the manager mutex; device lifecycle and capture-stat
+locks are acquired separately so device stop can join a frame thread without
+waiting on a health snapshot that holds the frame-stat mutex.
 
 ## 7. USB diagnostics
 

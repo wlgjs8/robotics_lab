@@ -14,6 +14,8 @@ CONFIG="${FLOW_INFER_CONFIG:-policy_runner/config/flow_real_realsense.yaml}"
 ROLLOUT_MODE="${FLOW_INFER_ROLLOUT_MODE:-real_policy}"
 ACTION_HORIZON="${FLOW_INFER_ACTION_HORIZON:-24}"
 CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-12}"
+CHUNK_ACTIVATION_MODE="${FLOW_INFER_CHUNK_ACTIVATION_MODE:-fixed_steps}"
+TCP_TARGET_PROFILE="${FLOW_INFER_TCP_TARGET_PROFILE:-flow_infer_smooth}"
 CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"
 SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"
 CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
@@ -90,6 +92,7 @@ if [ -n "$STEP_LOG" ]; then
   echo "[flow-infer] rollout_step_log=$STEP_LOG"
 fi
 echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS overlay_runway_steps=$CHUNK_OVERLAY_RUNWAY_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
+echo "[flow-infer] chunk_activation_mode=$CHUNK_ACTIVATION_MODE tcp_target_profile=$TCP_TARGET_PROFILE"
 echo "[flow-infer] policy_dt_sec=${POLICY_DT:-<runner default 0.0334>} (must match the checkpoint's action-step-frames/fps)"
 echo "[flow-infer] include_depth=${INCLUDE_DEPTH} -> args:${DEPTH_ARGS[*]:-<none, RGB-only>} (must match the served checkpoint's training)"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
@@ -261,6 +264,8 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --rollout-mode "$ROLLOUT_MODE" \
   --action-horizon "$ACTION_HORIZON" \
   --chunk-execute-steps "$CHUNK_EXECUTE_STEPS" \
+  --chunk-activation-mode "$CHUNK_ACTIVATION_MODE" \
+  --tcp-target-profile "$TCP_TARGET_PROFILE" \
   --chunk-overlay-runway-steps "$CHUNK_OVERLAY_RUNWAY_STEPS" \
   --speed-scale "$SPEED_SCALE" \
   "${POLICY_DT_ARGS[@]}" \

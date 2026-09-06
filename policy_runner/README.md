@@ -124,6 +124,14 @@ PYTHONPATH=policy_runner .venv/bin/python -m policy_runner.gripper_server \
   --resolve-pairing-only
 ```
 
+If `physical_port is not present in sysfs` reports a surviving USB device with a
+missing `videoN` path, camera health may still contain the path from before a
+USB reconnect. Restart the camera service with its existing rig/preset and run
+the diagnostic again. The camera server refreshes identity from the active
+pipeline on each start/reconnect. Pairing still requires the complete published
+path to exist: accepting an old USB ancestor alone cannot prove the camera's
+identity if devices have moved between ports.
+
 Explicit `--left-port` / `--right-port` remain available for isolated
 diagnostics but cannot be combined with auto-pairing. `MODE=sim` and an
 explicit `GRIPPER_SERVER=0` remain camera-independent.
@@ -281,10 +289,10 @@ still invalidates cached/in-flight policy work through the normal epoch path.
 
 The camera-readiness guard survives on its own: it still reports
 `camera_stale_timeout` through `terminal_abort_reason`, and `rollout_summary.json`
-still exposes its blocker and phase timing. OpenPI velocity proprio remains
-measured `camera_frame` data.
-For velocity checkpoints, each inference now records whether both arms had a
-complete measured-pose bracket at `[camera_time - policy_dt, camera_time]`.
+still exposes its blocker and phase timing. OpenPI velocity proprio can use
+measured, Python-command, or explicit `servo_command` history. The measured
+`camera_frame` path records whether both arms had a complete measured-pose
+bracket at `[camera_time - policy_dt, camera_time]`.
 The exact per-arm body deltas and any zero-substitution reason are included in
 the diagnostic snapshot. The `delta_preview` server path requires this validity
 bit; a missing bracket is therefore visible and fail-closed instead of silently
@@ -304,6 +312,75 @@ queue/inference/ready timing plus the camera bundle sequence, age, sync skew,
 frame numbers, camera-server health/drop counters, and post-crop left/right RGB
 focus and luminance indicators. The same latest timing/camera snapshot is added
 to the optional chunk-overlay packet and the rollout summary.
+
+### Chunk activation scheduling
+
+`--chunk-activation-mode fixed_steps` is the unchanged scheduling default:
+execute the configured window (for example W4), prefetch at the configured or
+existing automatic kick index, and activate at its boundary. The explicit
+`ready_event` mode submits the next inference at chunk row 0 and activates a
+ready result at the **next policy-row deadline**, including before W4 ends.
+It does not replace half a row on a 500 Hz tick. Both arms and grippers still
+commit the same selected source row, and the policy deadline grid survives
+early replacements without accumulating command-tick lateness.
+
+The request freezes the state payload, generation and `observation_step_seq`
+together. Warm activation removes exactly the policy rows committed after
+that snapshot; worker startup delay cannot silently move this reference.
+There is at most one pending request or ready result. With no ready result,
+the old chunk runs only up to the configured execute limit, followed by the
+existing hold/feed-loss-watchdog behavior. No extra horizon or runway rows are
+silently committed. InitMotion completion/cancel, a global init override and
+server motion-epoch changes discard queued results and invalidate in-flight
+generations. An expired early-replacement candidate leaves the still-valid
+old rows available; inference failure remains idle/retry behavior.
+
+For `servo_command` velocity/grip inputs, the request also freezes the selected
+gripper values and sources before worker dispatch; inline inference uses the
+same hook. A later command or jam-detector change cannot rewrite that request.
+Gripper selection time is logged separately from the servo-state timestamp.
+Images are still selected by the worker from the latest available camera
+bundle, and `camera_minus_state_ms` records their difference from the frozen
+state. This preserves the state/grip request snapshot; it does not establish
+complete image-time synchronization.
+
+`ready_event` rejects RTC, ensemble stitching, chain anchoring, sequential or
+teacher-forced replay, and an explicit prefetch index before model initialization.
+Those paths have fixed-prefix/window contracts and continue to use
+`fixed_steps`. Chunk metadata adds `generation`, `activation_mode`,
+`activation_reason`, `replaced_chunk_steps` and `tcp_target_profile`;
+`execute_steps` in the overlay remains the **maximum executable window**, not
+a promise that every row will be committed before a new chunk replaces it.
+Timing telemetry exposes the activation mode and rejected-ready count.
+
+The opt-in `flow_infer_fresh` TCP target profile is independent of scheduler
+selection; both held-step and FOH command paths carry the selected profile.
+The existing profile remains `flow_infer_smooth`. Profile selection does not
+authorize physical execution or alter the lease, stale-state or fault gates.
+Every fresh-profile state must advertise exactly one matching entry in
+`chunk_execution_profiles`, with `enabled: true`, `controller: delta_preview`,
+`fresh_chunk_replan: true` and `continuous_hold_resume: true`. Missing,
+disabled, malformed or ambiguous support raises an error before camera-gate
+fallback, inference, overlay publication or arm/gripper emission. This prevents
+an older server from silently executing an unknown profile via its default
+controller. The baseline profile does not require this new handshake.
+
+Hardware-free scheduling tests and a measured-latency replay use the real
+dispatcher with in-memory inference completion and I/O. Run with an interpreter
+that has the policy dependencies, including Torch:
+
+```bash
+PYTHONPATH=policy_runner python -m unittest discover -s policy_runner/tests -p test_chunk_activation_scheduler.py
+python tools/replay_chunk_activation.py outputs/sweep/<run>.jsonl \
+  --output outputs/scheduler_replay.json --policy-dt-sec 0.0334 \
+  --tick-sec 0.002 --execute-steps 4
+```
+
+Use repeated `--exclude start:end` arguments to remove InitMotion/startup
+windows relative to the first policy-step timestamp. This replay evaluates
+waiting and scheduling only: higher inference request rate can change real
+latency, observations and model output, and robot continuity must be tested in
+the C++ consumer separately.
 
 RGB evidence images are disabled by default. Enable bounded, best-effort JPEG95
 snapshots of the exact post-crop RGB inputs with either an automatic directory
