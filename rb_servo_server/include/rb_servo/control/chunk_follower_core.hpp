@@ -125,6 +125,11 @@ struct SegmentSolve {
   std::array<double, 6> axis_duration_sec{};
   std::array<double, 6> target_velocity{};
   std::array<double, 6> target_acceleration{};
+  // Optional deadline-aware jerk search. A common scale <= 1 is applied only
+  // when the SAME guarded BVP can still finish within the policy period. This
+  // is a trajectory choice below the configured caps, not a new motion limit.
+  double jerk_scale{1.0};
+  int jerk_search_calculations{0};
 };
 
 template <std::size_t N>
@@ -135,6 +140,27 @@ class ChunkFollowerSegment {
       : limits_(limits), dt_(dt), guard_(guard),
         preserve_current_state_(preserve_current_state) {
     prewarm();
+  }
+
+  ChunkFollowerSegment(const ChunkFollowerSegment&) = default;
+  // Ruckig has const DOF fields and therefore no assignment operator. Retain
+  // this destination's prewarmed calculator; calculate(input, trajectory) takes
+  // all boundary state explicitly. The trajectory, chained state and sample
+  // gauge below are the complete persistent state of this wrapper.
+  ChunkFollowerSegment& operator=(const ChunkFollowerSegment& source) {
+    if (this == &source) return *this;
+    limits_ = source.limits_;
+    dt_ = source.dt_;
+    guard_ = source.guard_;
+    preserve_current_state_ = source.preserve_current_state_;
+    last_traj_ = source.last_traj_;
+    have_traj_ = source.have_traj_;
+    p0_ = source.p0_;
+    v0_ = source.v0_;
+    a0_ = source.a0_;
+    sample_offset_ = source.sample_offset_;
+    have_state_ = source.have_state_;
+    return *this;
   }
 
   // Swap limits/guards in place (profile change). The ruckig OTG object is
@@ -226,7 +252,8 @@ class ChunkFollowerSegment {
   // executed path is then the policy's path at the follower's limits instead of a
   // truncated one; the plan clock is what slows down. Bounded by chain_max so a
   // pathological solve (a corner ring-down of several periods) cannot stall the clock.
-  SegmentSolve solve(const BoundarySample<N>& sample, double chain_max_sec = -1.0) {
+  SegmentSolve solve(const BoundarySample<N>& sample, double chain_max_sec = -1.0,
+                     bool minimize_deadline_jerk = false) {
     SegmentSolve out;
     if (!have_state_) return out;
 
@@ -237,6 +264,50 @@ class ChunkFollowerSegment {
     ruckig::Trajectory<N> traj;
     out.result = otg_.calculate(in, traj);
     if (out.result != ruckig::Result::Working) return out;
+
+    // Time-optimal Ruckig profiles normally spend j_max even for a small
+    // correction. If the original BVP already meets this period, spend that
+    // existing time budget on a less abrupt profile. Keep the original solve
+    // as the known-feasible fallback: targets, all guards, and the minimum
+    // duration are built ONCE and never softened during this search.
+    //
+    // Six bisections give a bounded RT cost and a scale resolution of 1/64.
+    // Synchronization can have blocked duration intervals, so this is a
+    // bounded feasible search, not a claim of a globally minimum jerk. Every
+    // accepted candidate is checked; an invalid or late candidate cannot
+    // replace the original trajectory. Infeasible-deadline segments retain
+    // their original time-stretch/braking behavior.
+    const double deadline = dt_ + 1e-9;
+    if (minimize_deadline_jerk && traj.get_duration() <= deadline &&
+        currentStateWithinLimits(in)) {
+      double lo = 0.0;
+      double hi = 1.0;
+      for (int iteration = 0; iteration < 6; ++iteration) {
+        const double scale = 0.5 * (lo + hi);
+        auto candidate = in;
+        for (std::size_t d = 0; d < N; ++d) {
+          candidate.max_jerk[d] = in.max_jerk[d] * scale;
+        }
+        // A lower jerk must not enlarge an initial-state brake beyond the
+        // velocity envelope. Already out-of-envelope states use the original
+        // full-authority recovery; their physical p/v/a is never clipped.
+        if (!currentStateWithinLimits(candidate)) {
+          lo = scale;
+          continue;
+        }
+        ruckig::Trajectory<N> candidate_traj;
+        ++out.jerk_search_calculations;
+        const auto result = otg_.calculate(candidate, candidate_traj);
+        if (result == ruckig::Result::Working &&
+            candidate_traj.get_duration() <= deadline) {
+          hi = scale;
+          out.jerk_scale = scale;
+          traj = candidate_traj;
+        } else {
+          lo = scale;
+        }
+      }
+    }
 
     out.duration = traj.get_duration();
     const auto independent = traj.get_independent_min_durations();
@@ -272,6 +343,22 @@ class ChunkFollowerSegment {
   }
 
  private:
+  static bool currentStateWithinLimits(const ruckig::InputParameter<N>& in) {
+    for (std::size_t d = 0; d < N; ++d) {
+      const double v = in.current_velocity[d];
+      const double a = in.current_acceleration[d];
+      if (std::abs(v) > in.max_velocity[d] ||
+          std::abs(a) > in.max_acceleration[d]) return false;
+      // Velocity reached while bringing the current acceleration to zero at
+      // this jerk. Lowering jerk is allowed only if that brake stays within
+      // the original velocity cap (same viability condition as target guards).
+      const double brake_velocity = v + std::copysign(
+          a * a / (2.0 * in.max_jerk[d]), a);
+      if (std::abs(brake_velocity) > in.max_velocity[d]) return false;
+    }
+    return true;
+  }
+
   void prewarm() {
     // Absorb the ~3ms first-calculate() allocation off the RT path.
     ruckig::InputParameter<N> in;

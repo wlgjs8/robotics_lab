@@ -753,11 +753,12 @@ class FlowMatchingActionSource:
         Fresh scheduling therefore requires explicit server-advertised support,
         verified on every snapshot rather than cached across a server restart.
         """
-        if str(getattr(self, "tcp_target_profile", "flow_infer_smooth")) != "flow_infer_fresh":
+        profile = str(getattr(self, "tcp_target_profile", "flow_infer_smooth"))
+        if profile not in ("flow_infer_fresh", "flow_infer_preview"):
             return
         profiles = payload.get("chunk_execution_profiles") if isinstance(payload, dict) else None
         matching = (
-            [item for item in profiles if isinstance(item, dict) and item.get("name") == "flow_infer_fresh"]
+            [item for item in profiles if isinstance(item, dict) and item.get("name") == profile]
             if isinstance(profiles, list)
             else []
         )
@@ -768,11 +769,23 @@ class FlowMatchingActionSource:
             and matching[0].get("fresh_chunk_replan") is True
             and matching[0].get("continuous_hold_resume") is True
         )
+        if supported and profile == "flow_infer_preview":
+            max_age = matching[0].get("gripper_state_max_age_sec")
+            supported = (
+                matching[0].get("preview_execution") is True
+                and not isinstance(max_age, bool)
+                and isinstance(max_age, (int, float))
+                and np.isfinite(max_age)
+                and max_age > 0.0
+            )
         if not supported:
             raise ValueError(
-                "flow_infer_fresh requires exactly one enabled server chunk_execution_profiles "
+                f"{profile} requires exactly one enabled server chunk_execution_profiles "
                 "entry with controller=delta_preview, fresh_chunk_replan=true and "
-                "continuous_hold_resume=true; refusing policy inference and motion"
+                "continuous_hold_resume=true"
+                + (", preview_execution=true and explicit positive gripper_state_max_age_sec"
+                   if profile == "flow_infer_preview" else "")
+                + "; refusing policy inference and motion"
             )
 
     def _require_force_control_tare(self, payload: dict[str, Any] | None) -> None:
@@ -823,14 +836,76 @@ class FlowMatchingActionSource:
                 "inference and motion."
             )
 
+    def _update_preview_gripper_authority(
+        self, snapshot: StateSnapshot, now_monotonic: float
+    ) -> None:
+        """No new gripper target while its arm waits for accepted preview output.
+
+        This does not retime source rows or cancel an already accepted actuator
+        move. TCP/frame publication continues so the first trajectory can engage.
+        """
+        if str(getattr(self, "tcp_target_profile", "")) != "flow_infer_preview":
+            return
+        allowed = {"left": False, "right": False}
+        self._preview_gripper_allowed = allowed
+        payload = snapshot.payload
+        profiles = payload.get("chunk_execution_profiles", [])
+        matching = [p for p in profiles if isinstance(p, dict) and p.get("name") == "flow_infer_preview"]
+        if len(matching) != 1:
+            return
+        max_age = matching[0].get("gripper_state_max_age_sec")
+        received = getattr(snapshot, "received_monotonic", None)
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v)
+               for v in (max_age, received, now_monotonic)):
+            return
+        if max_age <= 0.0 or not 0.0 <= now_monotonic - received <= max_age:
+            return
+        if payload.get("fault_latched") is True or payload.get("send_suppressed") is True:
+            return
+        execution = payload.get("preview_execution")
+        if not isinstance(execution, dict):
+            return
+        for arm in allowed:
+            state = execution.get(arm)
+            if not isinstance(state, dict):
+                continue
+            stamp = state.get("sample_time_ns")
+            if isinstance(stamp, bool) or not isinstance(stamp, int) or stamp <= 0:
+                continue
+            age = now_monotonic - stamp * 1e-9
+            allowed[arm] = (
+                state.get("enabled") is True and state.get("active") is True
+                and state.get("status") == "active"
+                and 0.0 <= age <= max_age
+            )
+
+    def _preview_gripper_arm_allowed(self, arm: str) -> bool:
+        return (
+            str(getattr(self, "tcp_target_profile", "")) != "flow_infer_preview"
+            or getattr(self, "_preview_gripper_allowed", {}).get(arm) is True
+        )
+
+    def _guard_preview_gripper_intent(self, intent: CommandIntent | None) -> CommandIntent | None:
+        """Also remove targets from cached intents between policy row deadlines."""
+        if intent is None or str(getattr(self, "tcp_target_profile", "")) != "flow_infer_preview":
+            return intent
+        arms = {}
+        for arm in ("left", "right"):
+            value = getattr(intent, arm)
+            if isinstance(value, dict) and not self._preview_gripper_arm_allowed(arm):
+                value = {key: item for key, item in value.items() if key != "gripper_target"}
+            arms[arm] = value
+        return replace(intent, **arms)
+
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         self._require_chunk_execution_profile(snapshot.payload)
         self._require_force_control_tare(snapshot.payload)
+        self._update_preview_gripper_authority(snapshot, now_monotonic)
         self._last_overlay_payload = snapshot.payload
         self._handle_server_motion_epoch(snapshot)
         self._before_policy_intent(snapshot, now_monotonic)
         if getattr(self, "enable_async_chunking", False):
-            return self._next_intent_streamed(snapshot, now_monotonic)
+            return self._guard_preview_gripper_intent(self._next_intent_streamed(snapshot, now_monotonic))
         payload = snapshot.payload
         if self._reset_left_pose is None or self._reset_right_pose is None:
             self._reset_left_pose = pose_from_state_payload(payload, "left")
@@ -874,7 +949,7 @@ class FlowMatchingActionSource:
             now_monotonic=now_monotonic,
             chunk_step_index=chunk_step_index,
         )
-        return intent
+        return self._guard_preview_gripper_intent(intent)
 
     def _before_policy_intent(
         self, snapshot: StateSnapshot, now_monotonic: float
@@ -2581,9 +2656,13 @@ class FlowMatchingActionSource:
                         step[idx] = self._gripper_command_for_dispatch(
                             arm, float(step[idx])
                         )
+        dispatch_mask = self.arm_mask.tolist()
+        for idx, arm in enumerate(("left", "right")):
+            if len(dispatch_mask) > idx and not self._preview_gripper_arm_allowed(arm):
+                dispatch_mask[idx] = 0.0
         commands = gripper_commands_from_flow_step(
             step.tolist(),
-            arm_mask=self.arm_mask.tolist(),
+            arm_mask=dispatch_mask,
             command_type=command_type,
             source=self.gripper_command_source,
         )
@@ -3127,6 +3206,8 @@ class FlowMatchingActionSource:
         hold_value = self._gripper_hold_open_value()
         for arm, mask_index, step_index in (("left", 0, 6), ("right", 1, 13)):
             if len(self.arm_mask) <= mask_index or self.arm_mask[mask_index] <= 0.0:
+                continue
+            if not self._preview_gripper_arm_allowed(arm):
                 continue
             current = _gripper_value_from_payload(payload, arm)
             if current is None:

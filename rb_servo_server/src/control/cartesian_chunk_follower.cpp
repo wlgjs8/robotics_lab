@@ -468,7 +468,8 @@ void CartesianChunkFollower::stepToNextSegment() {
         cfg_.core_time_stretch_enable
             ? seg_dt_ * std::max(1.0, cfg_.core_time_stretch_max_ratio)
             : seg_dt_;
-    diag_.last_solve = core_.solve(sample, chain_max_sec);
+    diag_.last_solve = core_.solve(sample, chain_max_sec,
+        cfg_.fresh_chunk_replan && cfg_.deadline_jerk_minimization);
     if (diag_.last_solve.result != ruckig::Result::Working) {
       // A refused solve used to leave the PREVIOUS trajectory in place while
       // t_in_seg_ restarted at 0: the emitted pose jumped back one segment of travel

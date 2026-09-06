@@ -129,6 +129,66 @@ std::string asyncControllerSimulationBody(
         "  tracking_error_policy: fault_latch\n";
 }
 
+// THE BOX'S PAYLOAD (gravity model). Parses per arm in the FLANGE frame, and the
+// values a controller would hold the arm up with are refused rather than clamped: a
+// negative mass is not a tuning mistake, it is a gravity model that pushes the arm
+// off its own weight. Absent means "the Setup page owns it", which is what the cell
+// ran on until the right arm dropped in free-drive on 2026-09-06.
+bool testArmPayloadConfigParsesAndRefusesBadGravityModels() {
+    const std::string path = writeTempConfig(
+        "arm-payload",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  payload:\n"
+        "    enable: true\n"
+        "    mass_kg: 0.9572\n"
+        "    com_mm: [-1.01, 3.29, 62.41]\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    RB_CHECK(cfg.left_robot.payload.enable);
+    RB_CHECK(near(cfg.left_robot.payload.mass_kg, 0.9572));
+    RB_CHECK(near(cfg.left_robot.payload.com_mm[0], -1.01));
+    RB_CHECK(near(cfg.left_robot.payload.com_mm[2], 62.41));
+    // Untouched arm keeps the Setup page as the owner.
+    RB_CHECK(!cfg.right_robot.payload.enable);
+
+    const std::string negative = writeTempConfig(
+        "arm-payload-negative",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  payload:\n"
+        "    enable: true\n"
+        "    mass_kg: -0.5\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(negative, "payload.mass_kg"));
+    ::unlink(negative.c_str());
+
+    const std::string short_com = writeTempConfig(
+        "arm-payload-short-com",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  payload:\n"
+        "    enable: true\n"
+        "    mass_kg: 0.9\n"
+        "    com_mm: [0.0, 1.0]\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(short_com, "payload.com_mm"));
+    ::unlink(short_com.c_str());
+
+    const std::string typo = writeTempConfig(
+        "arm-payload-typo",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  payload:\n"
+        "    enable: true\n"
+        "    mass: 0.9\n"
+    );
+    RB_CHECK(loadRejects(typo));   // strict keys: a misspelled mass must not read as 0
+    ::unlink(typo.c_str());
+    return true;
+}
+
 // THE WALL BRAKE ON THE POSE-TRACK PATH: parses, and a standoff that is a working
 // margin rather than a stop distance is refused.
 bool testPoseTrackWallFoldConfigParses() {
@@ -1672,6 +1732,7 @@ bool testRuckigFollowerControllerConfig() {
         "    hold_bounce_resume_sec: 0.5\n"
         "    fresh_chunk_replan: true\n"
         "    continuous_hold_resume: true\n"
+        "    deadline_jerk_minimization: true\n"
         "network:\n"
         "  chunk_frame_bind: udp://127.0.0.1:50377\n"
     );
@@ -1679,10 +1740,47 @@ bool testRuckigFollowerControllerConfig() {
     ::unlink(fresh_path.c_str());
     RB_CHECK(fresh_cfg.cartesian_control.ruckig_follower.fresh_chunk_replan);
     RB_CHECK(fresh_cfg.cartesian_control.ruckig_follower.continuous_hold_resume);
+    RB_CHECK(fresh_cfg.cartesian_control.ruckig_follower.deadline_jerk_minimization);
+    RB_CHECK(fresh_cfg.cartesian_control.tcp_pose_target_profiles.front()
+                 .ruckig_follower.deadline_jerk_minimization);
+    RB_CHECK(!preview_cfg.cartesian_control.ruckig_follower.deadline_jerk_minimization);
+    const auto no_fresh_jerk = writeTempConfig("deadline-jerk-without-fresh",
+        pacing_prefix + "    deadline_jerk_minimization: true\n");
+    RB_CHECK(loadRejectsWithMessage(no_fresh_jerk, "requires fresh_chunk_replan=true"));
+    ::unlink(no_fresh_jerk.c_str());
     RB_CHECK(fresh_cfg.cartesian_control.tcp_pose_target_profiles.front()
                  .ruckig_follower.fresh_chunk_replan);
     RB_CHECK(fresh_cfg.cartesian_control.tcp_pose_target_profiles.front()
                  .ruckig_follower.continuous_hold_resume);
+    const std::string lowpass_prefix = pacing_prefix +
+        "    enable: true\n    hold_bounce_resume_sec: 0.5\n"
+        "    fresh_chunk_replan: true\n"
+        "    output_smd:\n      enable: true\n      mode: position_lowpass2\n";
+    for (const auto& option : std::vector<std::pair<std::string, std::string>>{
+            {"      velocity_ff: false\n      damping_ratio: 0.7071067811865476\n", ""},
+            {"      velocity_ff: true\n", "velocity_ff=false"},
+            {"      velocity_ff: false\n      profile_feedforward: true\n", "profile_feedforward=false"},
+            {"      velocity_ff: false\n      velocity_ff_lpf_hz: 3.0\n", "velocity_ff_lpf_hz=0"},
+            {"      velocity_ff: false\n      velocity_ff_linear_gain: 0.8\n", "velocity_ff_linear_gain=1"},
+            {"      velocity_ff: false\n      damping_ratio: 0.707\n", "sqrt(0.5)"}}) {
+        const auto path = writeTempConfig("position-lowpass-config", lowpass_prefix + option.first +
+            "network:\n  chunk_frame_bind: udp://127.0.0.1:50377\n");
+        if (option.second.empty()) {
+            const auto cfg = rb_servo::loadConfigFromYaml(path);
+            RB_CHECK(cfg.cartesian_control.ruckig_follower.output_smd.mode ==
+                     rb_servo::FollowerOutputSmdMode::PositionLowpass2);
+            RB_CHECK(cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.output_smd.mode ==
+                     rb_servo::FollowerOutputSmdMode::PositionLowpass2);
+        } else RB_CHECK(loadRejectsWithMessage(path, option.second));
+        ::unlink(path.c_str());
+    }
+    for (const auto& mode : {std::string("position_lowpass2"), std::string("unknown")}) {
+        const auto path = writeTempConfig("position-lowpass-invalid-mode",
+            "schema: robotics_lab.rb_servo_server.v1\ncartesian_control:\n"
+            "  ruckig_follower:\n    output_smd:\n      mode: " + mode + "\n");
+        RB_CHECK(loadRejectsWithMessage(path, ".output_smd.mode"));
+        ::unlink(path.c_str());
+    }
     for (const auto* option : {"fresh_chunk_replan", "continuous_hold_resume"}) {
         const auto wrong_controller = writeTempConfig(
             std::string("fresh-transition-controller-") + option,
@@ -1831,6 +1929,7 @@ bool testFollowerOutputSmdConfig() {
     ::unlink(defaults_path.c_str());
     const auto& default_smd = defaults.cartesian_control.ruckig_follower.output_smd;
     RB_CHECK(!default_smd.enable);
+    RB_CHECK(default_smd.mode == rb_servo::FollowerOutputSmdMode::LegacySmd);
     RB_CHECK(near(default_smd.nf_linear_hz, 3.5));
     RB_CHECK(near(default_smd.nf_angular_hz, 2.5));
     RB_CHECK(near(default_smd.damping_ratio, 1.0));
@@ -1911,7 +2010,45 @@ bool testFollowerOutputSmdConfig() {
 
 }  // namespace
 
+bool testSelectTcpPoseTargetProfileAliasesDefaultAndKeepsTheDefaultProfile() {
+    // 2026-09-06: the buffer-authored stale Hold carries the literal "default", which
+    // used to fall through to a synthesized profile with the SMD and follower OFF.
+    rb_servo::CartesianControlConfig cc;
+    cc.tcp_pose_target_profile_default = "umi_large_smooth";
+    rb_servo::TcpPoseTargetProfileConfig a;
+    a.name = "umi_large_smooth";
+    a.pose_track_smd.enable = true;
+    a.pose_track_smd.natural_frequency_linear_hz = 2.0;
+    a.ruckig_follower.enable = false;
+    rb_servo::TcpPoseTargetProfileConfig b;
+    b.name = "flow_infer_smooth";
+    b.pose_track_smd.enable = true;
+    b.pose_track_smd.natural_frequency_linear_hz = 3.0;
+    b.ruckig_follower.enable = true;
+    cc.tcp_pose_target_profiles = {a, b};
+    bool found = false;
+    rb_servo::TcpPoseTargetProfileConfig r = rb_servo::selectTcpPoseTargetProfile(cc, "", &found);
+    RB_CHECK(found && r.name == "umi_large_smooth" && r.pose_track_smd.enable);
+    r = rb_servo::selectTcpPoseTargetProfile(cc, "default", &found);
+    RB_CHECK(found && r.name == "umi_large_smooth" &&
+             std::abs(r.pose_track_smd.natural_frequency_linear_hz - 2.0) < 1e-12);
+    r = rb_servo::selectTcpPoseTargetProfile(cc, "flow_infer_smooth", &found);
+    RB_CHECK(found && r.name == "flow_infer_smooth" && r.ruckig_follower.enable);
+    r = rb_servo::selectTcpPoseTargetProfile(cc, "no_such_profile", &found);
+    RB_CHECK(!found && r.name == "umi_large_smooth" && r.pose_track_smd.enable &&
+             std::abs(r.pose_track_smd.natural_frequency_linear_hz - 2.0) < 1e-12);
+    // No usable default at all: the bare global blocks, both carried over.
+    rb_servo::CartesianControlConfig bare;
+    bare.tcp_pose_target_profile_default = "missing";
+    bare.pose_track_smd.enable = false;
+    bare.ruckig_follower.enable = true;
+    r = rb_servo::selectTcpPoseTargetProfile(bare, "default", &found);
+    RB_CHECK(!found && r.name == "missing" && !r.pose_track_smd.enable && r.ruckig_follower.enable);
+    return true;
+}
+
 int main() {
+    if (!testArmPayloadConfigParsesAndRefusesBadGravityModels()) return 1;
     if (!testPoseTrackWallFoldConfigParses()) return 1;
     if (!testKinematicsCalibrationConfigParses()) return 1;
     if (!testHoldFoldConfigParses()) return 1;
@@ -1938,5 +2075,6 @@ int main() {
     if (!testRuckigFollowerControllerConfig()) return 1;
     if (!testFollowerOutputSmdConfig()) return 1;
     if (!testSendAtTickStartAndPipelinedReadConfig()) return 1;
+    if (!testSelectTcpPoseTargetProfileAliasesDefaultAndKeepsTheDefaultProfile()) return 1;
     return 0;
 }

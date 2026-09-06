@@ -28,6 +28,7 @@ class FreshExecutionCliTest(unittest.TestCase):
             (["--chunk-activation-mode", "ready_event", "--stream-prefetch-at", "2"], "stream_prefetch_at"),
             (["--chunk-activation-mode", "ready_event", "--sequential-chunk-inference"], "sequential"),
             (["--velproprio-source", "servo_command"], "fixed_step"),
+            (["--tcp-target-profile", "flow_infer_preview", "--chunk-activation-mode", "ready_event", "--rtc"], "RTC"),
         ]
         for options, reason in cases:
             with self.subTest(options=options), \
@@ -77,6 +78,14 @@ class FreshExecutionCliTest(unittest.TestCase):
                 ("--velproprio-sample-mode", "fixed_step"),
             ]:
                 self.assertEqual(args[args.index(name) + 1], value)
+            env["FLOW_INFER_TCP_TARGET_PROFILE"] = "flow_infer_preview"
+            preview = subprocess.run(
+                ["bash", "tools/flow_infer_real_policy.sh", "--proprio-mode", "velocity_grip"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(preview.returncode, 0, preview.stderr)
+            preview_args = json.loads(capture.read_text())
+            self.assertEqual(preview_args[preview_args.index("--tcp-target-profile") + 1], "flow_infer_preview")
 
     def test_experimental_profiles_preserve_each_stacks_existing_limits(self):
         import yaml
@@ -90,11 +99,21 @@ class FreshExecutionCliTest(unittest.TestCase):
                 self.assertTrue(fresh["ruckig_follower"].pop("continuous_hold_resume"))
                 smooth = profiles["flow_infer_smooth"]
                 if name == "stack_real.yaml":
-                    # The new translation-only conditioner is the sole additional
-                    # difference. All angular, force, motion and guard settings
-                    # remain covered by the complete equality check below.
-                    self.assertEqual(fresh["ruckig_follower"]["output_smd"].pop("velocity_ff_linear_gain"), 0.8)
-                    self.assertEqual(smooth["ruckig_follower"]["output_smd"].pop("velocity_ff_linear_gain"), 1.0)
+                    # Only trajectory selection and the explicit output filter
+                    # differ. Keep the complete comparison of force, guards,
+                    # motion ceilings and remaining settings below.
+                    self.assertFalse(fresh["ruckig_follower"].pop("deadline_jerk_minimization"))
+                    fresh_smd = fresh["ruckig_follower"]["output_smd"]
+                    smooth_smd = smooth["ruckig_follower"]["output_smd"]
+                    self.assertEqual(fresh_smd.pop("mode"), "position_lowpass2")
+                    for key, selected, legacy in [
+                        ("nf_linear_hz", 4.5, 3.5), ("nf_angular_hz", 3.5, 2.5),
+                        ("damping_ratio", 0.7071067811865476, 1.0),
+                        ("velocity_ff", False, True),
+                    ]:
+                        self.assertEqual(fresh_smd.pop(key), selected)
+                        self.assertEqual(smooth_smd.pop(key), legacy)
+                    self.assertEqual(fresh_smd["velocity_ff_linear_gain"], 1.0)
                 self.assertEqual(fresh, smooth)
 
 

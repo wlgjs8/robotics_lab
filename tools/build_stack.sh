@@ -79,19 +79,35 @@ if [ "$CLEAN_BUILD" -eq 1 ]; then
 fi
 echo "[build] rb_servo_server (RB_SERVO_ENABLE_RBPODO=ON) -> $BUILD_DIR"
 export CMAKE_PREFIX_PATH="/opt/openrobots:/usr/local${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+# Keep this list in sync with CMakeLists.txt RB_SERVO_LAYOUT_HEADERS. Completion
+# timestamps alone miss a TU that read an old header before a concurrent edit
+# and finished compiling afterward. Reject a changed layout across this build.
+STRUCT_HDRS=(
+  "rb_servo_server/include/rb_servo/config/config.hpp"
+  "rb_servo_server/include/rb_servo/core/types.hpp"
+  "rb_servo_server/include/rb_servo/control/preview_trajectory_tracker.hpp"
+)
+LAYOUT_HASHES_BEFORE=$(sha256sum "${STRUCT_HDRS[@]}")
 cmake -S rb_servo_server -B "$BUILD_DIR" \
-  -DCMAKE_BUILD_TYPE=Release -DRB_SERVO_ENABLE_RBPODO=ON
+  -DCMAKE_BUILD_TYPE=Release -DRB_SERVO_ENABLE_RBPODO=ON \
+  -DRB_SERVO_ENABLE_PREVIEW_EXECUTION=ON
 cmake --build "$BUILD_DIR" -j "$JOBS"
+LAYOUT_HASHES_AFTER=$(sha256sum "${STRUCT_HDRS[@]}")
+if [ "$LAYOUT_HASHES_BEFORE" != "$LAYOUT_HASHES_AFTER" ]; then
+  echo "[build] FATAL: a public struct-layout header changed during the build." >&2
+  echo "[build]        Objects may have consumed different layouts; no binary is qualified." >&2
+  echo "[build]        Stop concurrent source edits, then run make rebuild." >&2
+  exit 1
+fi
 
 # 2b) ODR / stale-object SAFETY guard. cmake's incremental header-dependency tracking
 #     can MISS transitively-config-dependent TUs when a struct-layout header
-#     (config.hpp) changes, leaving a MIXED-LAYOUT binary (ODR). That silently corrupts
+#     changes, leaving a MIXED-LAYOUT binary (ODR). That silently corrupts
 #     runtime config and can DISABLE a safety guard — a real 2026-07 incident where a
 #     mixed build let an arm penetrate the floor while FloorViolation was still detected.
 #     Fail closed: if any object linked into the SERVER (core lib + exe, not tests) is
-#     older than config.hpp, refuse to ship the binary and demand a clean rebuild.
-#     Keep STRUCT_HDRS in sync with CMakeLists.txt RB_SERVO_LAYOUT_HEADERS.
-STRUCT_HDRS=("rb_servo_server/include/rb_servo/config/config.hpp")
+#     older than any header in STRUCT_HDRS, refuse to ship the binary and demand
+#     a clean rebuild.
 STALE_OBJS=""
 for hdr in "${STRUCT_HDRS[@]}"; do
   found=$(find "$BUILD_DIR/CMakeFiles/rb_servo_core.dir" \

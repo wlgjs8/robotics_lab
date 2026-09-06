@@ -348,7 +348,172 @@ struct SafetyClampTelemetry {
     int accel_limited_joint = -1;
 };
 
+// Stable telemetry labels. The control-layer enum orders are checked at their
+// producer; core does not depend on optimizer/worker headers.
+inline constexpr std::array<const char*, 8> kPreviewWorkerStatusNames{
+    "solved", "invalid_request", "source_mismatch", "preview_unavailable",
+    "splice_unavailable", "solve_rejected", "late", "worker_exception"};
+inline constexpr std::array<const char*, 8> kPreviewSolveStatusNames{
+    "solved", "invalid_reference", "invalid_initial_state", "infeasible",
+    "iteration_limit", "time_budget_exceeded", "numerical_failure", "tracking_budget_exceeded"};
+inline constexpr std::array<const char*, 8> kPreviewResultCheckNames{
+    "ready", "worker_rejected", "epoch_mismatch", "gate_mismatch",
+    "source_mismatch", "parent_mismatch", "late", "invalid_timing"};
+inline constexpr std::array<const char*, 8> kPreviewStagedCancelNames{
+    "fold", "reset", "source", "parent", "contact", "expiry", "sample", "other"};
+inline constexpr std::array<const char*, 5> kPreviewBrakeCauseNames{
+    "expired", "contact", "backlog", "history", "other"};
+
+enum class PreviewFoldCause : std::uint8_t { Unknown, Force, RoiFloor, GeometryHold };
+inline constexpr const char* previewFoldCauseName(PreviewFoldCause cause) {
+    switch (cause) {
+        case PreviewFoldCause::Force: return "force";
+        case PreviewFoldCause::RoiFloor: return "roi_floor";
+        case PreviewFoldCause::GeometryHold: return "geometry_hold";
+        default: return "unknown";
+    }
+}
+
+// Current coordinator preview execution, independent of the raw follower and
+// backend ACK. Status strings below are static literals, not RT allocations.
+struct PreviewExecutionTelemetry {
+    bool enabled = false;
+    bool active = false;
+    const char* status = "disabled";
+    uint64_t sample_time_ns = 0;
+    uint64_t epoch = 0;
+    uint64_t plan_id = 0;
+    uint64_t source_wire_seq = 0;
+    uint64_t source_recv_seq = 0;
+    double backlog_sec = 0.0;
+    double rate = 1.0;
+    double plan_age_sec = 0.0;
+    double accepted_position_error_m = 0.0;
+    double accepted_rotation_error_rad = 0.0;
+    double solve_time_sec = 0.0;
+    uint64_t submitted = 0;
+    uint64_t accepted = 0;
+    uint64_t rejected = 0;
+    uint64_t expired = 0;
+    uint64_t contact_guard_count = 0;
+
+    // Latest observed result and cumulative counts survive lifecycle resets.
+    // All status/reason pointers must be static literals. Result timing is in
+    // monotonic seconds, IDs/counters remain uint64_t in JSON and CSV.
+    uint64_t gate_revision = 0;
+    uint64_t gauge_revision = 0;
+    uint64_t parent_plan_id = 0;
+    uint64_t request_id = 0;
+    bool result_valid = false;
+    bool result_solve_attempted = false;
+    const char* last_worker_status = "not_observed";
+    const char* last_solve_status = "not_observed";
+    const char* last_admission_reason = "not_observed";
+    // Worker-owned counts include completed results even if mailbox delivery
+    // drops/coalesces them. Solve counts include only attempted QPs; admission
+    // checks below count only results actually observed by the coordinator.
+    std::array<uint64_t, 8> worker_status_counts{};
+    std::array<uint64_t, 8> solve_status_counts{};
+    std::array<uint64_t, 8> result_checks{};
+    uint64_t result_request_id = 0;
+    uint64_t result_epoch = 0;
+    uint64_t result_gate_revision = 0;
+    uint64_t result_gauge_revision = 0;
+    uint64_t result_source_wire_seq = 0;
+    uint64_t result_source_recv_seq = 0;
+    uint64_t result_parent_plan_id = 0;
+    uint64_t result_gauge_transported = 0;
+    uint64_t staged_gauge_transported = 0;
+    uint64_t gauge_transport_failed = 0;
+    double result_generated_at_sec = 0.0;
+    double result_splice_at_sec = 0.0;
+    double result_valid_until_sec = 0.0;
+    double result_completed_at_sec = 0.0;
+    double result_observed_at_sec = 0.0;
+    int solve_iterations = 0;
+    bool solve_contact_constrained = false;
+    bool solve_contact_decomposed = false;
+    bool solve_contact_coupled_fallback = false;
+    double solve_max_constraint_violation = 0.0;
+    double solve_max_contact_velocity_violation_m_s = 0.0;
+    bool solve_angular_norm_coupled = false;
+    uint64_t solve_angular_norm_cuts = 0;
+    double solve_max_angular_chart_velocity_norm = 0.0;
+    double solve_max_angular_chart_acceleration_norm = 0.0;
+    // Optimizer seed diagnostics are meaningful only if result_solve_attempted.
+    // An earlier worker refusal may not have established a valid splice seed.
+    double result_initial_linear_velocity_max_m_s = 0.0;
+    double result_initial_linear_acceleration_max_m_s2 = 0.0;
+    double result_initial_angular_velocity_norm_rad_s = 0.0;
+    double result_initial_angular_acceleration_norm_rad_s2 = 0.0;
+
+    uint64_t ready_not_staged = 0;
+    uint64_t staged_identity_rejected = 0;
+    uint64_t staged_expired = 0;
+    uint64_t staged_sample_rejected = 0;
+    uint64_t staged_contact_rejected = 0;
+    std::array<uint64_t, 8> staged_cancel_counts{};
+    const char* last_staged_cancel_reason = "none";
+    double last_staged_cancel_time_sec = 0.0;
+    uint64_t last_staged_cancel_request_id = 0;
+    // Admission means the future plan became the active nominal trajectory;
+    // it is distinct from backend enqueue/ACK and from staging a result.
+    double last_admission_time_sec = 0.0;
+    double last_admission_gap_sec = 0.0;
+    uint64_t last_admitted_request_id = 0;
+    uint64_t last_admitted_parent_plan_id = 0;
+
+    std::array<uint64_t, 5> brake_counts{};
+    const char* last_brake_reason = "none";
+    double last_brake_start_time_sec = 0.0;
+    double last_brake_origin_sec = 0.0;
+    uint64_t angular_continuations_started = 0;
+    uint64_t angular_brakes_started = 0;
+    double last_contact_reject_time_sec = 0.0;
+    double last_contact_reject_gate = 1.0;
+    double last_contact_reject_closing_m_s = 0.0;
+    double last_contact_reject_allowed_m_s = 0.0;
+    std::array<double, 3> last_contact_reject_normal{};
+
+    // One exact latest applied common-frame shift. The booked time/transform
+    // distinguishes the previous safety decision from next-tick application.
+    PreviewFoldCause fold_cause = PreviewFoldCause::Unknown;
+    uint64_t fold_count = 0;
+    uint64_t fold_force_count = 0;
+    uint64_t fold_roi_floor_count = 0;
+    uint64_t fold_geometry_hold_count = 0;
+    uint64_t fold_unknown_count = 0;
+    uint64_t fold_booked_time_ns = 0;
+    uint64_t fold_applied_time_ns = 0;
+    uint64_t fold_revision = 0;
+    uint32_t fold_geometry_cause_mask = 0;
+    std::array<double, 3> fold_translation_m{};
+    std::array<double, 4> fold_quaternion_xyzw{0.0, 0.0, 0.0, 1.0};
+    std::array<double, 3> fold_booked_translation_m{};
+    std::array<double, 4> fold_booked_quaternion_xyzw{0.0, 0.0, 0.0, 1.0};
+    // Current tick's booked geometry correction, even if it is never applied
+    // after a Hold/fault/reset. Separate from the latest applied fold above.
+    bool pending_geometry_fold_valid = false;
+    uint64_t pending_geometry_fold_time_ns = 0;
+    uint32_t pending_geometry_fold_cause_mask = 0;
+    std::array<double, 3> pending_geometry_fold_translation_m{};
+    std::array<double, 4> pending_geometry_fold_quaternion_xyzw{0.0, 0.0, 0.0, 1.0};
+    // Cumulative transform within epoch; differ consecutive samples to retain
+    // all same-tick shifts even when only the latest fold event is displayed.
+    std::array<double, 3> gauge_translation_m{};
+    std::array<double, 4> gauge_quaternion_xyzw{0.0, 0.0, 0.0, 1.0};
+
+    // Mailbox totals have their own producer; they must not be inferred from
+    // submitted - accepted - rejected, which conflates several lifecycles.
+    uint64_t request_invalid = 0;
+    uint64_t request_mailbox_full = 0;
+    uint64_t request_coalesced = 0;
+    uint64_t result_publish_dropped = 0;
+    uint64_t result_coalesced = 0;
+};
+
 struct CartesianSolveTelemetry {
+    PreviewExecutionTelemetry preview_execution;
     bool attempted = false;
     bool success = false;
     std::string status = "not_attempted";
@@ -458,6 +623,8 @@ struct CartesianSolveTelemetry {
     int follower_step = -1;             // absolute chunk index of the segment target
     double follower_t_in_seg_sec = 0.0; // time into the current 33ms segment
     double follower_duration_sec = 0.0; // ruckig T_opt of the segment (>= policy_dt)
+    double follower_jerk_scale = 1.0; // selected fraction of configured per-axis jerk ceilings
+    int follower_jerk_search_calculations = 0; // extra solves for the current segment
     std::array<double, 6> follower_axis_duration_sec{};
     std::array<double, 6> follower_target_velocity{};
     std::array<double, 6> follower_target_acceleration{};
@@ -715,6 +882,15 @@ struct ForceControlTelemetry {
     double gate_stream_translation = 1.0;
     double gate_stream_force_n = 0.0;
     bool gate_stream_armed = false;
+    // CSV-only: exact gate snapshot consumed by pose-track SMD, BEFORE this
+    // tick's force update. The legacy fields above describe the updated gate.
+    bool smd_gate_sample_valid = false;
+    bool smd_gate_armed = false;
+    bool smd_gate_releasing = false;
+    double smd_gate_translation = 1.0;
+    std::array<double, 3> smd_gate_normal_stand{};
+    std::array<double, 3> smd_gate_measured_force_stand_n{};
+    double smd_gate_removed_velocity_m_s = 0.0;
     // The wrench that drove the law, STAND frame @TCP — the same numbers as
     // FtTelemetry::comp_stand, repeated here so one row explains one decision.
     Wrench6D wrench_stand;
@@ -818,6 +994,11 @@ struct ArmCommand {
     // when the corresponding array was present and had the expected size.
     bool has_joint_target = false;
     bool has_tcp_target = false;
+    // Server-authored: a compliant Hold promoted to a TcpPoseTarget at its latched
+    // nominal (force_control.hold_compliance). The follower stages treat it as a
+    // Hold for the chunk plan's lifecycle (pause / bounded resume, never engage)
+    // and only the pose-track SMD tracks the nominal (2026-09-06).
+    bool compliant_hold = false;
     bool has_linear_move_duration = false;
     bool has_linear_move_linear_speed = false;
     bool has_linear_move_angular_speed = false;
@@ -1027,6 +1208,12 @@ struct ArmWorkerTelemetry {
 // behind RB_SELF_COLLISION_LOG; boundary chatter and release lunges could not
 // be attributed from the CSV.
 struct SafetyProjectionTelemetry {
+    // CSV-only stage snapshots, raw joint degrees. Distinguish the geometric
+    // solve from its subsequent release slew without changing either stage.
+    bool joint_stage_trace_valid = false;
+    std::array<JointArray, 2> requested_q_deg{};
+    std::array<JointArray, 2> projected_q_deg{};
+    std::array<JointArray, 2> released_q_deg{};
     bool active = false;                   // any constraint row engaged this tick
     int constraint_count = 0;              // rows handed to the Gauss-Seidel solve
     double left_correction_deg_s = 0.0;    // max joint-speed removed, per arm

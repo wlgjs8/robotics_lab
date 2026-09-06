@@ -1,5 +1,6 @@
 """Exercise the offline binary without any backend/device startup."""
 import csv
+import copy
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,11 @@ class DeltaReplayTest(unittest.TestCase):
             args.append(str(start))
         result=subprocess.run(args,cwd=ROOT,
                               text=True,capture_output=True,timeout=15)
-        return result,list(csv.DictReader(out.open())) if out.exists() else []
+        rows = []
+        if out.exists():
+            with out.open() as stream:
+                rows = list(csv.DictReader(stream))
+        return result, rows
 
     @staticmethod
     def constant_stream():
@@ -80,6 +85,106 @@ class DeltaReplayTest(unittest.TestCase):
                     self.assertEqual(ref,row)
             self.assertTrue(any(abs(float(ref["smd_x"])-float(row["smd_x"]))>1e-5
                                 for ref,row in zip(baseline,changed,strict=True)))
+
+
+class RecordedConsumerReplayTest(unittest.TestCase):
+    @staticmethod
+    def events():
+        events = []
+        for i in range(40):
+            e = {"schema": "robotics_lab.recorded_follower_input.v2",
+                 "tick": 1000000000+i*2000000, "t": i*.002, "mono": 1+i*.002,
+                 "dt": .002, "active": i not in (20,21),
+                 "previous_emitted": [.2,.1,.3,0,0,0,1], "actual": [.2,.1,.3,0,0,0,1],
+                 "reference_strip_enabled": False, "reference_deviation": [0]*6,
+                 "advance_gate": 1., "advance_direction": [0,0,0], "plan_rate_gate": 1.,
+                 "observed_prefilter": [.2,.1,.3,0,0,0,1], "observed_stage": [.2,.1,.3,0,0,0,1]}
+            if i in (0,10,22,32):
+                e['frame'] = {'wire_seq': 700+i, 'recv_seq': 500+i, 'recv_time': e['mono']-.001,
+                              'policy_dt': .0334, 'delta': [[.0005,0,0,0,0,0,20] for _ in range(8)]}
+            events.append(e)
+        return events
+
+    def run_recorded(self, directory, events, options=()):
+        source = directory/'recorded.jsonl'; output = directory/'recorded.csv'
+        source.write_text(''.join(json.dumps(e)+'\n' for e in events))
+        result = subprocess.run([str(BIN), '--recorded', str(CONFIG), 'flow_infer_fresh', str(source), str(output), *options],
+                                cwd=ROOT, text=True, capture_output=True, timeout=15)
+        rows = []
+        if output.exists():
+            with output.open() as stream:
+                rows = list(csv.DictReader(stream))
+        return result, rows
+
+    def test_consumed_wire_identity_fresh_replacement_and_cold_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, rows = self.run_recorded(Path(tmp), self.events())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(rows), 38)
+            self.assertEqual(rows[10]['wire_seq'], '710')
+            self.assertEqual(rows[20]['wire_seq'], '722')
+            self.assertEqual([int(r['tick']) for r in rows if r['reseeded']=='1'], [1000000000,1044000000])
+            self.assertIn('consumed_frames=4', result.stdout)
+
+    def test_reference_strip_uses_current_deviation_and_exact_rotation(self):
+        e = self.events()[:1]
+        e[0]['reference_strip_enabled'] = True
+        e[0]['reference_deviation'] = [.01,.02,.03,0,0,1.5707963267948966]
+        with tempfile.TemporaryDirectory() as tmp:
+            result, rows = self.run_recorded(Path(tmp), e)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for axis, expected in [('x',.19),('y',.08),('z',.27)]:
+                self.assertAlmostEqual(float(rows[0]['reference_'+axis]), expected, places=12)
+            self.assertAlmostEqual(abs(float(rows[0]['reference_qz'])), 2**-.5, places=12)
+            self.assertLess(float(rows[0]['reference_qz'])*float(rows[0]['reference_qw']), 0)
+            e[0]['reference_strip_enabled'] = False
+            result, rows = self.run_recorded(Path(tmp), e)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertAlmostEqual(float(rows[0]['reference_x']), .2)
+            self.assertAlmostEqual(float(rows[0]['reference_qz']), 0)
+
+    def test_invalid_source_contract_fails_explicitly(self):
+        mutations = [
+            (lambda e: e[0].pop('frame'), 'seed frame'),
+            (lambda e: e[0].pop('reference_deviation'), 'reference_deviation'),
+            (lambda e: e[0].update(schema='legacy'), 'schema'),
+            (lambda e: e[0].update(dt=0), 'clock'),
+            (lambda e: e[0].update(advance_gate=1.1), 'gate'),
+            (lambda e: e[0]['frame'].update(recv_time=2), 'identity/time'),
+            (lambda e: e[0]['frame'].update(delta=[[0]*6]*3), 'dimension')]
+        with tempfile.TemporaryDirectory() as tmp:
+            for mutate, expected in mutations:
+                with self.subTest(expected=expected):
+                    events = copy.deepcopy(self.events()[:1]); mutate(events)
+                    result, _ = self.run_recorded(Path(tmp), events)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected, result.stderr)
+
+    def test_resume_requires_fresh_frame_instead_of_reusing_old_chunk(self):
+        events = self.events()[:23]; events[22].pop('frame')
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _ = self.run_recorded(Path(tmp), events)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('seed frame', result.stderr)
+
+    def test_optional_leash_uses_own_previous_stage_and_preserves_recorded_gate(self):
+        events=[]
+        seed=self.events()[0]
+        for i in range(300):
+            e=copy.deepcopy(seed);e.update(t=i*.002,mono=1+i*.002,tick=1000000000+i*2000000)
+            e.pop('frame')
+            if i%40==0:
+                e['frame']={'wire_seq':i+1,'recv_seq':i+1,'recv_time':e['mono']-.001,
+                            'policy_dt':.0334,'delta':[[.02,0,0,0,0,0,20] for _ in range(8)]}
+            if i>220:e['plan_rate_gate']=.5
+            events.append(e)
+        with tempfile.TemporaryDirectory() as tmp:
+            result,rows=self.run_recorded(Path(tmp),events,('--conservative-stage-leash',))
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertTrue(any(float(r['recomputed_leash_gate'])<.99 for r in rows))
+            for r in rows:
+                self.assertAlmostEqual(float(r['plan_gate']),min(float(r['recorded_plan_gate']),float(r['recomputed_leash_gate'])),places=12)
+            self.assertEqual(float(rows[0]['recomputed_leash_gate']),1.)
 
 
 if __name__=="__main__":

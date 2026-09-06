@@ -12,6 +12,7 @@
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/hold_fold.hpp"
 #include "rb_servo/control/admittance_overlay.hpp"
+#include "rb_servo/control/preview_contact_authority.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/sensor/ft_pipeline.hpp"
 
@@ -443,6 +444,113 @@ bool testGateStreamChannelIgnoresVibrationAndHoldsSustainedContact() {
     CHECK(disarmed_at < 500);
     CHECK(gate.streamTranslation() > 0.9);
     return true;
+}
+
+bool testStreamReleaseKeepsNormalAndAllowsRecontact() {
+    auto cfg = shippedLaw();
+    cfg.gate_open_tau_s = 1.0;
+    rb_servo::control::ForceGate gate;
+    gate.configure(cfg, .002);
+    using V = rb_servo::math::Vector3;
+    for (int i = 0; i < 500; ++i) gate.updateStream(V(0, 0, 20));
+    CHECK(gate.streamArmed());
+    for (int i = 0; i < 1000 && gate.streamArmed(); ++i) gate.updateStream(V::Zero());
+    CHECK(gate.streamReleasing());
+    const V normal = gate.streamForceDirection();
+    CHECK((normal - V::UnitZ()).norm() < 1e-12);
+    for (int i = 0; i < 400; ++i) {
+        // Below-threshold residual force rotates across the old contact normal.
+        // It must neither redirect the lingering cut nor delay the scalar release.
+        const double phase = 2 * M_PI * 9 * .002 * i;
+        const double before = gate.streamTranslation();
+        gate.updateStream(V(.5 * std::cos(phase), .5 * std::sin(phase), 0));
+        CHECK(!gate.streamArmed());
+        CHECK(gate.streamReleasing());
+        CHECK((gate.streamForceDirection() - normal).norm() < 1e-12);
+        CHECK(near(gate.streamTranslation(), before + (1 - before) * .002, 1e-12));
+        double removed = 0;
+        const V tangential = gate.applyStreamTranslation(V(.001, 0, 0), &removed);
+        CHECK((tangential - V(.001, 0, 0)).norm() < 1e-12 && removed == 0);
+        const V retreat = gate.applyStreamTranslation(V(0, 0, .001), &removed);
+        CHECK((retreat - V(0, 0, .001)).norm() < 1e-12 && removed == 0);
+        const V into = gate.applyStreamTranslation(V(0, 0, -.001), &removed);
+        CHECK(near(into.z(), -.001 * gate.streamTranslation(), 1e-12));
+    }
+    // A real contact in a new direction must regain ownership while the old
+    // release is still running; freezing the measurement would fail this case.
+    int armed_at = -1;
+    for (int i = 0; i < 500; ++i) {
+        gate.updateStream(V(20, 0, 0));
+        if (gate.streamArmed()) { armed_at = i; break; }
+    }
+    CHECK(armed_at >= 49 && armed_at < 200);
+    CHECK(!gate.streamReleasing());
+    CHECK(gate.streamForceDirection().dot(V::UnitX()) > .99);
+    for (int i = 0; i < 500; ++i) gate.updateStream(V(20, 0, 0));
+    double removed = 0;
+    const V into_new = gate.applyStreamTranslation(V(-.001, 0, 0), &removed);
+    CHECK(std::abs(into_new.x()) < .00002 && removed > .00098);
+    for (int i = 0; i < 8000; ++i) gate.updateStream(V::Zero());
+    CHECK(gate.streamTranslation() == 1.0 && !gate.streamReleasing());
+    CHECK(gate.streamForceDirection().isZero(0));
+    gate.reset();
+    CHECK(gate.streamMeasuredForce().isZero(0));
+    CHECK(!gate.streamArmed() && !gate.streamReleasing());
+    return true;
+}
+
+bool testPreviewConstraintUsesExistingSustainedContactClassifier() {
+    auto cfg=shippedLaw();
+    cfg.gate_enable=true;cfg.gate_max_force_n=10.;cfg.gate_max_torque_nm=1.4;
+    cfg.gate_close_tau_s=.10;cfg.gate_open_tau_s=1.;
+    cfg.gate_stream_judge_lpf_hz=2.;cfg.gate_stream_arm_force_n=5.;
+    cfg.gate_stream_release_force_n=2.;cfg.gate_stream_arm_dwell_sec=.10;
+    rb_servo::control::ForceGate gate;gate.configure(cfg,.002);
+    const rb_servo::math::Vector3 zero=rb_servo::math::Vector3::Zero();
+    const rb_servo::math::Vector3 tail(-1e-5,0.,0.);
+    // A tiny filtered deadzoned vector can outlive the instantaneous direction
+    // while a scalar physical magnitude still closes the tick gate. It is not
+    // an armed sustained contact and must not activate the extra QP constraint.
+    gate.update(tail,zero,6.,0.);gate.updateStream(rb_servo::math::Vector3(-.5,0.,0.));
+    CHECK(gate.translation()<1.);CHECK(gate.forceDirection().norm()>0.9);CHECK(!gate.streamArmed());
+    auto authority=rb_servo::control::sustainedPreviewContactAuthority(true,gate);
+    CHECK(authority.gate==1.&&authority.normal_into_stand.isZero(0.));
+    bool saw_dwell=false;int armed_at=-1;
+    for(int i=0;i<500;++i) {
+        // 15 N physical press, 12 N after the existing 3 N vector deadzone.
+        gate.update(rb_servo::math::Vector3(-12.,0.,0.),zero,15.,0.);
+        gate.updateStream(rb_servo::math::Vector3(-15.,0.,0.));
+        authority=rb_servo::control::sustainedPreviewContactAuthority(true,gate);
+        if(!gate.streamArmed()) {
+            saw_dwell=saw_dwell||gate.streamOverSec()>0.;
+            CHECK(authority.gate==1.&&authority.normal_into_stand.isZero(0.));
+            CHECK(gate.translation()<1.); // the canonical tick protection remains live during dwell
+        } else {armed_at=i;break;}
+    }
+    CHECK(saw_dwell&&armed_at>=49&&armed_at<500);
+    CHECK(authority.gate==gate.translation()&&authority.gate<1.);
+    CHECK((authority.normal_into_stand-rb_servo::math::Vector3::UnitX()).norm()<1e-12);
+    const double tick_before=gate.translation(),stream_before=gate.streamTranslation();
+    const auto direction_before=gate.forceDirection();const double force_before=gate.streamForceN();
+    authority=rb_servo::control::sustainedPreviewContactAuthority(false,gate);
+    CHECK(authority.gate==1.&&authority.normal_into_stand.isZero(0.));
+    CHECK(gate.translation()==tick_before&&gate.streamTranslation()==stream_before);
+    CHECK((gate.forceDirection()-direction_before).norm()==0.&&gate.streamForceN()==force_before&&gate.streamArmed());
+    bool released=false;
+    for(int i=0;i<500;++i) {
+        gate.update(tail,zero,0.,0.);gate.updateStream(zero);
+        if(!gate.streamArmed()) {
+            released=true;CHECK(gate.streamForceN()<cfg.gate_stream_release_force_n);
+            CHECK(gate.translation()<1.&&gate.streamTranslation()<1.);
+            CHECK(gate.forceDirection().norm()>0.9);
+            const double old_tick=gate.translation(),old_stream=gate.streamTranslation();
+            authority=rb_servo::control::sustainedPreviewContactAuthority(true,gate);
+            CHECK(authority.gate==1.&&authority.normal_into_stand.isZero(0.));
+            CHECK(gate.translation()==old_tick&&gate.streamTranslation()==old_stream);
+            break;
+        }
+    }
+    CHECK(released);return true;
 }
 
 // A RELEASED GATE RE-OPENS TO EXACTLY 1.0 - on both channels. A first-order slew
@@ -1305,6 +1413,8 @@ int main() {
     testGateIsAsymmetric();
     testGateIsOpenInFreeSpace();
     testGateStreamChannelIgnoresVibrationAndHoldsSustainedContact();
+    testStreamReleaseKeepsNormalAndAllowsRecontact();
+    testPreviewConstraintUsesExistingSustainedContactClassifier();
     testGateStreamChannelAveragesOutAFlippingDirection();
     testGateReopensToExactlyOneAfterRelease();
     testHoldFoldDeltaFloorAndCap();

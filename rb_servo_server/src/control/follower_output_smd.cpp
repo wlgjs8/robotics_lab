@@ -28,6 +28,19 @@ Eigen::Quaterniond rotationOf(const Pose6D& pose) {
     return Eigen::Quaterniond(math::rotationFromPose(pose)).normalized();
 }
 
+// Trapezoidal state update for p'=v, v'=wn^2*(r-p)-2*zeta*wn*v.
+// `error_sum` is (r_previous-p)+(r_current-p), with p the old output.
+// Keeping the physical state, rather than time-varying direct-form IIR
+// coefficients, also gives well-defined reset/fold and variable-dt behavior.
+Eigen::Vector3d lowPass2NextVelocity(const Eigen::Vector3d& velocity,
+                                   const Eigen::Vector3d& error_sum,
+                                   double wn, double zeta, double dt) {
+    const double a = 0.25 * wn * wn * dt * dt;
+    const double b = zeta * wn * dt;
+    return ((1.0 - b - a) * velocity + 0.5 * wn * wn * dt * error_sum) /
+           (1.0 + b + a);
+}
+
 }  // namespace
 
 FollowerOutputSmd::FollowerOutputSmd(const FollowerOutputSmdConfig& config)
@@ -40,6 +53,8 @@ void FollowerOutputSmd::reset(const Pose6D& pose, const Vec6& xi) {
     angular_velocity_ = Eigen::Vector3d(xi.rx, xi.ry, xi.rz);
     velocity_ff_ = velocity_;
     angular_velocity_ff_ = angular_velocity_;
+    previous_reference_position_ = position_;
+    previous_reference_rotation_ = rotation_;
     lag_pos_m_ = 0.0;
     lag_ang_rad_ = 0.0;
     active_ = true;
@@ -85,6 +100,34 @@ Pose6D FollowerOutputSmd::step(
     const Eigen::Vector3d reference_angular_velocity(xi_ref.rx, xi_ref.ry, xi_ref.rz);
     const double wn_linear = kTwoPi * config_.nf_linear_hz;
     const double wn_angular = kTwoPi * config_.nf_angular_hz;
+
+    if (config_.mode == FollowerOutputSmdMode::PositionLowpass2) {
+        const Eigen::Vector3d next_velocity = lowPass2NextVelocity(
+            velocity_, previous_reference_position_ + reference_position - 2.0 * position_,
+            wn_linear, config_.damping_ratio, dt);
+        position_ += 0.5 * dt * (velocity_ + next_velocity);
+        velocity_ = next_velocity;
+
+        // Express both reference errors and both integration velocities in the
+        // SAME old output body. Log/exp and quaternion conversion are owned by
+        // the mandatory Eigen/Pinocchio math layer, never Euler-angle filtering.
+        const Eigen::Vector3d previous_orientation_error = math::log3(
+            (rotation_.conjugate() * previous_reference_rotation_).toRotationMatrix());
+        const Eigen::Vector3d next_angular_velocity_old_body = lowPass2NextVelocity(
+            angular_velocity_, previous_orientation_error + orientation_error,
+            wn_angular, config_.damping_ratio, dt);
+        const Eigen::Quaterniond increment(math::exp3(
+            0.5 * dt * (angular_velocity_ + next_angular_velocity_old_body)));
+        rotation_ = (rotation_ * increment).normalized();
+        angular_velocity_ = increment.conjugate() * next_angular_velocity_old_body;
+        previous_reference_position_ = reference_position;
+        previous_reference_rotation_ = reference_rotation;
+
+        const Pose6D out = currentPose();
+        lag_pos_m_ = math::positionDistance(reference, out);
+        lag_ang_rad_ = math::orientationDistanceRad(reference, out);
+        return out;
+    }
 
     Eigen::Vector3d damping_velocity = Eigen::Vector3d::Zero();
     Eigen::Vector3d damping_angular_velocity = Eigen::Vector3d::Zero();
@@ -164,6 +207,8 @@ void FollowerOutputSmd::shift(const Eigen::Vector3d& dp_stand,
     if (!active_) return;
     position_ += dp_stand;
     rotation_ = (dR_stand * rotation_).normalized();
+    previous_reference_position_ += dp_stand;
+    previous_reference_rotation_ = (dR_stand * previous_reference_rotation_).normalized();
 }
 
 Pose6D FollowerOutputSmd::currentPose() const {

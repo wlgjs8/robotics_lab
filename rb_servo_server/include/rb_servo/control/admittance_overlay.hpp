@@ -239,7 +239,9 @@ public:
     //
     //   * the physical force VECTOR (stand frame, before the deadzone) is low-
     //     passed at `gate_stream_judge_lpf_hz` (a contact band, ~2 Hz) and BOTH the
-    //     judged magnitude and the cut direction come from that filtered vector.
+    //     judged magnitude and the ARMED cut direction come from that filtered vector.
+    //     After disarming, retain the last armed normal until the existing scalar
+    //     slew reaches fully open; the measured vector continues to detect recontact.
     //     The vector, not the magnitude: a zero-mean vibration averages to nothing
     //     in the vector, whereas its magnitude rectifies into a DC level (replayed
     //     on the day's logs: a 3 Hz filter on |F| still armed 10-47 % of the
@@ -268,8 +270,11 @@ public:
     double streamForceN() const { return stream_force_n_; }   // |slow force vector|
     bool streamArmed() const { return stream_armed_; }
     double streamOverSec() const { return stream_over_sec_; }
-    // Unit direction of the slow force vector (stand frame); zero until one stands.
+    // Applied stand-frame normal. During release it retains the last armed
+    // normal; the measured vector still updates to detect a fresh contact.
     const math::Vector3& streamForceDirection() const { return stream_dir_; }
+    const math::Vector3& streamMeasuredForce() const { return stream_force_filt_; }
+    bool streamReleasing() const { return !stream_armed_ && stream_t_ < 1.0; }
 
 private:
     static double snapOpen(double g);   // 1 - 1e-6 < g  ->  exactly 1.0
@@ -288,7 +293,7 @@ private:
     bool stream_armed_ = false;
     double stream_over_sec_ = 0.0;
     math::Vector3 stream_force_filt_ = math::Vector3::Zero();   // the slow force vector
-    math::Vector3 stream_dir_ = math::Vector3::Zero();          // unit, or zero
+    math::Vector3 stream_dir_ = math::Vector3::Zero();          // applied normal, held during release
 };
 
 // THE HAND-GUIDE ENGAGEMENT LATCH (2026-09-03). A Schmitt trigger on the physical

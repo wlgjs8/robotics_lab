@@ -767,7 +767,79 @@ bool testWallBrakeCapsApproachAndHoldsOnStandoff() {
     return true;
 }
 
+bool testReconfigureKeepsStateAndClampsVelocity() {
+    // PROFILE BINDING (2026-09-06): re-pointing an active tracker at another profile
+    // must keep its pose and goal and only clamp the velocities to the new caps.
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.max_linear_velocity_m_s = 0.5;
+    cfg.max_angular_velocity_rad_s = 1.8;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.5, 0.2, 0.3, 0.0, 0.0, 0.0}, rb_servo::Vec6{0.3, 0.0, 0.0, 0.0, 0.0, 0.5});
+    tracker.updateGoalFromCommand({0.5, 0.2, 0.3, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.52, 0.2, 0.3, 0.0, 0.0, 0.0});
+    rb_servo::PoseTrackSmdConfig slow = cfg;
+    slow.max_linear_velocity_m_s = 0.1;
+    slow.max_angular_velocity_rad_s = 0.2;
+    tracker.reconfigure(slow);
+    RB_CHECK(tracker.active());
+    RB_CHECK(std::abs(tracker.config().max_linear_velocity_m_s - 0.1) < 1e-12);
+    const rb_servo::Pose6D pose = tracker.currentPose();
+    RB_CHECK(std::abs(pose.x - 0.5) < 1e-12 && std::abs(pose.y - 0.2) < 1e-12);
+    const rb_servo::Pose6D goal = tracker.goalPose();
+    RB_CHECK(std::abs(goal.x - 0.52) < 1e-12);
+    RB_CHECK(std::abs(tracker.linearSpeed() - 0.1) < 1e-12);
+    RB_CHECK(std::abs(tracker.angularSpeed() - 0.2) < 1e-12);
+    // A second command still integrates as a delta from the retained reference.
+    tracker.updateGoalFromCommand({0.53, 0.2, 0.3, 0.0, 0.0, 0.0});
+    RB_CHECK(std::abs(tracker.goalPose().x - 0.53) < 1e-12);
+    return true;
+}
+
+bool testShiftMovesStateGoalAndReferenceTogether() {
+    // A frame carry (overlay strip/compose toggle) must not change the dynamics: a
+    // shifted twin follows the same trajectory offset by exactly the shift.
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    rb_servo::SmdPoseTracker a(cfg);
+    rb_servo::SmdPoseTracker b(cfg);
+    for (rb_servo::SmdPoseTracker* t : {&a, &b}) {
+        t->reset({0.5, 0.2, 0.3, 0.0, 0.0, 0.0}, rb_servo::Vec6{0.05, 0.0, 0.0, 0.0, 0.0, 0.0});
+        t->updateGoalFromCommand({0.5, 0.2, 0.3, 0.0, 0.0, 0.0});
+        t->updateGoalFromCommand({0.53, 0.21, 0.3, 0.0, 0.0, 0.0});
+    }
+    const Eigen::Vector3d dp(0.010, -0.020, 0.005);
+    b.shift(dp, Eigen::Quaterniond::Identity());
+    for (int i = 0; i < 400; ++i) {
+        // the same command stream keeps arriving in each tracker's own frame
+        a.updateGoalFromCommand({0.53 + 0.0001 * i, 0.21, 0.3, 0.0, 0.0, 0.0});
+        b.updateGoalFromCommand({0.53 + 0.0001 * i, 0.21, 0.3, 0.0, 0.0, 0.0});
+        const rb_servo::Pose6D pa = a.step(kDt);
+        const rb_servo::Pose6D pb = b.step(kDt);
+        RB_CHECK(std::abs((pb.x - pa.x) - dp.x()) < 1e-9);
+        RB_CHECK(std::abs((pb.y - pa.y) - dp.y()) < 1e-9);
+        RB_CHECK(std::abs((pb.z - pa.z) - dp.z()) < 1e-9);
+    }
+    return true;
+}
+
+bool testCurrentTwistStandRoundTripsThroughTheBodyFrame() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.max_linear_velocity_m_s = 1.0;
+    cfg.max_angular_velocity_rad_s = 2.0;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    const rb_servo::Vec6 twist{0.1, 0.2, -0.05, 0.3, -0.2, 0.4};
+    tracker.reset({0.5, 0.2, 0.3, 0.4, -0.3, 1.2}, twist);
+    const rb_servo::Vec6 back = tracker.currentTwistStand();
+    RB_CHECK(std::abs(back.x - twist.x) < 1e-12 && std::abs(back.y - twist.y) < 1e-12 &&
+             std::abs(back.z - twist.z) < 1e-12);
+    RB_CHECK(std::abs(back.rx - twist.rx) < 1e-9 && std::abs(back.ry - twist.ry) < 1e-9 &&
+             std::abs(back.rz - twist.rz) < 1e-9);
+    return true;
+}
+
 int main() {
+    if (!testReconfigureKeepsStateAndClampsVelocity()) return 1;
+    if (!testShiftMovesStateGoalAndReferenceTogether()) return 1;
+    if (!testCurrentTwistStandRoundTripsThroughTheBodyFrame()) return 1;
     if (!testCriticallyDampedStepHasNoOvershootAndConverges()) return 1;
     if (!testFirstCommandLatchesWithoutJump()) return 1;
     if (!testDriftDetectionForExternalMove()) return 1;

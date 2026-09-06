@@ -386,12 +386,11 @@ void ForceGate::updateStream(const math::Vector3& force_stand_nodz) {
         stream_force_filt_ += a * (force_stand_nodz - stream_force_filt_);
     }
     stream_force_n_ = stream_force_filt_.norm();
-    stream_dir_ = stream_force_n_ > 1e-6 ? math::Vector3(stream_force_filt_ / stream_force_n_)
-                                          : math::Vector3::Zero();
     if (!cfg_.gate_enable) {
         stream_t_ = 1.0;
         stream_armed_ = false;
         stream_over_sec_ = 0.0;
+        stream_dir_.setZero();
         return;
     }
     // ARMING: a Schmitt trigger with a dwell on the slow |F|. A spike that is over
@@ -407,6 +406,17 @@ void ForceGate::updateStream(const math::Vector3& force_stand_nodz) {
         stream_armed_ = false;
         stream_over_sec_ = 0.0;
     }
+    // Only a sustained contact owns a new cut direction. In the 2026-09-06
+    // UMI logs the channel had DISARMED before the 8-9 Hz SMD ripple: its slow
+    // reopen still cut along a small, rotating residual force. Keep the last
+    // armed normal through that reopen, with the existing scalar slew unchanged.
+    // Measurement, thresholds and dwell keep running above, so a new sustained
+    // contact (including a different normal) immediately regains ownership.
+    if (stream_armed_) {
+        stream_dir_ = stream_force_n_ > 1e-6
+            ? math::Vector3(stream_force_filt_ / stream_force_n_)
+            : math::Vector3::Zero();
+    }
     const double t_raw = (stream_armed_ && cfg_.gate_max_force_n > 0.0)
         ? fade(stream_force_n_ / cfg_.gate_max_force_n)
         : 1.0;
@@ -414,6 +424,7 @@ void ForceGate::updateStream(const math::Vector3& force_stand_nodz) {
     const double tau = (t_raw < stream_t_) ? cfg_.gate_close_tau_s : cfg_.gate_open_tau_s;
     const double a = tau > 1e-6 ? std::min(dt_ / tau, 1.0) : 1.0;
     stream_t_ = snapOpen(stream_t_ + (t_raw - stream_t_) * a);
+    if (!stream_armed_ && stream_t_ == 1.0) stream_dir_.setZero();
 }
 
 math::Vector3 ForceGate::applyStreamTranslation(const math::Vector3& advance_stand,

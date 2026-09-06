@@ -1185,6 +1185,122 @@ bool testAsyncSocketSendSupervisedRecordsSocketSendOnly() {
     return true;
 }
 
+// SEND SUPPRESSION (setSendSuppressed) — the freedrive quiesce enabler.
+//
+// Direct teaching needs the controller to fall to robot_state == 1 (Idle), which it
+// only does when servo_j actually stops. Suppressing at the servo loop empties this
+// worker's mailbox but does NOT stop the wire once the worker owns the cadence: the
+// interpolator holds at the newest setpoint and keeps sending. Measured 2026-09-06:
+// every freedrive request aborted with "quiesce timeout: controller never reported
+// idle". This is the assertion that the wire really goes quiet.
+bool testSendSuppressionStopsTheWire() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left, rb_servo::BackendErrorKind::None);
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorkerOptions options;
+    options.send_period_ns = 2'000'000;          // 500 Hz, worker owns cadence
+    options.interpolate_setpoints = true;
+    rb_servo::ArmWorker worker(std::move(backend), options);
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(500)));
+
+    // Two setpoints so the interpolator establishes its cursor and drives the wire.
+    worker.enqueueAsyncServoJ(request(1, joints(3.0), 0));
+    worker.enqueueAsyncServoJ(request(2, joints(4.0), 0));
+    RB_CHECK(raw_backend->waitForSends(10, std::chrono::milliseconds(500)));
+    RB_CHECK(worker.telemetry().worker_interp_active);
+
+    worker.setSendSuppressed(true);
+    // Let the flag be picked up, then measure across a window many cadence periods
+    // wide. Without the gate the interpolator would put ~50 sends on the wire here.
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const int quiet_start = raw_backend->sendCount();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    RB_CHECK(raw_backend->sendCount() == quiet_start);
+
+    // The cadence itself did NOT stop: state reads keep running while the wire is
+    // quiet (the loop body still runs every period, which is also what keeps the
+    // queue-sync law stepping).
+    RB_CHECK(raw_backend->waitForReads(5, std::chrono::milliseconds(500)));
+
+    // Releasing puts the wire back.
+    worker.setSendSuppressed(false);
+    worker.enqueueAsyncServoJ(request(3, joints(9.0), 0));
+    RB_CHECK(raw_backend->waitForSends(quiet_start + 3, std::chrono::milliseconds(500)));
+    worker.stop();
+    return true;
+}
+
+// Lifecycle commands MUST still run while the wire is suppressed: freedrive_teach_on
+// is itself a lifecycle command, so gating it too would deadlock the feature it exists
+// for (suppress -> wait for idle -> teach_on).
+bool testLifecycleCommandsRunWhileSendsAreSuppressed() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left, rb_servo::BackendErrorKind::None);
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorkerOptions options;
+    options.send_period_ns = 2'000'000;
+    options.interpolate_setpoints = true;
+    rb_servo::ArmWorker worker(std::move(backend), options);
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(500)));
+    worker.enqueueAsyncServoJ(request(1, joints(3.0), 0));
+    worker.enqueueAsyncServoJ(request(2, joints(4.0), 0));
+    RB_CHECK(raw_backend->waitForSends(5, std::chrono::milliseconds(500)));
+
+    worker.setSendSuppressed(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const rb_servo::BackendResult<rb_servo::RobotState> on =
+        worker.setFreedrive(true, 7, rb_servo::nowSteadyNs() + 500'000'000ULL);
+    RB_CHECK(on.ok);
+    RB_CHECK(raw_backend->freedriveCount() == 1);
+    RB_CHECK(raw_backend->lastFreedriveOn().has_value());
+    RB_CHECK(*raw_backend->lastFreedriveOn());
+    worker.stop();
+    return true;
+}
+
+// Entering suppression DROPS the cached setpoints. During direct teaching the arm is
+// hand-moved, so the interpolator ring, the mailbox and the last-sent point all
+// describe a pose the arm is no longer in; resuming from them would interpolate the
+// arm BACK to it, downstream of every loop-side safety clamp. worker_interp_active
+// going false is the direct evidence the ring was dropped (reset() clears it, and only
+// two fresh setpoints can set it again).
+bool testSuppressionDropsThePreTeachingSetpoints() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left, rb_servo::BackendErrorKind::None);
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorkerOptions options;
+    options.send_period_ns = 2'000'000;
+    options.interpolate_setpoints = true;
+    rb_servo::ArmWorker worker(std::move(backend), options);
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(500)));
+
+    // The pre-teaching pose, established well enough to be driving the wire.
+    worker.enqueueAsyncServoJ(request(1, joints(10.0), 0));
+    worker.enqueueAsyncServoJ(request(2, joints(10.0), 0));
+    RB_CHECK(raw_backend->waitForSends(10, std::chrono::milliseconds(500)));
+    RB_CHECK(worker.telemetry().worker_interp_active);
+
+    worker.setSendSuppressed(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    RB_CHECK(!worker.telemetry().worker_interp_active);   // ring dropped
+
+    // Release and push the hand-moved pose. With the ring dropped the interpolator
+    // has a single setpoint and emits it verbatim, so the wire carries the NEW pose --
+    // never a blend from the pre-teaching one.
+    worker.setSendSuppressed(false);
+    const int before = raw_backend->sendCount();
+    worker.enqueueAsyncServoJ(request(3, joints(-40.0), 0));
+    RB_CHECK(raw_backend->waitForSends(before + 2, std::chrono::milliseconds(500)));
+    const std::optional<rb_servo::SendServoJRequest> sent = raw_backend->lastRequest();
+    RB_CHECK(sent.has_value());
+    RB_CHECK(sameJointArray(sent->q_target_deg, joints(-40.0)));
+    worker.stop();
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1204,6 +1320,9 @@ int main() {
     if (!testNoDropCountedAfterImmediateDispatch()) return 1;
     if (!testResetFaultUsesLifecycleQueue()) return 1;
     if (!testSetFreedriveUsesLifecycleQueue()) return 1;
+    if (!testSendSuppressionStopsTheWire()) return 1;
+    if (!testLifecycleCommandsRunWhileSendsAreSuppressed()) return 1;
+    if (!testSuppressionDropsThePreTeachingSetpoints()) return 1;
     if (!testLifecycleQueueFullIsExplicit()) return 1;
     if (!testStopJoinsThreadAndRejectsNewCommand()) return 1;
     if (!testNoDeadlockOnDestruction()) return 1;

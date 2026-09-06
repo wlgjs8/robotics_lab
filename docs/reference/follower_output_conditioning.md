@@ -1,6 +1,113 @@
 # Follower output conditioning — 2026-09-06
 
-## Selected change and reason
+## Current selection: position-only conditioning
+
+The real `flow_infer_fresh` profile now selects `output_smd.mode:
+position_lowpass2`, linear/angular natural frequencies **4.5/3.5 Hz**, damping
+`0.7071067811865476`, and both velocity/profile feedforward off. Legacy-only
+LPF/gain fields remain neutral at 0/1. Fresh frame activation, held resume and
+all existing follower v/a/j ceilings remain unchanged.
+
+The new scalar response is `wn²/(s²+2ζwn s+wn²)`, integrated with the
+trapezoidal rule. For fixed period and ζ≥sqrt(0.5), its bilinear discrete
+steady-state sinusoidal gain cannot exceed one. Both translation and SO(3)
+rotation use this position-only structure. Rotational errors share one output
+body frame, and angular velocity is transported after each integration step.
+Eigen/Pinocchio own log/exp and quaternion math. This scalar guarantee is not a
+global nonlinear SO(3), variable-period, transient-energy or robot guarantee.
+
+Reset and common force shifts update the previous input history as well as the
+output state. Existing safety/IK holds bypass normal filter evolution and keep
+the accepted nominal pose. Existing hard-divergence reseed thresholds are retained.
+The loader rejects unknown modes, damping below sqrt(0.5), legacy FF options
+mixed with the new mode, and selection without enabled fresh `delta_preview`.
+`legacy_smd` remains the default; smooth and controller-simulation profiles keep
+their previous output conditioning.
+
+The initial selection recording (`servo_log_20260906_161839.csv`, 16:21:55 griponly) was
+replayed through the actual follower and filter. All 945 consumed frames per arm
+match the frozen baseline at CSV precision, with no wire/step mismatch. The
+selected filter's offline Pinocchio joint-command RMS ratios are:
+
+| Band | Left | Right |
+|---|---:|---:|
+| 0.5–3 Hz | 0.895 | 0.902 |
+| 3–8 Hz | 0.820 | 0.825 |
+| 8–20 Hz | 0.707 | 0.701 |
+
+These are commands, not predicted measured robot motion. Joint spectra cover
+post-resume 23.2–90.7 s with the recorded calibrated arm model/mounts and force
+deviation. Each arm's 34,345 samples has zero IK failures or joint clamps.
+Conservative leash replay additionally uses its own previous output, min-combined
+with the recorded gate. Position lag p95 rises from **3.63/3.42 to 8.50/8.47 mm**;
+its minimum leash gate is 0.865/0.955, with no normal-run stall, solve failure,
+lead fault or reseed. This cannot release an already recorded closed gate and
+does not simulate new force/contact, geometry projection or model responses.
+
+Finite ramp delays are about 50 ms linear and 64 ms angular. Thus smoother
+commands cost following error. The model's roughly 0.32 Hz large excursions
+remain substantially intact; neither zero lag nor zero vibration is promised.
+A faster 5.1/4.1 Hz candidate reduced joint 3–8 Hz RMS by only about 5%.
+
+`deadline_jerk_minimization` was also implemented and tested, but is explicitly
+**false** in the real profile. With at most six verified Ruckig trials it selects
+less jerk only within the same guarded target p/v/a and deadline; braking and
+infeasible cases retain the original solution and limits. It reduced typical
+fresh-swap per-axis jerk from 2000 to about 1063–1094 m/s³, but the combined
+8–20 Hz joint RMS ratios were 0.725/0.737, worse than the filter alone. This
+bounded search is therefore available for experiments and is not enabled by
+default. It is not a globally optimal minimum-jerk solver.
+
+New CSV fields `*_follower_jerk_scale` and
+`*_follower_jerk_search_calculations` accompany existing full prefilter pose,
+sampled v/a, gates, lag and reseed diagnostics. State capabilities advertise
+both the option and filter mode. The policy command retains `ready_event`,
+`flow_infer_fresh`, `servo_command` and `last_emitted_continuous`; changes are
+server-owned and require loading the rebuilt server and tracked config.
+
+No physical component was started. No force-law, Servo J, IK/joint safety or
+follower motion ceiling was retuned by this change. See
+`outputs/fresh_motion_redesign_20260906/report.md` for the integrated tests,
+reproduction commands, frozen geometry provenance and limitations;
+`outputs/nonpeaking_conditioner_design_20260906/report.md` for the 16-candidate
+filter comparison; and `outputs/deadline_jerk_replan_20260906/report.md` for the
+optional trajectory search. The earlier iteration below is superseded.
+
+## Follow-up real rollout: 17:18:47
+
+The subsequent [constrained preview experiment](preview_trajectory_execution.md)
+implements an offline candidate without an output low-pass filter. It is a
+separate build target and is not a selectable replacement for this live profile.
+
+The subsequent 92.72 s griponly rollout confirms that this filter is active:
+all 980 frames per arm reproduce through native follower/filter replay, with
+raw/stage pose error below 0.0000015 mm and no wire/step mismatch. Normal-run
+InitMotion, repeated SMD reset, follower reanchor and IK refusal are absent.
+Remaining 3–8 Hz motion is already in the sent joint commands; windowwise
+measured/sent RMS ratios are 1.030/1.024. This is not zero physical vibration.
+
+Additional lower-cutoff candidates reduce fixed-input command spectra, but
+their added lag activates the plan leash and changes accumulated progress.
+An anchored three-knot preview average avoids the legacy head-clamp bias,
+yet changes the executed prefix when a fresh frame preempts after only two
+or three rows; preserving the full chunk endpoint does not preserve the
+executed displacement. Its right-arm path drifts substantially in replay,
+and the subsequent native IK audit rejects some of the changed targets.
+A scalar notch has a better frequency/lag tradeoff but more stop ringing;
+native SO(3)/lifecycle implementation has not been validated.
+
+These candidates are **not enabled**. The production selection above remains
+4.5/3.5 Hz, `smoothing_window: 1`, with deadline jerk search off. Counterfactual
+replays keep model observations, contact and actual feedback recorded; later
+lead flags/IK results are diagnostic continuations, not predictions of a
+physical rollout. A future preview redesign must retain the original executed-
+prefix reference across arbitrary fresh preemption and bound accumulated
+position/orientation offset. It must also check conditioned joint commands,
+not only TCP spectra.
+See `outputs/chunk_review_20260906_171847/report.md` for provenance, same-input
+comparisons, native IK results and the limits of this analysis.
+
+## Historical 0.8 feedforward iteration
 
 The real `flow_infer_fresh` profile sets
 `ruckig_follower.output_smd.velocity_ff_linear_gain: 0.8`. Linear and angular
@@ -23,7 +130,7 @@ more tracking lag. The selected k=0.8 keeps the same cutoff and changes one acti
 parameter; angular behavior remains unchanged. Gain is finite in [0,1], and
 non-default gain is refused unless velocity FF is enabled and profile FF disabled.
 
-## Comparison on the same recorded reference
+### Comparison on the same recorded reference
 
 Source: `outputs/sweep/20260906_152125_boltv2_griponly_40k` and
 `logs/servo_log_20260906_152057.csv`. Both arms have 55,224 active ticks. Metrics use
@@ -52,7 +159,7 @@ Alternative k=0.7 at 3.5 Hz reduces Cartesian 8–20 Hz RMS by about 20%, but in
 position error p95 to 5.71/4.52 mm. A nonpeaking k≈0.366 at 4.5 Hz costs about
 8.14/7.25 mm p95. Those alternatives were compared but are not enabled.
 
-## Validation and limits
+### Validation and limits
 
 - Production C++ reference replay matches the independent numerical integrator
   exactly for both candidate and reconstructed baseline, with no internal reseeds.
@@ -80,7 +187,7 @@ or v/a/j ceilings changed. A 10 Hz measured/reference amplification in the previ
 run is not enough to retune hardware gains; lowering its command excitation is the
 bounded change here. See the separate [UDP state reliability fix](state_udp_payload_budget.md).
 
-## Selection and evidence
+### Selection and evidence
 
 The supervised policy command keeps the three existing selections:
 

@@ -81,11 +81,57 @@ void writeDeltaTwistVecHeader(std::ostream& os, const char* side, const char* na
        << ',' << side << '_' << name << "_drz_rad";
 }
 
+void writePreviewDiagnosticsHeader(std::ostream& os, const char* side) {
+    for (const char* field : {
+            "gate_revision", "gauge_revision", "parent_plan_id", "request_id", "result_valid",
+            "result_solve_attempted", "last_worker_status", "last_solve_status", "last_admission_reason",
+            "result_request_id", "result_epoch", "result_gate_revision", "result_gauge_revision",
+            "result_source_wire_seq", "result_source_recv_seq", "result_parent_plan_id",
+            "result_gauge_transported", "staged_gauge_transported", "gauge_transport_failed",
+            "result_generated_at_sec", "result_splice_at_sec", "result_valid_until_sec",
+            "result_completed_at_sec", "result_observed_at_sec", "solve_iterations",
+            "solve_contact_constrained", "solve_contact_decomposed", "solve_contact_coupled_fallback",
+            "solve_max_constraint_violation", "solve_max_contact_velocity_violation_m_s", "ready_not_staged",
+            "staged_identity_rejected", "staged_expired", "staged_sample_rejected",
+            "staged_contact_rejected", "last_staged_cancel_reason", "last_staged_cancel_time_sec",
+            "last_staged_cancel_request_id", "last_admission_time_sec", "last_admission_gap_sec",
+            "last_admitted_request_id", "last_admitted_parent_plan_id", "last_brake_reason",
+            "last_brake_start_time_sec", "last_brake_origin_sec", "angular_continuations_started",
+            "angular_brakes_started", "last_contact_reject_time_sec", "last_contact_reject_gate",
+            "last_contact_reject_closing_m_s", "last_contact_reject_allowed_m_s", "fold_count",
+            "fold_force_count", "fold_roi_floor_count", "fold_geometry_hold_count", "fold_unknown_count",
+            "fold_booked_time_ns", "fold_applied_time_ns", "fold_revision", "fold_geometry_cause_mask",
+            "request_invalid", "request_mailbox_full", "request_coalesced", "result_publish_dropped",
+            "result_coalesced", "solve_angular_norm_coupled", "solve_angular_norm_cuts",
+            "solve_max_angular_chart_velocity_norm", "solve_max_angular_chart_acceleration_norm",
+            "result_initial_linear_velocity_max_m_s", "result_initial_linear_acceleration_max_m_s2",
+            "result_initial_angular_velocity_norm_rad_s", "result_initial_angular_acceleration_norm_rad_s2",
+            "pending_geometry_fold_valid", "pending_geometry_fold_time_ns",
+            "pending_geometry_fold_cause_mask", "fold_cause"})
+        os << ',' << side << "_preview_execution_" << field;
+    for (const char* reason : kPreviewWorkerStatusNames) os << ',' << side << "_preview_execution_worker_status_" << reason << "_count";
+    for (const char* reason : kPreviewSolveStatusNames) os << ',' << side << "_preview_execution_solve_status_" << reason << "_count";
+    for (const char* reason : kPreviewResultCheckNames) os << ',' << side << "_preview_execution_result_check_" << reason << "_count";
+    for (const char* reason : kPreviewStagedCancelNames) os << ',' << side << "_preview_execution_staged_cancel_" << reason << "_count";
+    for (const char* reason : kPreviewBrakeCauseNames) os << ',' << side << "_preview_execution_brake_" << reason << "_count";
+    for (const char* axis : {"x","y","z"}) os << ',' << side << "_preview_execution_last_contact_reject_normal_" << axis;
+    for (const char* axis : {"x_m","y_m","z_m"}) os << ',' << side << "_preview_execution_fold_translation_" << axis;
+    for (const char* axis : {"qx","qy","qz","qw"}) os << ',' << side << "_preview_execution_fold_quaternion_" << axis;
+    for (const char* axis : {"x_m","y_m","z_m"}) os << ',' << side << "_preview_execution_fold_booked_translation_" << axis;
+    for (const char* axis : {"qx","qy","qz","qw"}) os << ',' << side << "_preview_execution_fold_booked_quaternion_" << axis;
+    for (const char* axis : {"x_m","y_m","z_m"}) os << ',' << side << "_preview_execution_pending_geometry_fold_translation_" << axis;
+    for (const char* axis : {"qx","qy","qz","qw"}) os << ',' << side << "_preview_execution_pending_geometry_fold_quaternion_" << axis;
+    for (const char* axis : {"x_m","y_m","z_m"}) os << ',' << side << "_preview_execution_gauge_translation_" << axis;
+    for (const char* axis : {"qx","qy","qz","qw"}) os << ',' << side << "_preview_execution_gauge_quaternion_" << axis;
+}
+
 void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writeJointArrayHeader(os, side, "follower_axis_duration_sec");
     writeJointArrayHeader(os, side, "follower_target_velocity");
     writeJointArrayHeader(os, side, "follower_target_acceleration");
-    os << ',' << side << "_follower_segments"
+    os << ',' << side << "_follower_jerk_scale"
+       << ',' << side << "_follower_jerk_search_calculations"
+       << ',' << side << "_follower_segments"
        << ',' << side << "_follower_advance_gate"
        << ',' << side << "_follower_plan_rate_gate"
        << ',' << side << "_follower_core_gate"
@@ -99,7 +145,14 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writePoseHeader(os, side, "tcp_command_stand");
     writePoseHeader(os, side, "tcp_actual_stand");
     writePoseHeader(os, side, "tcp_ref_stand");
+    for (const char* field : {"enabled","active","status","sample_time_ns","epoch","plan_id",
+            "source_wire_seq","source_recv_seq","backlog_sec","rate","plan_age_sec",
+            "accepted_position_error_m","accepted_rotation_error_rad","solve_time_sec",
+            "submitted","accepted","rejected","expired","contact_guard_count"})
+        os << ',' << side << "_preview_execution_" << field;
+    writePreviewDiagnosticsHeader(os, side);
     os << ',' << side << "_tcp_target_profile"
+       << ',' << side << "_tcp_target_profile_found"
        << ',' << side << "_smd_profile_nf_linear_hz"
        << ',' << side << "_smd_profile_nf_angular_hz"
        << ',' << side << "_smd_profile_velocity_feedforward"
@@ -403,6 +456,17 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_gate_stream_translation"
        << ',' << side << "_fc_gate_stream_force_n"
        << ',' << side << "_fc_gate_stream_armed"
+       << ',' << side << "_smd_gate_sample_valid"
+       << ',' << side << "_smd_gate_armed"
+       << ',' << side << "_smd_gate_releasing"
+       << ',' << side << "_smd_gate_translation"
+       << ',' << side << "_smd_gate_normal_x"
+       << ',' << side << "_smd_gate_normal_y"
+       << ',' << side << "_smd_gate_normal_z"
+       << ',' << side << "_smd_gate_measured_fx_n"
+       << ',' << side << "_smd_gate_measured_fy_n"
+       << ',' << side << "_smd_gate_measured_fz_n"
+       << ',' << side << "_smd_gate_removed_velocity_m_s"
        // The wrench the LAW consumed, after the contact-shock low-pass, beside
        // the RAW one in the ft_ block above: the pair is what shows how much
        // shock the filter took out (0 Hz => filter off, the two are equal).
@@ -695,6 +759,11 @@ void ServoLogger::writeHeader() {
     // its 0-then-2x catch-up pair in q_ref mimics a wire double-step and
     // contaminated the lag-8 event set ~40 %). Filter q_ref analyses on this.
     file_ << ",left_state_host_time_ns,right_state_host_time_ns";
+    file_ << ",projection_joint_stage_trace_valid";
+    for (const char* side : {"left", "right"}) {
+        for (const char* stage : {"projection_requested_q_deg", "projection_solved_q_deg", "projection_released_q_deg"})
+            writeJointArrayHeader(file_, side, stage);
+    }
     // Combined geometric velocity projection (ROI/floor/reach/self-collision
     // rows + the trailing global per-joint ceiling): the actuator side of the
     // geometric safety layers. `projection_ceiling_clamped` marks the 1-tick
@@ -875,6 +944,17 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.gate_stream_translation
        << ',' << fc.gate_stream_force_n
        << ',' << (fc.gate_stream_armed ? 1 : 0)
+       << ',' << fc.smd_gate_sample_valid
+       << ',' << fc.smd_gate_armed
+       << ',' << fc.smd_gate_releasing
+       << ',' << fc.smd_gate_translation
+       << ',' << fc.smd_gate_normal_stand[0]
+       << ',' << fc.smd_gate_normal_stand[1]
+       << ',' << fc.smd_gate_normal_stand[2]
+       << ',' << fc.smd_gate_measured_force_stand_n[0]
+       << ',' << fc.smd_gate_measured_force_stand_n[1]
+       << ',' << fc.smd_gate_measured_force_stand_n[2]
+       << ',' << fc.smd_gate_removed_velocity_m_s
        << ',' << fc.wrench_filter_hz
        << ',' << fc.wrench_filtered_stand.fx
        << ',' << fc.wrench_filtered_stand.fy
@@ -978,6 +1058,100 @@ std::optional<Pose6D> tcpActualStand(const RobotState& state) {
     return state.tcp_stand;
 }
 
+void writePreviewDiagnosticsColumns(std::ostream& os, const PreviewExecutionTelemetry& p) {
+    os << ',' << p.gate_revision;
+    os << ',' << p.gauge_revision;
+    os << ',' << p.parent_plan_id;
+    os << ',' << p.request_id;
+    os << ',' << p.result_valid;
+    os << ',' << p.result_solve_attempted;
+    os << ',' << csvEscape(p.last_worker_status);
+    os << ',' << csvEscape(p.last_solve_status);
+    os << ',' << csvEscape(p.last_admission_reason);
+    os << ',' << p.result_request_id;
+    os << ',' << p.result_epoch;
+    os << ',' << p.result_gate_revision;
+    os << ',' << p.result_gauge_revision;
+    os << ',' << p.result_source_wire_seq;
+    os << ',' << p.result_source_recv_seq;
+    os << ',' << p.result_parent_plan_id;
+    os << ',' << p.result_gauge_transported;
+    os << ',' << p.staged_gauge_transported;
+    os << ',' << p.gauge_transport_failed;
+    os << ',' << p.result_generated_at_sec;
+    os << ',' << p.result_splice_at_sec;
+    os << ',' << p.result_valid_until_sec;
+    os << ',' << p.result_completed_at_sec;
+    os << ',' << p.result_observed_at_sec;
+    os << ',' << p.solve_iterations;
+    os << ',' << p.solve_contact_constrained;
+    os << ',' << p.solve_contact_decomposed;
+    os << ',' << p.solve_contact_coupled_fallback;
+    os << ',' << p.solve_max_constraint_violation;
+    os << ',' << p.solve_max_contact_velocity_violation_m_s;
+    os << ',' << p.ready_not_staged;
+    os << ',' << p.staged_identity_rejected;
+    os << ',' << p.staged_expired;
+    os << ',' << p.staged_sample_rejected;
+    os << ',' << p.staged_contact_rejected;
+    os << ',' << csvEscape(p.last_staged_cancel_reason);
+    os << ',' << p.last_staged_cancel_time_sec;
+    os << ',' << p.last_staged_cancel_request_id;
+    os << ',' << p.last_admission_time_sec;
+    os << ',' << p.last_admission_gap_sec;
+    os << ',' << p.last_admitted_request_id;
+    os << ',' << p.last_admitted_parent_plan_id;
+    os << ',' << csvEscape(p.last_brake_reason);
+    os << ',' << p.last_brake_start_time_sec;
+    os << ',' << p.last_brake_origin_sec;
+    os << ',' << p.angular_continuations_started;
+    os << ',' << p.angular_brakes_started;
+    os << ',' << p.last_contact_reject_time_sec;
+    os << ',' << p.last_contact_reject_gate;
+    os << ',' << p.last_contact_reject_closing_m_s;
+    os << ',' << p.last_contact_reject_allowed_m_s;
+    os << ',' << p.fold_count;
+    os << ',' << p.fold_force_count;
+    os << ',' << p.fold_roi_floor_count;
+    os << ',' << p.fold_geometry_hold_count;
+    os << ',' << p.fold_unknown_count;
+    os << ',' << p.fold_booked_time_ns;
+    os << ',' << p.fold_applied_time_ns;
+    os << ',' << p.fold_revision;
+    os << ',' << p.fold_geometry_cause_mask;
+    os << ',' << p.request_invalid;
+    os << ',' << p.request_mailbox_full;
+    os << ',' << p.request_coalesced;
+    os << ',' << p.result_publish_dropped;
+    os << ',' << p.result_coalesced;
+    os << ',' << p.solve_angular_norm_coupled;
+    os << ',' << p.solve_angular_norm_cuts;
+    os << ',' << p.solve_max_angular_chart_velocity_norm;
+    os << ',' << p.solve_max_angular_chart_acceleration_norm;
+    os << ',' << p.result_initial_linear_velocity_max_m_s;
+    os << ',' << p.result_initial_linear_acceleration_max_m_s2;
+    os << ',' << p.result_initial_angular_velocity_norm_rad_s;
+    os << ',' << p.result_initial_angular_acceleration_norm_rad_s2;
+    os << ',' << p.pending_geometry_fold_valid;
+    os << ',' << p.pending_geometry_fold_time_ns;
+    os << ',' << p.pending_geometry_fold_cause_mask;
+    os << ',' << previewFoldCauseName(p.fold_cause);
+    for (uint64_t value : p.worker_status_counts) os << ',' << value;
+    for (uint64_t value : p.solve_status_counts) os << ',' << value;
+    for (uint64_t value : p.result_checks) os << ',' << value;
+    for (uint64_t value : p.staged_cancel_counts) os << ',' << value;
+    for (uint64_t value : p.brake_counts) os << ',' << value;
+    for (double value : p.last_contact_reject_normal) os << ',' << value;
+    for (double value : p.fold_translation_m) os << ',' << value;
+    for (double value : p.fold_quaternion_xyzw) os << ',' << value;
+    for (double value : p.fold_booked_translation_m) os << ',' << value;
+    for (double value : p.fold_booked_quaternion_xyzw) os << ',' << value;
+    for (double value : p.pending_geometry_fold_translation_m) os << ',' << value;
+    for (double value : p.pending_geometry_fold_quaternion_xyzw) os << ',' << value;
+    for (double value : p.gauge_translation_m) os << ',' << value;
+    for (double value : p.gauge_quaternion_xyzw) os << ',' << value;
+}
+
 void writeArmProfilingColumns(
     std::ostream& os,
     const ArmCommand& command,
@@ -987,7 +1161,9 @@ void writeArmProfilingColumns(
     writeJointArrayColumns(os, telemetry.follower_axis_duration_sec);
     writeJointArrayColumns(os, telemetry.follower_target_velocity);
     writeJointArrayColumns(os, telemetry.follower_target_acceleration);
-    os << ',' << telemetry.follower_segments
+    os << ',' << telemetry.follower_jerk_scale
+       << ',' << telemetry.follower_jerk_search_calculations
+       << ',' << telemetry.follower_segments
        << ',' << telemetry.follower_advance_gate
        << ',' << telemetry.follower_plan_rate_gate
        << ',' << telemetry.follower_core_gate
@@ -1001,7 +1177,16 @@ void writeArmProfilingColumns(
     writePoseColumns(os, state.tcp_command_stand);
     writePoseColumns(os, tcpActualStand(state));
     writePoseColumns(os, state.tcp_ref_stand);
+    const auto& p=telemetry.preview_execution;
+    os << ',' << p.enabled << ',' << p.active << ',' << p.status << ',' << p.sample_time_ns
+       << ',' << p.epoch << ',' << p.plan_id << ',' << p.source_wire_seq << ',' << p.source_recv_seq
+       << ',' << p.backlog_sec << ',' << p.rate << ',' << p.plan_age_sec
+       << ',' << p.accepted_position_error_m << ',' << p.accepted_rotation_error_rad
+       << ',' << p.solve_time_sec << ',' << p.submitted << ',' << p.accepted
+       << ',' << p.rejected << ',' << p.expired << ',' << p.contact_guard_count;
+    writePreviewDiagnosticsColumns(os, p);
     os << ',' << csvEscape(telemetry.tcp_target_profile)
+       << ',' << (telemetry.tcp_target_profile_found ? 1 : 0)
        << ',' << telemetry.smd_profile_nf_linear_hz
        << ',' << telemetry.smd_profile_nf_angular_hz
        << ',' << telemetry.smd_profile_velocity_feedforward
@@ -1514,6 +1699,17 @@ void ServoLogger::writeSample(const ServoSample& sample) {
     }
     file_ << ',' << sample.left_state.host_time_ns
           << ',' << sample.right_state.host_time_ns;
+    file_ << ',' << sample.safety_projection.joint_stage_trace_valid;
+    for (std::size_t side = 0; side < 2; ++side) {
+        for (const auto* stage : {&sample.safety_projection.requested_q_deg,
+                                  &sample.safety_projection.projected_q_deg,
+                                  &sample.safety_projection.released_q_deg}) {
+            for (double q : (*stage)[side]) {
+                file_ << ',';
+                if (sample.safety_projection.joint_stage_trace_valid) file_ << q;
+            }
+        }
+    }
     file_ << ',' << sample.safety_projection.active
           << ',' << sample.safety_projection.constraint_count
           << ',' << sample.safety_projection.left_correction_deg_s

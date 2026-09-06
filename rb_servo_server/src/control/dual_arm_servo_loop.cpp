@@ -24,6 +24,7 @@
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/plan_gate.hpp"
 #include "rb_servo/control/projection_release.hpp"
+#include "rb_servo/control/preview_contact_authority.hpp"
 #include "rb_servo/control/servo_dispatcher.hpp"
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/kinematics/ik_solver.hpp"
@@ -244,6 +245,14 @@ void appendReason(ArmStartupValidationSnapshot* validation, const std::string& r
 // below an inter-episode swing (tens of cm), so it isolates external moves without false trips.
 constexpr double kPoseTrackReanchorPosTolM = 0.05;
 constexpr double kPoseTrackReanchorAngTolRad = 0.10;
+// Below these the generator counts as at rest for the hand-over brake and the
+// compliant-Hold latch (a critically damped tracker only reaches zero asymptotically).
+constexpr double kGeneratorAtRestLinearSpeedMS = 0.5e-3;     // 0.5 mm/s
+constexpr double kGeneratorAtRestAngularSpeedRadS = 1.0e-3;  // 0.06 deg/s
+bool twistInFlight(const Vec6& t) {
+    return std::hypot(t.x, t.y, t.z) > kGeneratorAtRestLinearSpeedMS ||
+           std::hypot(t.rx, t.ry, t.rz) > kGeneratorAtRestAngularSpeedRadS;
+}
 // HARD divergence bound (2026-09-06). The 50 mm / 0.10 rad pair above is the SOFT
 // bound: crossing it used to latch chunk_follower_divergence outright, and
 // servo_log_20260906_123643.csv 120.0 s showed what that latches on -- the policy
@@ -286,10 +295,16 @@ ArmCommand applyPoseTrackSmd(
     double* gate_removed_m = nullptr,
     // Stand-frame twist to seed the tracker with when THIS call activates it (the
     // chunk follower's state velocity at a fallback). Null = seed at rest (legacy).
-    const Vec6* seed_stand_twist = nullptr
+    const Vec6* seed_stand_twist = nullptr,
+    ForceControlTelemetry* gate_trace = nullptr
 ) {
     if (!tracker) return command;
-    if (!config.enable || command.mode != ControlMode::TcpPoseTarget || !command.has_tcp_target) {
+    // PROFILE BINDING (2026-09-06): an ACTIVE tracker's own profile decides whether it
+    // keeps tracking; the command's profile only decides activation. A profile without
+    // an SMD arriving mid-motion (the stale-Hold "default" fallback) used to drop the
+    // tracker and discharge its lag in one tick.
+    const PoseTrackSmdConfig& gate_config = tracker->active() ? tracker->config() : config;
+    if (!gate_config.enable || command.mode != ControlMode::TcpPoseTarget || !command.has_tcp_target) {
         // THE RELEASE BRAKE (2026-09-04 pm). A Hold arriving while this tracker is
         // still moving is a deadman release. Dropping the tracker here let the Hold
         // pin prev_sent, i.e. the joint velocity went to zero in ONE tick (measured
@@ -392,6 +407,16 @@ ArmCommand applyPoseTrackSmd(
         return held;
     }
     tracker->updateGoalFromCommand(command.tcp_target_stand);
+    if (gate != nullptr && gate_trace != nullptr) {
+        gate_trace->smd_gate_sample_valid = true;
+        gate_trace->smd_gate_armed = gate->streamArmed();
+        gate_trace->smd_gate_releasing = gate->streamReleasing();
+        gate_trace->smd_gate_translation = gate->streamTranslation();
+        const auto& n = gate->streamForceDirection();
+        const auto& f = gate->streamMeasuredForce();
+        gate_trace->smd_gate_normal_stand = {n.x(), n.y(), n.z()};
+        gate_trace->smd_gate_measured_force_stand_n = {f.x(), f.y(), f.z()};
+    }
     ArmCommand smoothed = command;
     const Pose6D before = tracker->currentPose();
     smoothed.tcp_target_stand = tracker->step(dt_sec);
@@ -426,6 +451,8 @@ ArmCommand applyPoseTrackSmd(
             smoothed.tcp_target_stand.z = held.z();
         }
         if (gate_removed_m != nullptr) *gate_removed_m = removed;
+        if (gate_trace != nullptr && dt_sec > 0.0)
+            gate_trace->smd_gate_removed_velocity_m_s = removed / dt_sec;
     }
     return smoothed;
 }
@@ -448,6 +475,7 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.reserve_steps != b.reserve_steps ||
         a.smoothing_window != b.smoothing_window ||
         a.output_smd.enable != b.output_smd.enable ||
+        a.output_smd.mode != b.output_smd.mode ||
         a.output_smd.nf_linear_hz != b.output_smd.nf_linear_hz ||
         a.output_smd.nf_angular_hz != b.output_smd.nf_angular_hz ||
         a.output_smd.damping_ratio != b.output_smd.damping_ratio ||
@@ -481,6 +509,7 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.core_time_stretch_enable != b.core_time_stretch_enable ||
         a.core_time_stretch_max_ratio != b.core_time_stretch_max_ratio ||
         a.fresh_chunk_replan != b.fresh_chunk_replan ||
+        a.deadline_jerk_minimization != b.deadline_jerk_minimization ||
         a.continuous_hold_resume != b.continuous_hold_resume;
 }
 
@@ -506,6 +535,7 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
     cfg.core_time_stretch_enable = rf.core_time_stretch_enable;
     cfg.core_time_stretch_max_ratio = rf.core_time_stretch_max_ratio;
     cfg.fresh_chunk_replan = rf.fresh_chunk_replan;
+    cfg.deadline_jerk_minimization = rf.deadline_jerk_minimization;
     cfg.continuous_hold_resume = rf.continuous_hold_resume;
     return cfg;
 }
@@ -566,29 +596,6 @@ control::ChunkFrame toControlChunkFrame(
         }
     }
     return out;
-}
-
-TcpPoseTargetProfileConfig selectTcpPoseTargetProfile(
-    const CartesianControlConfig& config,
-    const std::string& requested_profile,
-    bool* found
-) {
-    const std::string name = requested_profile.empty()
-        ? config.tcp_pose_target_profile_default
-        : requested_profile;
-    for (const TcpPoseTargetProfileConfig& profile : config.tcp_pose_target_profiles) {
-        if (profile.name == name) {
-            if (found) *found = true;
-            return profile;
-        }
-    }
-    if (found) *found = false;
-    TcpPoseTargetProfileConfig fallback;
-    fallback.name = config.tcp_pose_target_profile_default.empty()
-        ? "default"
-        : config.tcp_pose_target_profile_default;
-    fallback.pose_track_smd = config.pose_track_smd;
-    return fallback;
 }
 
 std::string lowerAscii(std::string value) {
@@ -2073,6 +2080,19 @@ DualArmServoLoop::DualArmServoLoop(
     right_pose_track_smd_ = SmdPoseTracker(initial_profile.pose_track_smd);
     left_pose_track_profile_name_ = initial_profile.name;
     right_pose_track_profile_name_ = initial_profile.name;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    for (const auto& profile : config_.cartesian_control.tcp_pose_target_profiles) {
+        if (!profile.ruckig_follower.preview_execution.enable) continue;
+        PreviewProfileExecutors entry;
+        entry.name = profile.name;
+        for (auto& executor : entry.arm) {
+            executor = std::make_unique<control::LivePreviewExecution>(
+                profile.ruckig_follower, makeChunkFollowerConfig(profile.ruckig_follower),
+                1.0 / config_.servo.rate_hz);
+        }
+        preview_profile_executors_.push_back(std::move(entry));
+    }
+#endif
 
     // ---- force control ------------------------------------------------------
     const double control_period_sec = 1.0 / std::max(1, config.servo.rate_hz);
@@ -2795,15 +2815,17 @@ void DualArmServoLoop::loopMain() {
         uint64_t command_host_time_ns = 0;
         uint64_t deadline_ns = 0;
         bool valid = false;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+        std::array<control::PreviewDispatchTransaction, 2> preview_transactions{};
+#endif
     };
     PendingTopSend pending_top_send;
     const bool send_at_top = config_.servo.send_at_tick_start;
-    // In pgmode the safety filter advances a purely commanded/reference robot;
-    // it must therefore see the target that was actually dispatched at the top
-    // of this tick. Leaving bookkeeping until the end of the tick makes the
-    // acceleration limiter operate on a two-send-old history and forms an
-    // unstable alternating recurrence. Keep the physical-real timing unchanged
-    // until that lane has its own supervised acceptance evidence.
+    // In pgmode and the explicitly selected preview lane, the safety filter
+    // must see the reference actually accepted at this tick's top. Deferring
+    // bookkeeping makes its acceleration recurrence use a two-send-old state.
+    // Preview selection is per arm/transaction below; legacy lanes retain
+    // their existing timing. Never book the same accepted send twice.
     const bool controller_sim_top_send_bookkeeping =
         send_at_top && controllerSimulationMotionRequired(config_) &&
         controllerSimulationMotionGateOpen(config_);
@@ -2862,6 +2884,7 @@ void DualArmServoLoop::loopMain() {
         bool fault_latched_before_send = false;
         std::string send_policy = "send_servo_j";
         bool send_suppressed = true;
+        std::array<bool,2> top_send_history_booked{{false,false}};
         if (send_at_top) {
             // Re-evaluate the policy at dispatch time: a fault latched (or a
             // freedrive/lease change) since the target was computed must still
@@ -2884,17 +2907,37 @@ void DualArmServoLoop::loopMain() {
                 loop_start,
                 pending_top_send.deadline_ns
             );
-            if (controller_sim_top_send_bookkeeping) {
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+            observePreviewDispatch(pending_top_send.preview_transactions, sent_target,
+                                   dual_send_result, send_suppressed || fault_latched_before_send);
+#endif
+            bool book_left_at_top=controller_sim_top_send_bookkeeping;
+            bool book_right_at_top=controller_sim_top_send_bookkeeping;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+            // Keep accepted-command history current throughout a selected
+            // preview profile's Hold, release-brake and cold-wait lifecycle.
+            // Those sends have no preview transaction but still change the
+            // seed used below. Booking them only after compute can alternate
+            // two old Hold targets and prevent the exact stationary check
+            // from ever completing. Another TCP profile clears this owner.
+            book_left_at_top=book_left_at_top||preview_executor_[0]!=nullptr||
+                pending_top_send.preview_transactions[0].valid;
+            book_right_at_top=book_right_at_top||preview_executor_[1]!=nullptr||
+                pending_top_send.preview_transactions[1].valid;
+#endif
+            if (book_left_at_top||book_right_at_top) {
                 std::lock_guard<std::mutex> lock(state_mutex_);
-                if (dual_send_result.left.result.accepted &&
+                if (book_left_at_top && dual_send_result.left.result.accepted &&
                     !fault_latched_before_send && !send_suppressed) {
                     left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
                     left_prev_sent_q_deg_ = sent_target.left_q_target_deg;
+                    top_send_history_booked[0]=true;
                 }
-                if (dual_send_result.right.result.accepted &&
+                if (book_right_at_top && dual_send_result.right.result.accepted &&
                     !fault_latched_before_send && !send_suppressed) {
                     right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
                     right_prev_sent_q_deg_ = sent_target.right_q_target_deg;
+                    top_send_history_booked[1]=true;
                 }
             }
             pending_top_send.valid = false;
@@ -2913,10 +2956,15 @@ void DualArmServoLoop::loopMain() {
         // clear before those branches so mergeAbcTelemetry cannot revive an
         // old prefilter pose or derivatives after motion has stopped.
         for (auto* abc : {&left_abc_telemetry_, &right_abc_telemetry_}) {
+            abc->preview_execution.active = false;
             abc->follower_prefilter_stand.reset();
             abc->follower_sample_velocity.reset();
             abc->follower_sample_acceleration.reset();
         }
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+        preview_dispatch_transaction_ = {};
+        preview_used_this_tick_ = {};
+#endif
         const auto handleAsyncSupervisionFault =
             [&](const LatchedDualFaultContext& async_fault_contexts,
                 const RobotState& current_left_state,
@@ -3341,6 +3389,27 @@ void DualArmServoLoop::loopMain() {
         // to idle before freedrive_teach_on is issued — the M151 ("Cannot run this
         // function") fix: real-time servo control must stop before direct teaching.
         advanceFreedrive(left_state, right_state);
+        // FREEDRIVE IS THE ONE SUPPRESSED POLICY THAT MUST ALSO STOP THE WIRE.
+        // Not staging a target only empties each worker's mailbox; once the worker
+        // owns the cadence (io_model: worker + queue_sync) it keeps the stream alive
+        // from its setpoint interpolator, which holds at the newest setpoint forever.
+        // The controller then never reaches robot_state == 1 (Idle) and teach_on is
+        // never issued -- measured 2026-09-06, every request aborted with
+        // "quiesce timeout: controller never reported idle". Direct teaching is the
+        // one policy where a quiet wire is the POINT.
+        //
+        // Driven from anyFreedriveActive() here, not from the send policy at the
+        // dispatch site: this runs unconditionally on every tick, whereas the two
+        // dispatch sites are mode-dependent (servo.send_at_tick_start) and sit inside
+        // the compute branch. The flag has to be cleared on release just as reliably
+        // as it is set.
+        //
+        // The other suppressed policies are deliberately left alone: with
+        // fault_latched / emergency_latched / read_only / pre-arming, the box holding
+        // its last reference under a live stream is the behaviour those paths were
+        // validated with. Stopping the wire there is a separate decision with its own
+        // queue re-entry evidence to gather.
+        setWorkerSendSuppressed(anyFreedriveActive());
 
         // DEACTIVATED-BOX GATE (2026-08-27). An E-stop de-energizes the box
         // (init_state_info leaves 6, servo_enabled false) WITHOUT an error code
@@ -3577,6 +3646,12 @@ void DualArmServoLoop::loopMain() {
         }
 
         // Final output stage: moving average over the last N safety-passed
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+        for (int i=0;i<2;++i) {
+            if (!preview_used_this_tick_[i])
+                resetPreviewExecution(i==0?ArmId::Left:ArmId::Right, "inactive");
+        }
+#endif
         // targets (convex combination — joint limits and per-tick velocity
         // bounds preserved). prev_sent bookkeeping, logging, and tracking
         // error all use this filtered value, i.e., what is actually sent.
@@ -3611,6 +3686,9 @@ void DualArmServoLoop::loopMain() {
             pending_top_send.command_host_time_ns = command_host_time_ns;
             pending_top_send.deadline_ns = send_deadline_ns;
             pending_top_send.valid = true;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+            pending_top_send.preview_transactions = preview_dispatch_transaction_;
+#endif
         } else {
             fault_latched_before_send = fault_latched_.load();
             send_policy = currentSendPolicy();
@@ -3624,6 +3702,10 @@ void DualArmServoLoop::loopMain() {
                 loop_start,
                 send_deadline_ns
             );
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+            observePreviewDispatch(preview_dispatch_transaction_, sent_target,
+                                   dual_send_result, send_suppressed || fault_latched_before_send);
+#endif
         }
         const SendServoJResult& left_send_result = dual_send_result.left.result;
         const SendServoJResult& right_send_result = dual_send_result.right.result;
@@ -3757,12 +3839,12 @@ void DualArmServoLoop::loopMain() {
 
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            if (!controller_sim_top_send_bookkeeping && left_ok &&
+            if (!top_send_history_booked[0] && left_ok &&
                 !fault_latched_before_send && !send_suppressed) {
                 left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
                 left_prev_sent_q_deg_ = sent_target.left_q_target_deg;
             }
-            if (!controller_sim_top_send_bookkeeping && right_ok &&
+            if (!top_send_history_booked[1] && right_ok &&
                 !fault_latched_before_send && !send_suppressed) {
                 right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
                 right_prev_sent_q_deg_ = sent_target.right_q_target_deg;
@@ -3916,6 +3998,29 @@ void DualArmServoLoop::loopMain() {
         }
         sample.left_cartesian_solve = left_last_cartesian_solve_;
         sample.right_cartesian_solve = right_last_cartesian_solve_;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+        for (int i=0;i<2;++i) {
+            if (preview_executor_[i]) {
+                auto& abc=i==0?left_abc_telemetry_:right_abc_telemetry_;
+                abc.preview_execution=preview_executor_[i]->telemetry();
+                // Publish the booking independently of next-tick application.
+                // A reset may prevent a booked correction from ever applying.
+                auto& diagnostics=abc.preview_execution;
+                const auto& pending=pending_collision_fold_[static_cast<std::size_t>(i)];
+                diagnostics.pending_geometry_fold_valid=pending.valid;
+                diagnostics.pending_geometry_fold_time_ns=pending.valid?pending.booked_time_ns:0;
+                diagnostics.pending_geometry_fold_cause_mask=pending.valid?pending.geometry_cause_mask:0;
+                diagnostics.pending_geometry_fold_translation_m={};
+                diagnostics.pending_geometry_fold_quaternion_xyzw={0.,0.,0.,1.};
+                if (pending.valid) {
+                    for (int k=0;k<3;++k) diagnostics.pending_geometry_fold_translation_m[k]=pending.dp[k];
+                    for (int k=0;k<4;++k) diagnostics.pending_geometry_fold_quaternion_xyzw[k]=pending.dR.coeffs()[k];
+                }
+                if (!preview_used_this_tick_[i] || send_suppressed || fault_latched_.load())
+                    abc.preview_execution.active=false;
+            }
+        }
+#endif
         mergeAbcTelemetry(sample.left_cartesian_solve, left_abc_telemetry_,
                           config_.servo.output_moving_average_window);
         mergeAbcTelemetry(sample.right_cartesian_solve, right_abc_telemetry_,
@@ -4917,6 +5022,8 @@ bool DualArmServoLoop::isValidRobotStateForStartup(const RobotState& state) cons
 }
 
 void DualArmServoLoop::clearLatchedCartesianTargets() {
+    resetPreviewExecution(ArmId::Left, "reset");
+    resetPreviewExecution(ArmId::Right, "reset");
     left_latched_cartesian_target_ = LatchedCartesianTarget{};
     right_latched_cartesian_target_ = LatchedCartesianTarget{};
     left_cartesian_servo_path_ = CartesianServoPathState{};
@@ -4926,6 +5033,7 @@ void DualArmServoLoop::clearLatchedCartesianTargets() {
 }
 
 void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
+    resetPreviewExecution(arm_id, "reset");
     if (arm_id == ArmId::Left) {
         left_latched_cartesian_target_ = LatchedCartesianTarget{};
         left_cartesian_servo_path_ = CartesianServoPathState{};
@@ -4937,8 +5045,148 @@ void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
     }
 }
 
+void DualArmServoLoop::resetPreviewExecution(ArmId arm, const char* reason) {
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    const int i=arm==ArmId::Left?0:1;
+    if (preview_executor_[i]) preview_executor_[i]->reset(reason);
+    preview_dispatch_transaction_[i].valid=false;
+#else
+    (void)arm; (void)reason;
+#endif
+}
+
+void DualArmServoLoop::shiftPreviewExecution(ArmId arm, const Eigen::Vector3d& dp,
+                                            const Eigen::Quaterniond& dR, PreviewFoldCause cause,
+                                            uint64_t booked_time_ns, uint32_t geometry_cause_mask) {
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    if (auto* executor=preview_executor_[arm==ArmId::Left?0:1])
+        executor->shiftCommonFrame(dp,dR,cause,booked_time_ns,last_loop_start_ns_,geometry_cause_mask);
+#else
+    (void)arm; (void)dp; (void)dR; (void)cause; (void)booked_time_ns; (void)geometry_cause_mask;
+#endif
+}
+
+void DualArmServoLoop::applyPreviewExecution(ArmId arm, ArmCommand& command,
+                                            const TcpPoseTargetProfileConfig& profile) {
+    const bool enabled=profile.ruckig_follower.preview_execution.enable;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    const int i=arm==ArmId::Left?0:1;
+    control::LivePreviewExecution* selected=nullptr;
+    if (enabled) for (auto& entry:preview_profile_executors_) {
+        if (entry.name==profile.name) {selected=entry.arm[i].get();break;}
+    }
+    if (selected!=preview_executor_[i]) {
+        resetPreviewExecution(arm,"profile_changed");
+        preview_executor_[i]=selected;
+        if (selected) selected->reset("profile_changed");
+    }
+    if (!enabled) return;
+    preview_used_this_tick_[i]=true;
+    auto ctx=armContext(arm);
+    auto& abc=ctx.abc_telemetry;
+    const auto& force=arm==ArmId::Left?left_force_control_telemetry_:right_force_control_telemetry_;
+    const auto hold=[&] {
+        command.mode=ControlMode::Hold;command.has_tcp_target=false;
+        abc.stage_tcp_target_stand.reset();
+        preview_dispatch_transaction_[i].valid=false;
+    };
+    if (!selected) {
+        hold();recordChunkFollowerFaultRequest(arm,"preview executor was not constructed");return;
+    }
+    if (selected->failed()) {
+        hold();recordChunkFollowerFaultRequest(arm,selected->telemetry().status);return;
+    }
+    if (!ctx.chunk_follower.active() || ctx.chunk_follower.holdPaused() ||
+        command.mode!=ControlMode::TcpPoseTarget || !command.has_tcp_target || !kinematics_) {
+        selected->reset("inactive");hold();return;
+    }
+    // This profile never cold-starts an unprotected trajectory while tare or
+    // coverage recovers. Holding does not require stripping a frozen offset.
+    if ((config_.force_control.enable && !force.reference_strip_enabled) ||
+        qsyncSettlingHoldActive(arm)) {
+        selected->reset("coverage_wait");ctx.chunk_follower.deactivate();hold();return;
+    }
+    const Pose6D reference=nominalOfEmitted(arm,
+        kinematics_->computeTcpStand(arm,ctx.prev_sent_q_deg,ctx.mount));
+    const JointArray& previous_previous=i==0?left_prevprev_sent_q_deg_:right_prevprev_sent_q_deg_;
+    const bool stationary=ctx.prev_sent_q_deg==previous_previous;
+    const auto& gate=i==0?left_force_gate_:right_force_gate_;
+    // This additional output constraint belongs to a sustained contact episode.
+    // The canonical follower keeps its existing tick gate, including approach
+    // and release; a tiny filtered direction plus a release slew must not create
+    // a new binary speed constraint throughout otherwise free movement.
+    const auto contact=control::sustainedPreviewContactAuthority(force.reference_strip_enabled,gate);
+    const auto output=selected->step(last_loop_start_ns_*1e-9,ctx.chunk_follower,reference,
+                                   stationary,contact.gate,contact.normal_into_stand);
+    abc.preview_execution=selected->telemetry();
+    if (output.fault) {
+        hold();recordChunkFollowerFaultRequest(arm,std::string("preview_execution: ")+output.reason);return;
+    }
+    if (!output.active) {hold();return;}
+    command.tcp_target_stand=output.pose;
+    abc.stage_tcp_target_stand=output.pose;
+    // Overwritten with the matching composed pose below if the force law runs.
+    preview_dispatch_transaction_[i]=selected->transaction(output.pose,output.pose);
+#else
+    if (enabled) {
+        command.mode=ControlMode::Hold;command.has_tcp_target=false;
+        recordChunkFollowerFaultRequest(arm,"preview execution is absent from this build");
+    }
+#endif
+}
+
+void DualArmServoLoop::recordPreviewCompose(ArmId arm, const Pose6D& composed) {
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    auto& transaction=preview_dispatch_transaction_[arm==ArmId::Left?0:1];
+    if(transaction.valid)transaction.composed=composed;
+#else
+    (void)arm;(void)composed;
+#endif
+}
+
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+void DualArmServoLoop::observePreviewDispatch(
+    const std::array<control::PreviewDispatchTransaction,2>& transactions,
+    const ServoTarget& sent,const DualSendResult& result,bool suppressed) {
+    if (!kinematics_) return;
+    const auto& ik=config_.kinematics.ik;
+    // Use the existing IK's declared acceptance envelope, including its
+    // explicitly enabled positive best-effort tolerances, never a new hidden
+    // preview error budget. The exact measured discrepancy remains observable.
+    double pos=ik.position_tolerance_m,rot=ik.orientation_tolerance_rad;
+    const auto include_best_effort=[&](double position,double orientation) {
+        // IK enables a best-effort mode only when its entire tolerance pair is
+        // positive. A half-disabled pair must not widen dispatch acceptance.
+        if(position>0 && orientation>0) {
+            pos=std::max(pos,position);rot=std::max(rot,orientation);
+        }
+    };
+    include_best_effort(ik.joint_limit_best_effort_position_tolerance_m,
+                        ik.joint_limit_best_effort_orientation_tolerance_rad);
+    include_best_effort(ik.max_iterations_best_effort_position_tolerance_m,
+                        ik.max_iterations_best_effort_orientation_tolerance_rad);
+    for (int i=0;i<2;++i) {
+        if (!preview_executor_[i] || !transactions[i].valid) continue;
+        const auto arm=i==0?ArmId::Left:ArmId::Right;
+        const auto& q=i==0?sent.left_q_target_deg:sent.right_q_target_deg;
+        const auto& send=i==0?result.left.result:result.right.result;
+        try {
+            const auto pose=kinematics_->computeTcpStand(arm,q,i==0?config_.left_mount:config_.right_mount);
+            if (!preview_executor_[i]->observeDispatch(transactions[i],pose,
+                    send.accepted&&!suppressed,pos,rot)) {
+                recordChunkFollowerFaultRequest(arm,"preview_execution: final dispatch differs from planned sample");
+            }
+        } catch (const std::exception&) {
+            preview_executor_[i]->fail("dispatch_fk_failed");
+            recordChunkFollowerFaultRequest(arm,"preview_execution: accepted-command FK failed");
+        }
+    }
+}
+#endif
+
 void DualArmServoLoop::mergeAbcTelemetry(
     CartesianSolveTelemetry& solve, const AbcTelemetry& abc, int output_ma_window) {
+    solve.preview_execution = abc.preview_execution;
     solve.smd_active = abc.smd_active;
     solve.tcp_target_profile = abc.tcp_target_profile;
     solve.tcp_target_profile_found = abc.tcp_target_profile_found;
@@ -4977,6 +5225,8 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_step = abc.follower_step;
     solve.follower_t_in_seg_sec = abc.follower_t_in_seg_sec;
     solve.follower_duration_sec = abc.follower_duration_sec;
+    solve.follower_jerk_scale = abc.follower_jerk_scale;
+    solve.follower_jerk_search_calculations = abc.follower_jerk_search_calculations;
     solve.follower_axis_duration_sec = abc.follower_axis_duration_sec;
     solve.follower_target_velocity = abc.follower_target_velocity;
     solve.follower_target_acceleration = abc.follower_target_acceleration;
@@ -5299,6 +5549,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_t_in_seg_sec = 0.0;
     abc.follower_duration_sec = 0.0;
     abc.follower_axis_duration_sec = {};
+    abc.follower_jerk_scale = 1.0;
+    abc.follower_jerk_search_calculations = 0;
     abc.follower_target_velocity = {};
     abc.follower_target_acceleration = {};
     abc.follower_segments = 0;
@@ -5468,6 +5720,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         return seq_labels(diag.seg_wire_seq, diag.seg_recv_seq);
     };
     const auto with_stage_telemetry = [&](ArmCommand out) {
+        if (!follower->active() || follower->holdPaused())
+            resetPreviewExecution(arm_id,"follower_inactive");
         if (out.mode == ControlMode::TcpPoseTarget && out.has_tcp_target) {
             abc.stage_tcp_target_stand = out.tcp_target_stand;
         }
@@ -5483,8 +5737,10 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                   << (!transition_reason.empty() ? ")" : "") << "\n";
     };
     const auto smd_fallback = [&]() {
+        resetPreviewExecution(arm_id,"follower_fallback");
         output_smd->deactivate();
         log_transition();
+        carryPoseTrackerAcrossOverlayFrame(arm_id, smd_tracker);
         ArmCommand out = applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
@@ -5492,17 +5748,42 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
                                     : right_force_control_telemetry_).gate_removed_m,
-            handoff_velocity ? &*handoff_velocity : nullptr);
+            handoff_velocity ? &*handoff_velocity : nullptr,
+            &(arm_id == ArmId::Left ? left_force_control_telemetry_ : right_force_control_telemetry_));
         applyPoseTrackWallFold(arm_id, smd_tracker, dt_sec, &out);
         return with_stage_telemetry(out);
     };
-    if (rf.enable && chunk_frame_receiver_ && command.mode == ControlMode::Hold &&
-        follower->active()) {
+    if (rf.enable && chunk_frame_receiver_ &&
+        (command.mode == ControlMode::Hold || command.compliant_hold) && follower->active()) {
         // The 2026-07-18 12:44 stream reached this path with 10--360 ms Hold
         // gaps, far shorter than chunk_feed_timeout_sec, and used to call
         // deactivate() on each of them. Freeze segment/window time;
         // the Hold path owns the robot until a bounded warm resume or expiry.
         const double now_sec = ChunkFrameReceiver::steadyNowSec();
+        // THE HAND-OVER INTO THE HOLD (2026-09-06). The emitted state (output SMD, else
+        // the follower's chained velocity) seeds the pose-track SMD, whose release brake
+        // ramps it to rest on the profile's caps. Deactivating everything here let the
+        // joint path stop the arm in ONE tick: 13-59 deg/s -> 0, 6.0-11.8k deg/s^2 at
+        // every stream end of 2026-09-06 (servo_log_20260906_134634/161839/171043.csv).
+        // Seeded in the EMITTED frame (FK of the sent joints, no overlay strip): the raw
+        // Hold composes nothing, so the brake must run where the arm actually is.
+        if (command.mode == ControlMode::Hold && !smd_tracker->active() && kinematics_) {
+            std::optional<Vec6> handover_twist;
+            if (output_smd->active()) {
+                handover_twist = output_smd->currentTwistStand();
+            } else if (handoff_velocity.has_value()) {
+                handover_twist = handoff_velocity;
+            }
+            if (handover_twist.has_value() && twistInFlight(*handover_twist)) {
+                smd_tracker->reset(
+                    kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount),
+                    *handover_twist);
+                markPoseTrackerFrame(arm_id, /*stripped=*/false);
+                std::cout << "[chunk_follower] " << toString(arm_id)
+                          << " Hold: handing " << std::hypot(handover_twist->x, handover_twist->y, handover_twist->z) * 1000.0
+                          << " mm/s to the pose-track release brake\n";
+            }
+        }
         if (delta_preview && rf.continuous_hold_resume && kinematics_) {
             follower->holdAtSentReference(nominalOfEmitted(arm_id,
                 kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount)), now_sec);
@@ -5512,8 +5793,20 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         output_smd->deactivate();
         follower->expireHoldPause(now_sec, rf.hold_bounce_resume_sec);
         resetChunkFollowerEngageWait(arm_id);
-        smd_tracker->deactivate();
+        if (command.compliant_hold || smd_tracker->active()) {
+            // The SMD brakes the raw Hold (release brake) or tracks the compliant
+            // nominal; the chunk plan stays paused and expires on its own clock.
+            return smd_fallback();
+        }
         return with_stage_telemetry(command);
+    }
+    if (command.compliant_hold) {
+        // A compliant Hold never engages or waits on the chunk plan (the follower is
+        // inactive here; an active one was paused above): the SMD tracks the nominal.
+        transition_reason = "compliant hold";
+        output_smd->deactivate();
+        resetChunkFollowerEngageWait(arm_id);
+        return smd_fallback();
     }
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
         !command.has_tcp_target || !kinematics_) {
@@ -5530,6 +5823,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // Re-point the follower at the active profile's params when they change.
     // In-place (keeps the prewarmed ruckig OTG): cheap enough for the RT tick.
     if (ruckigFollowerConfigChanged(*built_cfg, rf)) {
+        resetPreviewExecution(arm_id,"profile_changed");
         follower->reconfigure(makeChunkFollowerConfig(rf));
         *output_smd = control::FollowerOutputSmd(rf.output_smd);
         *built_cfg = rf;
@@ -5546,6 +5840,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     Pose6D reference = nominalOfEmitted(
         arm_id, kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount));
     const auto hold_at_reference = [&]() {
+        resetPreviewExecution(arm_id,"follower_wait");
         output_smd->deactivate();
         ArmCommand smoothed = command;
         smoothed.tcp_target_stand = reference;
@@ -5603,9 +5898,13 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         transition_reason = "cartesian solve blocked hold";
     } else if (follower->holdPaused()) {
         // Warm resume always re-seeds the output stage from the latest sent pose;
-        // the preserved p/v/a belongs only to the pre-filter follower.
+        // the preserved p/v/a belongs only to the pre-filter follower. A resume that
+        // lands mid-brake inherits the brake's velocity (2026-09-06), so the hand-over
+        // back to the plan is continuous too.
+        const Vec6 resume_twist =
+            smd_tracker->active() ? smd_tracker->currentTwistStand() : Vec6{};
         if (delta_preview && rf.continuous_hold_resume) {
-            output_smd->reset(reference, Vec6{});
+            output_smd->reset(reference, resume_twist);
             abc.follower_output_smd_reseeded = true;
         } else {
             output_smd->deactivate();
@@ -5704,6 +6003,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                     }
                 } else if (strict_policy && divergence_explained_recent) {
                     follower->reanchor(reference);
+                    resetPreviewExecution(arm_id,"follower_reanchor");
                     output_smd->deactivate();
                     ++reanchor_count;
                     ++divergence_reanchors;
@@ -5835,7 +6135,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             ? plan_gate_state_[arm_id == ArmId::Left ? 0 : 1]
             : 1.0;
     double leash_gate = 1.0;
-    if (rf.plan_leash_enable) {
+    if (rf.plan_leash_enable && !rf.preview_execution.enable) {
         control::PlanLeashParams leash;
         leash.start_m = rf.plan_leash_start_m;
         leash.start_rad = rf.plan_leash_start_rad;
@@ -5847,6 +6147,21 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     }
     abc.follower_leash_gate = leash_gate;
     follower->setPlanRateGate(std::min(safety_plan_gate, leash_gate));
+    if(rf.preview_execution.enable) {
+        const bool left=arm_id==ArmId::Left;
+        const auto& force=left?left_force_control_telemetry_:right_force_control_telemetry_;
+        const bool roi_owns=left?left_roi_fold_active_:right_roi_fold_active_;
+        if(force.reference_strip_enabled && !roi_owns) {
+            const auto& gate=left?left_force_gate_:right_force_gate_;
+            const auto& w=force.wrench_stand;
+            const Eigen::Vector3d direction(w.fx,w.fy,w.fz);
+            const double norm=direction.norm();
+            // Preserve the follower's existing deadzoned direction contract;
+            // only move its evaluation to this tick for preview execution.
+            follower->setAdvanceGate(gate.translation(),norm>1e-9
+                ? Eigen::Vector3d(direction/norm):Eigen::Vector3d::Zero());
+        }
+    }
     // Contact-aware following is gone with the F/T stack: no external reaction
     // is supplied, which is the follower's own blind-mode behaviour.
     const Pose6D pre_filter = follower->tick(dt_sec);
@@ -6006,6 +6321,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             rf.preview_max_lead_reanchors_in_window);
     if (lead_breach && !robot_tracks_command && !lead_budget_spent) {
         follower->reanchor(reference);
+        resetPreviewExecution(arm_id,"follower_reanchor");
         output_smd->deactivate();
         ++reanchor_count;
         // The distinction that matters: an EXPLAINED lead is the bounded, expected
@@ -6062,6 +6378,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_t_in_seg_sec = follower->tInSegment();
     abc.follower_duration_sec = diag.last_solve.duration;
     abc.follower_axis_duration_sec = diag.last_solve.axis_duration_sec;
+    abc.follower_jerk_scale = diag.last_solve.jerk_scale;
+    abc.follower_jerk_search_calculations = diag.last_solve.jerk_search_calculations;
     abc.follower_target_velocity = diag.last_solve.target_velocity;
     abc.follower_target_acceleration = diag.last_solve.target_acceleration;
     abc.follower_segments = diag.segments;
@@ -6252,19 +6570,22 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     };
     const auto smd_fallback = [&]() {
         log_transition();
+        carryPoseTrackerAcrossOverlayFrame(arm_id, smd_tracker);
         ArmCommand out = applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
             forceOverlayForReference(arm_id),
             arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
-                                    : right_force_control_telemetry_).gate_removed_m);
+                                    : right_force_control_telemetry_).gate_removed_m,
+            nullptr,
+            &(arm_id == ArmId::Left ? left_force_control_telemetry_ : right_force_control_telemetry_));
         applyPoseTrackWallFold(arm_id, smd_tracker, dt_sec, &out);
         return with_stage_telemetry(out);
     };
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
-        !command.has_tcp_target || !kinematics_) {
-        transition_reason = "mode/enable";
+        !command.has_tcp_target || !kinematics_ || command.compliant_hold) {
+        transition_reason = command.compliant_hold ? "compliant hold" : "mode/enable";
         follower->deactivate();
         resetChunkFollowerEngageWait(arm_id);
         return smd_fallback();
@@ -6518,6 +6839,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // These diagnostics are valid only on a follower-driven tick. Clear
         // them across Hold/InitMotion and controller changes as well.
         abc.follower_axis_duration_sec = {};
+        abc.follower_jerk_scale = 1.0;
+        abc.follower_jerk_search_calculations = 0;
         abc.follower_target_velocity = {};
         abc.follower_target_acceleration = {};
         abc.follower_segments = 0;
@@ -6730,6 +7053,19 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // follow the deviation and leave the spring nothing to pull back to - the arm
         // would simply stay wherever it was pushed.
         if (!hold_nominal.has_value()) {
+            // THE LATCH WAITS FOR THE MOTION GENERATOR TO REST (2026-09-06). Latching
+            // while the pose-track SMD / chunk follower still carried velocity turned
+            // the raw Hold into a TcpPoseTarget at the current pose BEFORE the stage saw
+            // it: the release brake never ran, the follower was never paused, and the
+            // joint path stopped the arm in one tick (6-12k deg/s^2 at every policy
+            // stream end with compliance on). Keep the Hold raw until the brake has
+            // brought the arm to rest; the nominal then latches where it stopped.
+            if (motionGeneratorInFlight(fc_arm)) {
+                overlay.freeze();
+                tel.coverage_reason =
+                    "covered, but Hold waits for the motion generator to brake to rest";
+                continue;
+            }
             // NEVER LATCH THE NOMINAL UNDER LOAD (2026-08-27). A nominal latched
             // while a hand is still pushing anchors the spring at the pushed
             // pose: no restoring force, and under a coverage flap the anchor
@@ -6813,6 +7149,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         eff.mode = ControlMode::TcpPoseTarget;
         eff.tcp_target_stand = *hold_nominal;
         eff.has_tcp_target = true;
+        eff.compliant_hold = true;
     }
 
     for (int i = 0; i < 2; ++i) {
@@ -6866,7 +7203,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         return true;
     };
 
-    if (isCartesianMode(effective_command.left.mode) || isCartesianMode(effective_command.right.mode)) {
+    // THE HAND-OVER BRAKE ENTERS THE CARTESIAN BRANCH (2026-09-06). A Hold arriving
+    // while this arm's motion generator (pose-track SMD, chunk follower, output SMD)
+    // is still moving is solved as Cartesian this tick, so the stage can emit a
+    // braking pose instead of the joint path pinning prev_sent (velocity to zero in
+    // one tick: 6-12k deg/s^2 at every stream end, pedal release and command expiry).
+    const bool arm_brake_candidate[2] = {
+        effective_command.left.mode == ControlMode::Hold && motionGeneratorInFlight(ArmId::Left),
+        effective_command.right.mode == ControlMode::Hold && motionGeneratorInFlight(ArmId::Right),
+    };
+    if (isCartesianMode(effective_command.left.mode) || isCartesianMode(effective_command.right.mode) ||
+        arm_brake_candidate[0] || arm_brake_candidate[1]) {
         bool cartesian_available =
             config_.cartesian_control.enable &&
             config_.kinematics.enable &&
@@ -6947,6 +7294,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             effective_command.tcp_target_profile,
             &right_profile_found
         );
+        if ((!left_profile_found || !right_profile_found) &&
+            effective_command.tcp_target_profile != unknown_tcp_profile_logged_) {
+            unknown_tcp_profile_logged_ = effective_command.tcp_target_profile;
+            std::cerr << "[WARN] tcp_target_profile '" << effective_command.tcp_target_profile
+                      << "' is not configured; using the default profile '"
+                      << left_tcp_profile.name << "'\n";
+        }
         // Resolve the Cartesian feedback state before advancing any stateful
         // tracker. Physical-real uses q_actual/tcp_actual. An rbpodo control box
         // held in pgmode simulation uses q_target/tcp_ref instead, because its
@@ -6991,10 +7345,31 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
         const TcpPoseTargetProfileConfig* arm_tcp_profile[2] =
             {&left_tcp_profile, &right_tcp_profile};
+        for(int i=0;i<2;++i) {
+            const auto& force=i==0?left_force_control_telemetry_:right_force_control_telemetry_;
+            if(arm_tcp_profile[i]->ruckig_follower.preview_execution.enable &&
+               force.reference_strip_enabled)
+                prepareForceOverlayInput(arm_ctx[i].arm);
+        }
         for (int i = 0; i < 2; ++i) {
-            if (arm_effective_mode[i] == ControlMode::TcpPoseTarget &&
-                arm_ctx[i].pose_track_profile_name != arm_tcp_profile[i]->name) {
-                arm_ctx[i].pose_track_smd = SmdPoseTracker(arm_tcp_profile[i]->pose_track_smd);
+            if (arm_effective_mode[i] != ControlMode::TcpPoseTarget ||
+                arm_ctx[i].pose_track_profile_name == arm_tcp_profile[i]->name) {
+                continue;
+            }
+            SmdPoseTracker& tracker = arm_ctx[i].pose_track_smd;
+            if (!tracker.active()) {
+                tracker = SmdPoseTracker(arm_tcp_profile[i]->pose_track_smd);
+                arm_ctx[i].pose_track_profile_name = arm_tcp_profile[i]->name;
+                continue;
+            }
+            // PROFILE BINDING (2026-09-06): never reconstruct a tracker that carries
+            // state. Re-point it in place when the new profile has an SMD; keep it bound
+            // to the old profile when it has none (the arm stays smooth either way).
+            if (arm_tcp_profile[i]->pose_track_smd.enable) {
+                std::cerr << "[INFO] pose_track " << toString(arm_ctx[i].arm) << ": profile "
+                          << arm_ctx[i].pose_track_profile_name << " -> "
+                          << arm_tcp_profile[i]->name << " re-pointed in place (tracker active)\n";
+                tracker.reconfigure(arm_tcp_profile[i]->pose_track_smd);
                 arm_ctx[i].pose_track_profile_name = arm_tcp_profile[i]->name;
             }
         }
@@ -7112,6 +7487,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 const Eigen::Quaterniond identity = Eigen::Quaterniond::Identity();
                 if (ctx.chunk_follower.absorbOffset(dp, identity)) {
                     ctx.follower_output_smd.shift(dp, identity);
+                    shiftPreviewExecution(ctx.arm,dp,identity,PreviewFoldCause::RoiFloor,last_loop_start_ns_);
                 }
                 track.tcp_target_stand = clamped;
                 // `dp` points from the face into the box: the free-space direction,
@@ -7169,6 +7545,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 ctx.chunk_follower.active() && !ctx.chunk_follower.holdPaused();
             if (eligible && ctx.chunk_follower.absorbOffset(pend.dp, pend.dR)) {
                 ctx.follower_output_smd.shift(pend.dp, pend.dR);
+                shiftPreviewExecution(ctx.arm,pend.dp,pend.dR,PreviewFoldCause::GeometryHold,
+                                      pend.booked_time_ns,pend.geometry_cause_mask);
                 // The pose emitted this tick came from the un-shifted plan: move it too.
                 pinocchio::SE3 T = math::se3FromPose(track.tcp_target_stand);
                 T.translation() += pend.dp;
@@ -7201,6 +7579,15 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                           << " mm folded\n";
             }
             pend.valid = false;  // consumed (or declined): never re-applied
+        }
+
+        // The QP consumes the canonical state AFTER the pending, one-shot safety
+        // folds. Its output is independent of the next delta integration anchor.
+        for (int i=0;i<2;++i) {
+            if (arm_raw_mode[i]==ControlMode::TcpPoseTarget)
+                applyPreviewExecution(arm_ctx[i].arm,arm_pose_track_command[i],*arm_tcp_profile[i]);
+            else
+                resetPreviewExecution(arm_ctx[i].arm,"mode_changed");
         }
 
         // THE HOLD FOLD, measuring half: remember the pose each follower plan
@@ -7244,6 +7631,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             const RobotState& arm_state = left_arm ? left_state : right_state;
             Pose6D target = track.tcp_target_stand;
             applyForceOverlay(arm_id, arm_state, &target);
+            recordPreviewCompose(arm_id,target);
             // Even sub-micrometre frozen offsets must cancel the reference strip.
             // quiescent()/compose_applied are diagnostics, not a target-write gate.
             track.tcp_target_stand = target;
@@ -7339,9 +7727,19 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // The Cartesian branches below bypass TrajectoryFilter::computeJointTarget, so the
         // joint-target SMD would otherwise seed its activation velocity from a stale sample
         // the next time a JointTarget takes over (init brake-before-plan, jog handoff).
+        // The stage promoted a raw Hold into a braking TcpPoseTarget: solve it as
+        // Cartesian this tick (2026-09-06). Everything else keeps the effective mode.
+        ControlMode arm_solve_mode[2] = {arm_effective_mode[0], arm_effective_mode[1]};
+        for (int i = 0; i < 2; ++i) {
+            if (arm_brake_candidate[i] &&
+                arm_pose_track_command[i].mode == ControlMode::TcpPoseTarget &&
+                arm_pose_track_command[i].has_tcp_target) {
+                arm_solve_mode[i] = ControlMode::TcpPoseTarget;
+            }
+        }
         // Record this tick's sent target for the arm(s) that go the Cartesian way.
         for (int i = 0; i < 2; ++i) {
-            if (isCartesianMode(arm_effective_mode[i])) {
+            if (isCartesianMode(arm_solve_mode[i])) {
                 arm_ctx[i].traj_filter.observeSentTarget(arm_ctx[i].prev_sent_q_deg);
             }
         }
@@ -7400,7 +7798,15 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                     &ctx.cartesian_servo_path,
                     &arm_selection[i]->context
                 )
-                : isCartesianMode(arm_effective_mode[i])
+                : arm_tcp_profile[i]->ruckig_follower.preview_execution.enable &&
+                  arm_pose_track_command[i].mode==ControlMode::Hold &&
+                  isCartesianMode(arm_solve_mode[i])
+                ? CartesianArmTargetResult{
+                    SafetyVerdict::Ok,
+                    safety_filter_.clampMotionDetailed(ctx.prev_sent_q_deg,ctx.prev_sent_q_deg,
+                        i==0?left_prevprev_sent_q_deg_:right_prevprev_sent_q_deg_,dt_sec).q_after_accel_limit_deg,
+                    "preview execution waiting for a valid plan",CartesianSolveTelemetry{}}
+                : isCartesianMode(arm_solve_mode[i])
                 ? cartesian.computeArmJointTarget(
                     arm_pose_track_command[i],
                     arm_selection[i]->state,
@@ -7487,7 +7893,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 // brake landed at 12,021 deg/s^2 (= ddq_max x decel ratio) -- 5.5 mm at
                 // 450 mm/s on both arms, on every resume. The all-joint-mode dispatch
                 // below never reaches this block, so the state is also cleared there.
-                const bool cartesian_this_tick = isCartesianMode(arm_effective_mode[i]);
+                const bool cartesian_this_tick = isCartesianMode(arm_solve_mode[i]);
                 if (!cartesian_this_tick) {
                     engage = 0.0;
                     ctx.ik_pinned_lowpass_valid = false;
@@ -7624,6 +8030,7 @@ ServoTarget DualArmServoLoop::applySafety(
     SafetyVerdict* verdict
 ) {
     ServoTarget out;
+    safety_projection_telemetry_.joint_stage_trace_valid = false;
     // Same per-arm seam as computeServoTarget: the safety stage reads and writes
     // only these five per-arm members, all of which the context already carries.
     ArmControlContext safety_ctx[2] = {armContext(ArmId::Left), armContext(ArmId::Right)};
@@ -8503,6 +8910,8 @@ ServoTarget DualArmServoLoop::applySafety(
     // obstruction projection rewrites them, so the gate sees only motion that an
     // obstruction removed. See the gate block for why the clamps must not count.
     const JointArray plan_gate_requested[2] = {out.left_q_target_deg, out.right_q_target_deg};
+    safety_projection_telemetry_.joint_stage_trace_valid = true;
+    safety_projection_telemetry_.requested_q_deg = {plan_gate_requested[0], plan_gate_requested[1]};
 
     // ---- Combined Gauss-Seidel solve (floor + self-collision together) ----
     if (!safety_cons.empty() && !self_collision_hold &&
@@ -8662,6 +9071,7 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    safety_projection_telemetry_.projected_q_deg = {out.left_q_target_deg, out.right_q_target_deg};
     // PROJECTION RELEASE SLEW. Runs on EVERY tick, deliberately outside the solve
     // block above: the step release happens exactly on the tick the constraint rows
     // disengage and the solve is skipped, so gating this on `!safety_cons.empty()`
@@ -8678,6 +9088,7 @@ ServoTarget DualArmServoLoop::applySafety(
     control::projectionReleaseStep(
         plan_gate_requested[1], out.right_q_target_deg, projection_correction_prev_[1],
         dt_sec, config_.safety.projection_release_slew_deg_s2);
+    safety_projection_telemetry_.released_q_deg = {out.left_q_target_deg, out.right_q_target_deg};
     if (dt_sec > 0.0) {
         double la = 0.0;
         double ra = 0.0;
@@ -8775,6 +9186,9 @@ ServoTarget DualArmServoLoop::applySafety(
                 if (control::computeHoldFold(*emitted, achieved, lim, &d, &capped)) {
                     pend.dp = d.dp;
                     pend.dR = d.dR;
+                    pend.booked_time_ns = last_loop_start_ns_;
+                    pend.geometry_cause_mask = (collision_hold ? 1u : 0u) |
+                        (row_hold && rows_in_band ? 2u : 0u) | (ik_throttled ? 4u : 0u);
                     pend.valid = true;
                     (i == 0 ? safety_projection_telemetry_.left_hold_fold_m
                             : safety_projection_telemetry_.right_hold_fold_m) = d.dist_m;
@@ -8807,6 +9221,8 @@ ServoTarget DualArmServoLoop::applySafety(
                 math::se3FromPose(kinematics_->computeTcpStand(fold_arm, q_final, fold_mount));
             pend.dp = T_fin.translation() - T_req.translation();
             pend.dR = Eigen::Quaterniond(T_fin.rotation() * T_req.rotation().transpose()).normalized();
+            pend.booked_time_ns = last_loop_start_ns_;
+            pend.geometry_cause_mask = 1u | 8u;
             pend.valid = pend.dp.norm() > 1e-9 ||
                          std::abs(Eigen::AngleAxisd(pend.dR).angle()) > 1e-9;
         } catch (const std::exception&) {
@@ -9348,6 +9764,13 @@ Pose6D DualArmServoLoop::clampPoseToFloor(const Pose6D& pose) const {
         clamped.z = std::max(clamped.z, effectiveFloorZ() - min_offset_delta_z);
     }
     return clamped;
+}
+
+void DualArmServoLoop::setWorkerSendSuppressed(bool suppressed) {
+    // Inert without per-arm workers (direct I/O, mock): there the servo loop owns the
+    // rhythm, so not calling sendServoJ already leaves the wire quiet.
+    if (left_worker_) left_worker_->setSendSuppressed(suppressed);
+    if (right_worker_) right_worker_->setSendSuppressed(suppressed);
 }
 
 DualSendResult DualArmServoLoop::sendTargets(
@@ -10028,6 +10451,45 @@ bool DualArmServoLoop::forceControlCovered(
     return false;
 }
 
+bool DualArmServoLoop::motionGeneratorInFlight(ArmId arm) {
+    auto ctx = armContext(arm);
+    const SmdPoseTracker& tracker = ctx.pose_track_smd;
+    if (tracker.active() &&
+        (tracker.releaseBraking() || tracker.linearSpeed() > kGeneratorAtRestLinearSpeedMS ||
+         tracker.angularSpeed() > kGeneratorAtRestAngularSpeedRadS)) {
+        return true;
+    }
+    if (ctx.chunk_follower.active() && !ctx.chunk_follower.holdPaused()) return true;
+    if (ctx.follower_output_smd.active()) return true;
+    if (ctx.delta_twist_follower.active()) return true;
+    return false;
+}
+
+void DualArmServoLoop::markPoseTrackerFrame(ArmId arm, bool stripped) {
+    (arm == ArmId::Left ? left_pose_track_stripped_ : right_pose_track_stripped_) = stripped;
+}
+
+void DualArmServoLoop::carryPoseTrackerAcrossOverlayFrame(ArmId arm, SmdPoseTracker* tracker) {
+    // THE TRACKER'S FRAME FOLLOWS THE OVERLAY (2026-09-06). With the reference strip on,
+    // the tracker runs in the NOMINAL frame and the compose stage adds the overlay's
+    // deviation back; with it off, its output is emitted as is. A strip toggle while
+    // the tracker carries state (stream -> raw Hold under compliance, coverage loss and
+    // recovery mid-stream) used to step the emitted pose by the whole deviation.
+    const bool left = arm == ArmId::Left;
+    bool& stripped = left ? left_pose_track_stripped_ : right_pose_track_stripped_;
+    const bool strip_now = forceOverlayForReference(arm) != nullptr;
+    if (tracker != nullptr && tracker->active() && stripped != strip_now) {
+        const control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
+        const Pose6D current = tracker->currentPose();
+        const Pose6D moved = strip_now ? overlay.strip(current) : overlay.compose(current);
+        const pinocchio::SE3 a = math::se3FromPose(current);
+        const pinocchio::SE3 b = math::se3FromPose(moved);
+        tracker->shift(b.translation() - a.translation(),
+                       Eigen::Quaterniond(b.rotation() * a.rotation().transpose()));
+    }
+    stripped = strip_now;
+}
+
 const control::AdmittanceOverlay* DualArmServoLoop::forceOverlayForReference(ArmId arm) const {
     const bool left = arm == ArmId::Left;
     const auto& tel = left ? left_force_control_telemetry_ : right_force_control_telemetry_;
@@ -10075,14 +10537,14 @@ void DualArmServoLoop::resetForceReferenceForInit(ArmId arm) {
               << force_reference_reset_count_[i] << '\n';
 }
 
-bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target) {
-    if (target == nullptr) return false;
-    const bool left = arm == ArmId::Left;
-    sensor::FtPipeline& pipe = left ? left_ft_pipeline_ : right_ft_pipeline_;
-    control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
-    control::ForceGate& gate = left ? left_force_gate_ : right_force_gate_;
-    ForceControlTelemetry& tel = left ? left_force_control_telemetry_ : right_force_control_telemetry_;
-
+void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
+    const int i=arm==ArmId::Left?0:1;
+    if (last_loop_start_ns_!=0 && prepared_force_tick_[i]==last_loop_start_ns_) return;
+    const bool left=arm==ArmId::Left;
+    sensor::FtPipeline& pipe=left?left_ft_pipeline_:right_ft_pipeline_;
+    control::AdmittanceOverlay& overlay=left?left_overlay_:right_overlay_;
+    control::ForceGate& gate=left?left_force_gate_:right_force_gate_;
+    ForceControlTelemetry& tel=left?left_force_control_telemetry_:right_force_control_telemetry_;
     // ---- the wrench, carried to the STAND frame -----------------------------
     // The pipeline's TCP surface is in TOOL axes; the overlay integrates in stand.
     // The wrench source and the compose pivot are BOTH the TCP, which is what keeps
@@ -10196,6 +10658,28 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
         const Wrench6D& nodz_stand = pipe.compStandNoDeadzone();
         gate.updateStream(math::Vector3(nodz_stand.fx, nodz_stand.fy, nodz_stand.fz));
     }
+
+    prepared_force_tick_[i]=last_loop_start_ns_;
+    prepared_force_wrench_[i]={f_stand.x(),f_stand.y(),f_stand.z(),m_stand.x(),m_stand.y(),m_stand.z()};
+    prepared_force_magnitude_[i]=f_phys_raw;
+}
+
+bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target) {
+    if (target == nullptr) return false;
+    const bool left = arm == ArmId::Left;
+    sensor::FtPipeline& pipe = left ? left_ft_pipeline_ : right_ft_pipeline_;
+    control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
+    control::ForceGate& gate = left ? left_force_gate_ : right_force_gate_;
+    ForceControlTelemetry& tel = left ? left_force_control_telemetry_ : right_force_control_telemetry_;
+
+    // Prepared early only by the preview path; every other profile evaluates
+    // the same sensor/filter/gate operations here, in its original tick order.
+    prepareForceOverlayInput(arm);
+    const int i=left?0:1;
+    const Vec6& prepared=prepared_force_wrench_[i];
+    const math::Vector3 f_stand(prepared.x,prepared.y,prepared.z);
+    const math::Vector3 m_stand(prepared.rx,prepared.ry,prepared.rz);
+    const double f_phys_raw=prepared_force_magnitude_[i];
 
     // ---- the hand-guide engagement latch (HOLD law only) ---------------------
     // Judged on the PHYSICAL force magnitude (compensated, before the deadzone), so
@@ -10373,6 +10857,7 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm,
         // The output SMD sits between the follower and the overlay; its state must
         // move with the plan or it would chase the fold as a step.
         output_smd.shift(dp, dR);
+        shiftPreviewExecution(arm,dp,dR,PreviewFoldCause::Force,last_loop_start_ns_);
     }
     overlay.dropDeviation();   // the DISPLACEMENT only - the velocity state stays
     absorbed += dp;

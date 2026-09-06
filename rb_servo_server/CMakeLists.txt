@@ -8,6 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(RB_SERVO_ENABLE_RBPODO "Enable rbpodo backend" ON)
 option(RB_SERVO_ENABLE_PINOCCHIO "Enable Pinocchio FK/IK support" ON)
 option(RB_SERVO_ALLOW_FETCHCONTENT "Allow CMake to download missing build dependencies" ON)
+option(RB_SERVO_BUILD_PREVIEW_EXPERIMENTS "Build offline-only constrained preview experiments (requires qpOASES)" OFF)
+option(RB_SERVO_ENABLE_PREVIEW_EXECUTION "Build explicit live constrained-preview capability (requires qpOASES)" ON)
 
 if(NOT RB_SERVO_ENABLE_PINOCCHIO)
     message(FATAL_ERROR "Disabling Pinocchio is no longer supported. rb_servo_server Cartesian math requires Eigen3 and Pinocchio.")
@@ -110,6 +112,21 @@ target_link_libraries(
 )
 target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PINOCCHIO=1)
 
+if(RB_SERVO_ENABLE_PREVIEW_EXECUTION OR RB_SERVO_BUILD_PREVIEW_EXPERIMENTS)
+    # Installed dependency only: no implicit solver download or fallback.
+    find_package(qpOASES REQUIRED)
+endif()
+if(RB_SERVO_ENABLE_PREVIEW_EXECUTION)
+    target_sources(rb_servo_core PRIVATE
+        src/control/preview_trajectory_tracker.cpp
+        src/control/preview_execution_worker.cpp
+        src/control/preview_brake.cpp
+        src/control/live_preview_execution.cpp)
+    target_include_directories(rb_servo_core PRIVATE ${qpOASES_INCLUDE_DIR})
+    target_link_libraries(rb_servo_core PUBLIC ${qpOASES_LIBRARY})
+    target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PREVIEW_EXECUTION=1)
+endif()
+
 if(RB_SERVO_ENABLE_RBPODO)
     find_package(rbpodo REQUIRED)
     target_link_libraries(rb_servo_core PUBLIC rbpodo::rbpodo)
@@ -121,13 +138,15 @@ target_link_libraries(rb_servo_server PRIVATE rb_servo_core)
 add_executable(rb_isaac_bridge src/isaac_bridge_main.cpp)
 target_link_libraries(rb_isaac_bridge PRIVATE rb_servo_core)
 
-# config.hpp contains layout-sensitive runtime/safety structs shared across the
-# server. Make every shipped server object depend on it explicitly so an
+# These headers contain layout-sensitive runtime/safety structs shared across
+# the server. Make every shipped server object depend on them explicitly so an
 # incremental build recompiles the complete ABI surface without deleting the
 # build tree. tools/build_stack.sh keeps a post-link timestamp guard as a
 # fail-closed backstop.
 set(RB_SERVO_LAYOUT_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/include/rb_servo/config/config.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/rb_servo/core/types.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/rb_servo/control/preview_trajectory_tracker.hpp"
 )
 get_target_property(RB_SERVO_CORE_SOURCES rb_servo_core SOURCES)
 set_property(
@@ -146,8 +165,15 @@ target_link_libraries(ik_feasibility_grid PRIVATE rb_servo_core)
 # budget can be characterised without hardware.
 add_executable(follower_replay tools/follower_replay.cpp)
 target_link_libraries(follower_replay PRIVATE rb_servo_core)
+add_executable(umi_stream_gate_replay tools/umi_stream_gate_replay.cpp)
+target_link_libraries(umi_stream_gate_replay PRIVATE rb_servo_core)
 add_executable(delta_follower_replay tools/delta_follower_replay.cpp)
 target_link_libraries(delta_follower_replay PRIVATE rb_servo_core)
+if(RB_SERVO_ENABLE_PREVIEW_EXECUTION)
+    # Hardware-free replay of the actual asynchronous execution path.
+    add_executable(live_preview_replay tools/live_preview_replay.cpp)
+    target_link_libraries(live_preview_replay PRIVATE rb_servo_core)
+endif()
 
 if(RB_SERVO_ENABLE_RBPODO)
     # READ-ONLY controller state reader, for hand-parked geometry checks (stand and
@@ -166,6 +192,38 @@ if(RB_SERVO_ENABLE_RBPODO)
 endif()
 
 include(CTest)
+if(BUILD_TESTING AND RB_SERVO_ENABLE_PREVIEW_EXECUTION)
+    foreach(_preview_test preview_execution_config preview_execution_worker live_preview_execution preview_brake preview_contact_qp preview_servo_integration)
+        add_executable(test_${_preview_test} tests/test_${_preview_test}.cpp)
+        target_link_libraries(test_${_preview_test} PRIVATE rb_servo_core)
+        add_test(NAME ${_preview_test} COMMAND test_${_preview_test})
+    endforeach()
+endif()
+if(RB_SERVO_BUILD_PREVIEW_EXPERIMENTS)
+    # Both switches may coexist without duplicate tracker symbols. Building the
+    # offline executable does not select a live profile.
+    if(RB_SERVO_ENABLE_PREVIEW_EXECUTION)
+        add_library(rb_servo_preview_experimental INTERFACE)
+        target_link_libraries(rb_servo_preview_experimental INTERFACE rb_servo_core)
+    else()
+        add_library(rb_servo_preview_experimental src/control/preview_trajectory_tracker.cpp)
+        target_include_directories(rb_servo_preview_experimental PRIVATE ${qpOASES_INCLUDE_DIR})
+        target_link_libraries(rb_servo_preview_experimental PUBLIC rb_servo_core ${qpOASES_LIBRARY})
+    endif()
+    add_executable(preview_follower_replay tools/preview_follower_replay.cpp)
+    target_link_libraries(preview_follower_replay PRIVATE rb_servo_preview_experimental)
+    if(BUILD_TESTING)
+        add_executable(test_preview_trajectory_tracker tests/test_preview_trajectory_tracker.cpp)
+        target_link_libraries(test_preview_trajectory_tracker PRIVATE rb_servo_preview_experimental)
+        add_test(NAME preview_trajectory_tracker COMMAND test_preview_trajectory_tracker)
+        add_executable(test_follower_preview_reference tests/test_follower_preview_reference.cpp)
+        target_link_libraries(test_follower_preview_reference PRIVATE rb_servo_preview_experimental)
+        add_test(NAME follower_preview_reference COMMAND test_follower_preview_reference)
+        add_executable(test_preview_execution_cursor tests/test_preview_execution_cursor.cpp)
+        target_link_libraries(test_preview_execution_cursor PRIVATE rb_servo_preview_experimental)
+        add_test(NAME preview_execution_cursor COMMAND test_preview_execution_cursor)
+    endif()
+endif()
 if(BUILD_TESTING)
     add_executable(test_backend_result tests/test_backend_result.cpp)
     target_link_libraries(test_backend_result PRIVATE rb_servo_core)
@@ -346,6 +404,10 @@ add_executable(test_follower_output_smd tests/test_follower_output_smd.cpp)
     add_executable(test_force_overlay_resume tests/test_force_overlay_resume.cpp)
     target_link_libraries(test_force_overlay_resume PRIVATE rb_servo_core)
     add_test(NAME force_overlay_resume COMMAND test_force_overlay_resume)
+    if(RB_SERVO_ENABLE_PREVIEW_EXECUTION)
+        add_test(NAME force_overlay_preview_resume
+            COMMAND test_force_overlay_resume --preview-execution-only)
+    endif()
 
     add_executable(test_dh_calibration tests/test_dh_calibration.cpp)
     target_link_libraries(test_dh_calibration PRIVATE rb_servo_core)
@@ -355,6 +417,12 @@ add_executable(test_follower_output_smd tests/test_follower_output_smd.cpp)
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        if(RB_SERVO_BUILD_PREVIEW_EXPERIMENTS)
+            add_test(NAME preview_replay_cli
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/preview_replay_checks.py)
+            set_tests_properties(preview_replay_cli PROPERTIES
+                ENVIRONMENT "RB_PREVIEW_REPLAY_BINARY=$<TARGET_FILE:preview_follower_replay>")
+        endif()
         if(EXISTS "${RB_GUI_DIR}/tests")
             add_test(
                 NAME rb_servo_gui_unittest

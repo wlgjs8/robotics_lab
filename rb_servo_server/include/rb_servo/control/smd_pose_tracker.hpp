@@ -55,6 +55,20 @@ public:
     // its caps and enable from here, not from the command's profile.
     const PoseTrackSmdConfig& config() const { return config_; }
 
+    // PROFILE BINDING (2026-09-06). Re-point an ACTIVE tracker at another profile in
+    // place: pose, velocity, goal, command reference and brake state are kept and the
+    // velocities are clamped to the new caps. Reconstructing the tracker on a profile
+    // switch dropped all of that mid-motion (servo_log_20260906_194113.csv 20.698 s:
+    // 4.7 mm of tracker lag discharged in 20 ms at 9.2k deg/s^2 under a hand push).
+    void reconfigure(const PoseTrackSmdConfig& config);
+    // Stand-frame twist of the state (angular part rotated out of the body frame).
+    Vec6 currentTwistStand() const;
+    // Move state and goal together by a stand-frame displacement (rotation
+    // left-composed); the command reference stays, so later commands integrate as
+    // before. Carries the tracker across a force-overlay frame change (nominal <->
+    // emitted) without a step in the emitted pose.
+    void shift(const Eigen::Vector3d& dp_stand, const Eigen::Quaterniond& dR_stand);
+
     // Initialize the filter and the goal integrator at `pose` with zero
     // velocity. The next updateGoalFromCommand() call only latches the
     // command reference (no jump), deltas integrate from there.

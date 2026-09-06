@@ -66,6 +66,10 @@ struct CartesianChunkFollowerConfig {
   // waiting for the old segment endpoint. Limits and plan/force gates still apply.
   bool fresh_chunk_replan{false};
   bool continuous_hold_resume{false};
+  // Opt-in with fresh_chunk_replan: retain the exact guarded target/deadline,
+  // selecting a smaller feasible jerk budget when the period has headroom.
+  // Infeasible segments and safety ring-down retain the configured caps.
+  bool deadline_jerk_minimization{false};
 };
 
 struct FollowerOutputKinematics {
@@ -237,6 +241,13 @@ class CartesianChunkFollower {
   int windowConsumed() const { return window_.consumed(); }
   // Seconds since the active frame was received (feed-liveness watchdog input).
   double ageSince(double now) const { return active_ ? now - window_.recvTime() : 0.0; }
+
+  // The fixed-DOF core uses inline storage; only the window vectors need
+  // reservation before a nonallocating asynchronous-planner snapshot copy.
+  void reserveSnapshotCapacity(std::size_t horizon) { window_.reserveSnapshotCapacity(horizon); }
+  bool canCopySnapshotFrom(const CartesianChunkFollower& source) const {
+    return window_.canCopySnapshotFrom(source.window_);
+  }
 
  private:
   void stepToNextSegment();

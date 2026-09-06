@@ -462,9 +462,19 @@ all motion/force/safety limits are preserved by this opt-in path. See
 [the execution design](plans/plan_fresh_chunk_execution_20260906.md) and
 [the proprio time/source contract](reference/servo_command_proprio.md). The real
 fresh profile also selects the
-[linear output-conditioner tradeoff](reference/follower_output_conditioning.md);
+[translation/rotation output-conditioner tradeoff](reference/follower_output_conditioning.md);
 state fanout now [bounds optional collision witnesses](reference/state_udp_payload_budget.md)
 so visualization growth cannot make an otherwise fitting core packet exceed UDP limits.
+
+The separate `flow_infer_preview` profile integrates a constrained preview
+worker without an output low-pass stage. It preserves canonical delta anchors,
+uses a bounded independent execution cursor and splices from the previous
+nominal trajectory's p/v/a at a future timestamp. Final dispatch carries an
+accepted-command transaction; expired or contact-rejected trajectories request
+a bounded nominal stop. Force coverage, IK and all final safety gates remain
+authoritative. Recorded-input replay, clean native regression and the real-backend
+build/config preflight pass; physical acceptance remains separate. See
+[the preview execution contract](reference/preview_trajectory_execution.md).
 
 ### `TcpLinearMove`
 

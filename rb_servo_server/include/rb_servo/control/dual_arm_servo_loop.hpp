@@ -21,6 +21,9 @@
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
 #include "rb_servo/control/follower_output_smd.hpp"
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+#include "rb_servo/control/live_preview_execution.hpp"
+#endif
 #include "rb_servo/control/joint_moving_average.hpp"
 #include "rb_servo/control/realtime_timing.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
@@ -221,6 +224,17 @@ private:
     bool isValidJointState(const RobotState& state) const;
     void clearLatchedCartesianTargets();
     void clearLatchedCartesianTarget(ArmId arm_id);
+    void resetPreviewExecution(ArmId arm, const char* reason);
+    void shiftPreviewExecution(ArmId arm, const Eigen::Vector3d& dp,
+                               const Eigen::Quaterniond& dR, PreviewFoldCause cause,
+                               uint64_t booked_time_ns, uint32_t geometry_cause_mask = 0);
+    void applyPreviewExecution(ArmId arm, ArmCommand& command,
+                               const TcpPoseTargetProfileConfig& profile);
+    void recordPreviewCompose(ArmId arm, const Pose6D& composed);
+    void prepareForceOverlayInput(ArmId arm);
+    std::array<std::uint64_t,2> prepared_force_tick_{};
+    std::array<Vec6,2> prepared_force_wrench_{};
+    std::array<double,2> prepared_force_magnitude_{};
     ServoTarget computeServoTarget(
         const RobotState& left_state,
         const RobotState& right_state,
@@ -300,6 +314,11 @@ private:
     PoseTrackWallState left_pose_track_wall_;
     PoseTrackWallState right_pose_track_wall_;
     void applyPoseTrackWallFold(ArmId arm, SmdPoseTracker* tracker, double dt_sec, ArmCommand* out);
+    // A motion generator (pose-track SMD, chunk follower, output conditioner) still
+    // carrying velocity on this arm: a Hold must brake it, not pin it (2026-09-06).
+    bool motionGeneratorInFlight(ArmId arm);
+    void markPoseTrackerFrame(ArmId arm, bool stripped);
+    void carryPoseTrackerAcrossOverlayFrame(ArmId arm, SmdPoseTracker* tracker);
     // THE DH ORACLE (2026-09-05): our FK vs the box's TCP report; NaN when not computable.
     double fkVsBoxResidualMm(const RobotState& state) const;
     bool checkBoxTcpOracle(const RobotState& left, const RobotState& right) const;
@@ -367,6 +386,11 @@ private:
     bool freedriveUsesControllerSignals(ArmId arm_id) const;
     void resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state);
     void abortFreedrive(ArmId arm_id, const RobotState& state, const std::string& reason);
+    // Gate the per-arm workers' WIRE sends. Only freedrive uses it: the worker owns
+    // the cadence under queue_sync and would otherwise keep the stream alive from its
+    // interpolator, so the controller never reaches Idle and teach_on never happens.
+    void setWorkerSendSuppressed(bool suppressed);
+
     // Best-effort freedrive_teach_off for any arm still in (or arming) freedrive,
     // issued from stop() so a Ctrl-C/shutdown mid-teaching does not leave the
     // controller latched in freedrive_teach_on (which also blocks the pendant's
@@ -818,6 +842,10 @@ private:
     struct PendingCollisionFold {
         Eigen::Vector3d dp = Eigen::Vector3d::Zero();
         Eigen::Quaterniond dR = Eigen::Quaterniond::Identity();
+        uint64_t booked_time_ns = 0;
+        // Participation flags, not individual row contributions: collision=1,
+        // ROI/floor/reach row hold=2, IK throttle=4, legacy collision fold=8.
+        uint32_t geometry_cause_mask = 0;
         bool valid = false;
     };
     std::array<PendingCollisionFold, 2> pending_collision_fold_{};
@@ -915,10 +943,29 @@ private:
     SmdPoseTracker right_pose_track_smd_{PoseTrackSmdConfig{}};
     std::string left_pose_track_profile_name_;
     std::string right_pose_track_profile_name_;
+    // Frame of the pose-track SMD's state: true while it runs on the overlay-stripped
+    // (nominal) reference, false while its output is emitted as is (2026-09-06).
+    bool left_pose_track_stripped_ = false;
+    bool right_pose_track_stripped_ = false;
+    std::string unknown_tcp_profile_logged_;
     // Chunk-follower stage (per-profile opt-in replacement for the SMD step).
     // The default absolute-waypoint follower still prewarms Ruckig off the RT
     // path; delta_twist consumes local action deltas through a separate state.
     control::CartesianChunkFollower left_chunk_follower_{control::CartesianChunkFollowerConfig{}};
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    // Prebuilt per profile, never construct a worker/QP on the servo thread.
+    struct PreviewProfileExecutors {
+        std::string name;
+        std::array<std::unique_ptr<control::LivePreviewExecution>, 2> arm;
+    };
+    std::vector<PreviewProfileExecutors> preview_profile_executors_;
+    std::array<control::LivePreviewExecution*, 2> preview_executor_{};
+    std::array<control::PreviewDispatchTransaction, 2> preview_dispatch_transaction_{};
+    std::array<bool, 2> preview_used_this_tick_{};
+    void observePreviewDispatch(const std::array<control::PreviewDispatchTransaction, 2>& transactions,
+                                const ServoTarget& sent, const DualSendResult& result,
+                                bool suppressed);
+#endif
     control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
     // ---- force control ----------------------------------------------------
     // The F/T compensation pipeline and the admittance law, per arm. The pipeline
@@ -1119,6 +1166,7 @@ private:
     // A/B/C separation telemetry (Patch 4), captured each tick from the SMD step
     // and the output-MA stage, merged into the per-arm cartesian_solve sample.
     struct AbcTelemetry {
+        PreviewExecutionTelemetry preview_execution;
         bool smd_active = false;
         std::optional<Pose6D> smd_ref_stand;
         std::optional<Pose6D> smd_goal_stand;
@@ -1149,6 +1197,8 @@ private:
         int follower_step = -1;
         double follower_t_in_seg_sec = 0.0;
         double follower_duration_sec = 0.0;
+        double follower_jerk_scale = 1.0;
+        int follower_jerk_search_calculations = 0;
         std::array<double, 6> follower_axis_duration_sec{};
         std::array<double, 6> follower_target_velocity{};
         std::array<double, 6> follower_target_acceleration{};

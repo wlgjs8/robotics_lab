@@ -273,6 +273,57 @@ bool testSilentStreamIsNeutralAndReArms() {
     return true;
 }
 
+// A DIRECT-TEACHING GAP RE-RUNS WARMUP+DRAIN (2026-09-06). Freedrive stops the wire
+// for as long as the operator hand-guides the arm, and the box queue empties while it
+// does. Resuming on the pre-gap phase would mean a wound-up integral and a Track-phase
+// trim aimed at a queue that no longer exists. The law must fall back to Idle for the
+// silent stretch and climb warmup -> drain -> track again against the real queue.
+//
+// This is the whole of the "re-drain on re-entry" requirement: no extra call is
+// needed, only that the caller keeps stepping with streaming=false while the wire is
+// suppressed (ArmWorker::setSendSuppressed does exactly that).
+bool testStreamGapReRunsWarmupAndDrainOnReEntry() {
+    rb_servo::QueueSyncController ctrl(testConfig());
+    BoxQueue box(499.34, 24.0);
+    const RunResult tracked = run(ctrl, box, 8000);
+    RB_CHECK(tracked.phase == "track");
+    RB_CHECK(tracked.last.locked);
+
+    // The teaching session: the wire is quiet and the box drains itself empty.
+    BoxQueue drained(499.34, 0.0);
+    const RunResult quiet = run(ctrl, drained, 500, /*streaming=*/false);
+    RB_CHECK(quiet.phase == "idle");
+    RB_CHECK(quiet.final_trim_us == 0.0);   // nothing to regulate, no actuation
+    RB_CHECK(!quiet.last.locked);
+
+    // Re-entry: the law must NOT come back in Track on the pre-gap state.
+    BoxQueue refilled(499.34, 0.0);
+    std::string first_phase;
+    uint64_t now_ns = 0;
+    uint64_t seq = 100000;
+    double period_us = kNominalPeriodUs;
+    for (int i = 0; i < 40; ++i) {
+        const int fill = refilled.step(period_us);
+        rb_servo::QueueSyncController::Observation obs;
+        obs.streaming = true;
+        obs.fill_valid = true;
+        obs.fill = fill;
+        obs.rback_sequence = ++seq;
+        obs.now_ns = now_ns;
+        const rb_servo::QueueSyncDecision d = ctrl.step(obs);
+        if (i == 0) first_phase = d.phase;
+        period_us = kNominalPeriodUs + d.period_trim_us;
+        now_ns += static_cast<uint64_t>(period_us * 1000.0);
+    }
+    RB_CHECK(first_phase == "warmup");   // re-armed, not resumed
+
+    // ...and it converges again from there.
+    const RunResult again = run(ctrl, refilled, 8000);
+    RB_CHECK(again.phase == "track");
+    RB_CHECK(again.last.locked);
+    return true;
+}
+
 bool testRebaseTriggersRedrain() {
     rb_servo::QueueSyncConfig cfg = testConfig();
     rb_servo::QueueSyncController ctrl(cfg);
@@ -565,6 +616,7 @@ int main() {
         {"protect overrides PI when near empty", testProtectOverridesPiWhenNearEmpty},
         {"disabled is always neutral", testDisabledIsAlwaysNeutral},
         {"silent stream is neutral and re-arms", testSilentStreamIsNeutralAndReArms},
+        {"stream gap re-runs warmup+drain on re-entry", testStreamGapReRunsWarmupAndDrainOnReEntry},
         {"rebase triggers redrain", testRebaseTriggersRedrain},
         {"stopped consumption is reported", testStoppedConsumptionIsReportedNotTrimmedAt},
         {"integral survives reset, level state does not", testIntegralSurvivesResetButLevelStateDoesNot},

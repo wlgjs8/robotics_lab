@@ -10,6 +10,8 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <chrono>
 
 #include <nlohmann/json.hpp>
 
@@ -507,7 +509,8 @@ bool testCoveredSubmicronDeviationStillComposes() {
 bool testFreshChunkResumesAfterActualJointLimitRefusal(bool fresh_execution = true,
                                                       bool profile_feedforward = true,
                                                       double linear_ff_gain = -1.0,
-                                                      double nf_linear_hz = 3.5) {
+                                                      double nf_linear_hz = 3.5,
+                                                      const RuckigFollowerConfig* selected_follower = nullptr) {
     Fixture f([=](DualArmConfig& cfg) {
         cfg.safety.init_motion_planner.enable = false;
         cfg.safety.self_collision.enable = false;
@@ -551,6 +554,10 @@ bool testFreshChunkResumesAfterActualJointLimitRefusal(bool fresh_execution = tr
             rf.af_damping_beta_lin = rf.af_damping_beta_ang = 1.0;
             rf.corner_velocity_scale = 1.0;
             rf.preview_projection_fault_policy = RuckigProjectionFaultPolicy::Warn;
+            if (selected_follower) {
+                rf.output_smd = selected_follower->output_smd;
+                rf.deadline_jerk_minimization = selected_follower->deadline_jerk_minimization;
+            }
         }
     }, {10.0, -20.0, 164.9, 5.0, 25.0, -15.0});
     require(std::abs(f.cfg.safety.q_max_deg[2] - 165.0) < 1e-9,
@@ -687,7 +694,7 @@ bool testFreshChunkResumesAfterActualJointLimitRefusal(bool fresh_execution = tr
     require(first_resume_stage_step_m < 2e-6 && first_resume_stage_step_rad < 2e-6 &&
             first_resume_joint_step_deg < 1e-5,
             "first recovery tick jumped from the held command");
-    if (linear_ff_gain < 0.0) {
+    if (linear_ff_gain < 0.0 && !selected_follower) {
         require(f.latest.right_sent_q_deg[2] < resumed_elbow_deg - 1e-4,
                 "fresh reachable chunk never resumed actual command motion away from the bound");
     } else {
@@ -701,7 +708,8 @@ bool testFreshChunkResumesAfterActualJointLimitRefusal(bool fresh_execution = tr
 }
 
 bool runCase(ArmId selected, bool rotation, bool fresh_execution = false,
-             double linear_ff_gain = -1.0, double nf_linear_hz = 3.5) {
+             double linear_ff_gain = -1.0, double nf_linear_hz = 3.5,
+             const RuckigFollowerConfig* selected_follower = nullptr) {
     ManualClock clock;
     auto cfg = fixtureConfig(selected, rotation);
     for (auto& profile : cfg.cartesian_control.tcp_pose_target_profiles) {
@@ -717,6 +725,10 @@ bool runCase(ArmId selected, bool rotation, bool fresh_execution = false,
                 smd.damping_ratio = 1.0;
                 smd.nf_linear_hz = nf_linear_hz;
                 smd.nf_angular_hz = 2.5;
+            }
+            if (selected_follower) {
+                profile.ruckig_follower.output_smd = selected_follower->output_smd;
+                profile.ruckig_follower.deadline_jerk_minimization = selected_follower->deadline_jerk_minimization;
             }
         }
     }
@@ -901,6 +913,133 @@ bool runCase(ArmId selected, bool rotation, bool fresh_execution = false,
     return true;
 }
 
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+bool testPreviewExecutionForceTareResume() {
+    Fixture f([](DualArmConfig& cfg) {
+        const auto root=std::filesystem::path(__FILE__).parent_path().parent_path();
+        const auto tracked=loadConfigFromYaml((root/"config/stack_real.yaml").string());
+        const auto& profiles=tracked.cartesian_control.tcp_pose_target_profiles;
+        const auto selected=std::find_if(profiles.begin(),profiles.end(),
+            [](const auto& p){return p.name=="flow_infer_preview";});
+        require(selected!=profiles.end(),"preview execution profile absent");
+        cfg.cartesian_control.tcp_pose_target_profiles.push_back(*selected);
+        // Explicit synthetic force-filter corner makes a double prepare visible
+        // numerically. Motion caps and the tracked preview profile are unchanged.
+        cfg.force_control.wrench_filter_hz=8.0;
+    });
+    const auto plain=f.command(ControlMode::Hold,ControlMode::TcpPoseTarget);
+    f.warm(plain,.896);
+    require(f.latest.right_force_control.deviation_norm_m>.0005,
+            "preview force fixture has no standing overlay");
+    uint64_t wire=0;
+    const auto publishZero=[&] {
+        auto packet=nlohmann::json::parse(zeroDeltaChunk(ArmId::Right,f.rightSent()));
+        packet["seq"]=++wire;packet["host_time_ns"]=nowSteadyNs();
+        const auto body=packet.dump();
+        require(f.receiver.acceptPacket(body.data(),body.size()),"preview fixture chunk rejected");
+    };
+    const auto pacedTick=[&](const DualArmCommand& command) {
+        f.tick(command);
+        // The actual asynchronous solver gets wall time; the in-memory plant
+        // remains stepped only by the explicit production servo tick above.
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    };
+    auto preview=f.command(ControlMode::Hold,ControlMode::TcpPoseTarget,"flow_infer_preview");
+    publishZero();
+    for(int i=0;i<40&&!f.latest.right_cartesian_solve.preview_execution.active;++i) pacedTick(preview);
+    require(f.latest.right_cartesian_solve.preview_execution.active,
+            "force-covered preview never accepted its first command");
+    require(f.latest.right_force_control.covered&&f.latest.right_force_control.compose_applied,
+            "preview bypassed the covered force overlay");
+    const auto prior=f.latest.right_force_control.wrench_filtered_stand;
+    Wrench6D force;force.fz=1.792;f.right->setWrench(force);pacedTick(preview);
+    const auto& fc=f.latest.right_force_control;
+    const double dt=1./f.cfg.servo.rate_hz;
+    const double alpha=dt/(1./(2.*M_PI*f.cfg.force_control.wrench_filter_hz)+dt);
+    const Eigen::Vector3d old(prior.fx,prior.fy,prior.fz);
+    const Eigen::Vector3d raw(fc.wrench_stand.fx,fc.wrench_stand.fy,fc.wrench_stand.fz);
+    const Eigen::Vector3d actual(fc.wrench_filtered_stand.fx,fc.wrench_filtered_stand.fy,fc.wrench_filtered_stand.fz);
+    require((raw-old).norm()>.1,"force step was not observed by the production pipeline");
+    require((actual-(old+alpha*(raw-old))).norm()<1e-10,
+            "preview early preparation and overlay applied the force filter twice");
+
+    const auto old_epoch=f.latest.right_cartesian_solve.preview_execution.epoch;
+    const auto old_generation=f.latest.right_ft.bias_generation;
+    const auto old_resets=f.latest.right_force_control.reference_reset_count;
+    f.right->setWrench({});
+    auto init=f.command(ControlMode::Hold,ControlMode::JointTarget,"flow_infer_preview");
+    init.right.has_joint_target=true;init.right.q_target_deg=f.latest.right_sent_q_deg;
+    init.right.joint_target_profile=JointTargetProfile::InitMotion;
+    init.right.init_motion_request_id=907;
+    f.tick(init);
+    require(f.latest.init_motion_right.status=="done","preview InitMotion no-op did not complete");
+    require(!f.latest.right_cartesian_solve.preview_execution.active,
+            "InitMotion retained active preview authority");
+    require(f.latest.right_force_control.reference_reset_count==old_resets+1,
+            "preview InitMotion did not reset its force reference exactly once");
+    const Pose6D init_pose=f.rightSent();
+    for(int i=0;i<15;++i){f.tick(init);
+        require(f.latest.right_force_control.reference_reset_count==old_resets+1,
+                "retransmitted InitMotion reset preview force state twice");}
+    preview.right.tcp_target_stand=init_pose;
+    bool saw_invalid=false,recovered=false;
+    double maximum_wait_drift=0.;
+    // Settle and recovery each require 250 ticks in this fixture, and the
+    // production tare accumulator itself requires another 250 samples. Keep
+    // a bounded margin for stage transitions; do not shorten any real wait.
+    const int lifecycle_ticks=static_cast<int>(std::ceil(
+        (f.cfg.force_torque.auto_tare_after_init_motion.settle_sec+
+         f.cfg.force_control.coverage_recover_sec)*f.cfg.servo.rate_hz))+250+100;
+    for(int i=0;i<lifecycle_ticks;++i){
+        f.tick(preview);saw_invalid=saw_invalid||!f.latest.right_ft.bias_valid;
+        const auto& solve=f.latest.right_cartesian_solve;
+        require(!solve.preview_execution.active&&!solve.follower_active,
+                "pre-Init cached chunk revived while tare/coverage/fresh-frame waited");
+        maximum_wait_drift=std::max(maximum_wait_drift,math::positionDistance(f.rightSent(),init_pose));
+        // A planner wait deliberately publishes joint Hold, so no overlay is
+        // composed and `covered` remains false. The pre-conversion eligibility
+        // latch is the correct recovery predicate before a fresh frame arrives.
+        if(f.latest.right_force_control.reference_strip_enabled&&f.latest.right_ft.bias_valid&&
+           f.latest.right_ft.bias_generation>old_generation){recovered=true;break;}
+    }
+    if(!saw_invalid||!recovered)std::cerr<<"preview tare diagnostic invalid="<<saw_invalid
+        <<" recovered="<<recovered<<" bias_valid="<<f.latest.right_ft.bias_valid
+        <<" generation="<<f.latest.right_ft.bias_generation<<" prior_generation="<<old_generation
+        <<" covered="<<f.latest.right_force_control.covered
+        <<" coverage_streak="<<f.latest.right_force_control.coverage_recover_streak
+        <<" coverage_needed="<<f.latest.right_force_control.coverage_recover_needed
+        <<" tare_state="<<f.latest.right_ft.tare_state
+        <<" coverage_reason="<<f.latest.right_force_control.coverage_reason
+        <<" strip_enabled="<<f.latest.right_force_control.reference_strip_enabled
+        <<" command_mode="<<toString(f.latest.command.right.mode)
+        <<" has_tcp="<<f.latest.command.right.has_tcp_target
+        <<" requested_mode="<<toString(preview.right.mode)
+        <<" requested_tcp="<<preview.right.has_tcp_target
+        <<" init_status="<<f.latest.init_motion_right.status<<'\n';
+    require(saw_invalid&&recovered,"preview real tare invalidation/commit/coverage lifecycle incomplete");
+    require(maximum_wait_drift<2e-5,"preview wait repeatedly subtracted the frozen force reference");
+    publishZero();
+    for(int i=0;i<40&&!f.latest.right_cartesian_solve.preview_execution.active;++i) pacedTick(preview);
+    require(f.latest.right_cartesian_solve.preview_execution.active,
+            "fresh post-tare chunk did not resume preview execution");
+    require(f.latest.right_force_control.covered&&f.latest.right_force_control.reference_strip_enabled,
+            "post-tare preview did not restore the actual covered overlay");
+    // The massless zero-wrench fixture has zero deviation after tare. The law
+    // runs, but compose_applied correctly stays false for an identity transform.
+    require(f.latest.right_force_control.deviation_norm_m<1e-12,
+            "post-tare preview restored an old standing force deviation");
+    require(f.latest.right_cartesian_solve.preview_execution.epoch>old_epoch,
+            "post-Init preview retained its previous epoch");
+    require(math::positionDistance(f.rightSent(),init_pose)<2e-5,
+            "post-tare zero chunk jumped from the held pose");
+    require(!f.latest.right_cartesian_solve.follower_output_smd_active,
+            "new preview profile unexpectedly activated output low-pass");
+    std::cout<<"preview force: single filter update, accepted covered execution, InitMotion dedup, "
+             <<"tare/coverage wait, fresh-epoch resume; maximum wait drift um="<<maximum_wait_drift*1e6<<'\n';
+    return true;
+}
+#endif
+
 void testLinearConditionerLifecycle(double nf_linear_hz, double linear_ff_gain) {
     require(std::isfinite(nf_linear_hz) && nf_linear_hz > 0.0 &&
             std::isfinite(linear_ff_gain) && linear_ff_gain >= 0.0 && linear_ff_gain <= 1.0,
@@ -923,6 +1062,11 @@ void testLinearConditionerCandidates() {
 
 int main(int argc, char** argv) {
     try {
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+        if(argc==2&&std::string(argv[1])=="--preview-execution-only"){
+            testPreviewExecutionForceTareResume();return 0;
+        }
+#endif
         if (argc == 2 && std::string(argv[1]) == "--telemetry-bypass-only") {
             testSampledFollowerTelemetryClearsOnEmergencyStopBypass();
             return 0;
@@ -956,6 +1100,18 @@ int main(int argc, char** argv) {
         testFreshChunkResumesAfterActualJointLimitRefusal();
         testFreshChunkResumesAfterActualJointLimitRefusal(true, false);
         testLinearConditionerCandidates();
+        // Load only the selected motion conditioning knobs into the existing
+        // memory-plant fixtures. Parsing this YAML never constructs a backend.
+        const auto stack = loadConfigFromYaml((std::filesystem::path(__FILE__).parent_path().parent_path() /
+                                               "config/stack_real.yaml").string());
+        const auto& profiles = stack.cartesian_control.tcp_pose_target_profiles;
+        const auto selected = std::find_if(profiles.begin(), profiles.end(),
+            [](const auto& p) { return p.name == "flow_infer_fresh"; });
+        require(selected != profiles.end(), "selected real follower profile missing");
+        const auto& rf = selected->ruckig_follower;
+        runCase(ArmId::Left, false, true, -1.0, 3.5, &rf);
+        runCase(ArmId::Right, true, true, -1.0, 3.5, &rf);
+        testFreshChunkResumesAfterActualJointLimitRefusal(true, false, -1.0, 3.5, &rf);
         std::cout << "force overlay resume regressions passed\n";
         return 0;
     } catch (const std::exception& e) {

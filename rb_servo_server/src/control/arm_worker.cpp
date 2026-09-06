@@ -569,9 +569,13 @@ void ArmWorker::run() {
     // transient is not charged to the first period.
     const bool owns_cadence = options_.send_period_ns > 0;
     uint64_t next_send_ns = 0;
+    // Edge tracker for setSendSuppressed: the stale-setpoint drop below must happen
+    // once, when suppression STARTS, not on every tick of a long teaching session.
+    bool suppressed_prev = false;
     while (true) {
         std::optional<SendServoJRequest> command;
         std::optional<ArmWorkerCommand> lifecycle_command;
+        bool suppressed = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if (stop_requested_) {
@@ -582,9 +586,38 @@ void ArmWorker::run() {
                 stopBackendBeforeExit(backend_ready);
                 return;
             }
+            suppressed = send_suppressed_.load(std::memory_order_relaxed);
+            if (suppressed && !suppressed_prev) {
+                // SUPPRESSION ENTRY. Drop every cached setpoint: the mailbox, the
+                // interpolator ring and the last-sent point all describe the pose the
+                // arm is about to be hand-moved away from. Keeping them would let the
+                // first ticks after release interpolate the arm BACK to that pose --
+                // the snap the loop's resyncArmAfterFreedrive exists to prevent, put
+                // back on the wire downstream of every loop-side safety clamp.
+                //
+                // Done on ENTRY, not on release: on release the loop resumes pushing
+                // in the same tick it clears the flag, and a release-edge reset would
+                // race that push away.
+                setpoint_interp_.reset();
+                last_servo_j_.reset();
+                pending_servo_j_.reset();
+                // Republish: worker_interp_active is otherwise only refreshed from
+                // inside the interpolator dispatch, which does not run while
+                // suppressed -- so the CSV would keep reporting an active
+                // interpolator for the whole teaching session with a quiet wire.
+                const auto& it = setpoint_interp_.telemetry();
+                telemetry_.worker_interp_active = it.active;
+                telemetry_.worker_interp_delay_setpoints = it.delay_setpoints;
+            }
+            suppressed_prev = suppressed;
             if (!lifecycle_queue_.empty()) {
+                // Lifecycle commands run even while the wire is suppressed: this is
+                // the path freedrive_teach_on/off itself takes.
                 lifecycle_command = lifecycle_queue_.front();
                 lifecycle_queue_.pop_front();
+            } else if (suppressed) {
+                // No servo_j this tick. The cadence still ticks and the queue-sync
+                // law is still stepped below.
             } else if (owns_cadence && options_.interpolate_setpoints &&
                        setpoint_interp_.hasSetpoint()) {
                 // Rate conversion: sample the pushed setpoint stream at THIS
@@ -713,6 +746,24 @@ void ArmWorker::run() {
             }
         }
 
+        if (owns_cadence && suppressed && !lifecycle_command.has_value()) {
+            // A CADENCE TICK WITH THE WIRE SUPPRESSED. Step the law anyway, with
+            // streaming=false: the controller drops back to Idle and re-runs
+            // warmup+drain against the REAL queue on the next stream entry, instead
+            // of resuming on a pre-gap fill and a wound-up integral against a queue
+            // that emptied while the operator was hand-guiding. Skipping the step
+            // instead would latch the law (Warmup forever, measured 2026-08-26).
+            QueueSyncController::Observation obs;
+            obs.streaming = false;
+            obs.fill_valid = false;
+            obs.fill = -1;
+            obs.rback_sequence = 0;
+            obs.now_ns = nowSteadyNs();
+            const QueueSyncDecision decision = queue_sync_.step(obs);
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_sync_decision_ = decision;
+        }
+
         const BackendResult<RobotState> read_result = backend_->readState();
         updateStartupResultPhase("read_state_returned", read_result);
         storeReadResult(read_result, nowSteadyNs());
@@ -766,6 +817,10 @@ void ArmWorker::run() {
             }
         }
     }
+}
+
+void ArmWorker::setSendSuppressed(bool suppressed) {
+    send_suppressed_.store(suppressed, std::memory_order_relaxed);
 }
 
 QueueSyncDecision ArmWorker::queueSyncDecision() const {

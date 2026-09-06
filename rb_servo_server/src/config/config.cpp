@@ -1,5 +1,7 @@
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/kinematics/dh_calibration.hpp"
+#include "rb_servo/network/chunk_frame_receiver.hpp"
+#include "rb_servo/control/preview_execution_worker.hpp"
 
 #include <arpa/inet.h>
 
@@ -232,6 +234,7 @@ void parseFollowerOutputSmdConfig(
     if (!out) return;
     validateAllowedKeys(node, {
         "enable",
+        "mode",
         "nf_linear_hz",
         "nf_angular_hz",
         "damping_ratio",
@@ -242,6 +245,12 @@ void parseFollowerOutputSmdConfig(
     }, path);
     if (has(node, "enable")) {
         out->enable = asBool(node["enable"], path + ".enable");
+    }
+    if (has(node, "mode")) {
+        const auto mode = node["mode"].as<std::string>();
+        if (mode == "legacy_smd") out->mode = FollowerOutputSmdMode::LegacySmd;
+        else if (mode == "position_lowpass2") out->mode = FollowerOutputSmdMode::PositionLowpass2;
+        else throw std::runtime_error(path + ".mode must be legacy_smd or position_lowpass2");
     }
     if (has(node, "nf_linear_hz")) {
         out->nf_linear_hz = asDouble(node["nf_linear_hz"], path + ".nf_linear_hz");
@@ -268,6 +277,77 @@ void parseFollowerOutputSmdConfig(
     }
 }
 
+void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path,
+                                 PreviewExecutionConfig* out) {
+    validateAllowedKeys(node, {"enable", "tracker", "cursor", "replan_period_sec",
+        "splice_lead_sec", "max_result_age_sec", "worker_poll_period_sec", "max_source_rows"}, path);
+    if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
+    const auto require = [](const YAML::Node& section, const char* key, const std::string& at) {
+        if (!has(section, key)) fail(at + "." + key + " is required when preview_execution.enable=true", section);
+    };
+    if (out->enable) {
+        for (const char* key : {"tracker", "cursor", "replan_period_sec", "splice_lead_sec",
+                               "max_result_age_sec", "worker_poll_period_sec", "max_source_rows"})
+            require(node, key, path);
+    }
+    for (const auto& field : std::vector<std::pair<const char*, double*>>{
+             {"replan_period_sec", &out->replan_period_sec}, {"splice_lead_sec", &out->splice_lead_sec},
+             {"max_result_age_sec", &out->max_result_age_sec},
+             {"worker_poll_period_sec", &out->worker_poll_period_sec}}) {
+        if (has(node, field.first)) *field.second = asDouble(node[field.first], path + "." + field.first);
+    }
+    if (has(node, "max_source_rows")) out->max_source_rows = asInt(node["max_source_rows"], path + ".max_source_rows");
+    if (has(node, "tracker")) {
+        const auto sec = node["tracker"];
+        const auto at = path + ".tracker";
+        validateAllowedKeys(sec, {"planning_dt_sec", "horizon_steps", "linear_tracking_scale_m",
+            "angular_tracking_scale_rad", "jerk_weight", "jerk_difference_weight",
+            "linear_tracking_tolerance_m", "angular_tracking_tolerance_rad",
+            "max_linear_tracking_slack_m", "max_angular_tracking_slack_rad",
+            "max_reference_chart_angle_rad", "feasibility_tolerance",
+            "max_working_set_recalculations", "max_solve_time_sec"}, at);
+        auto& t = out->tracker;
+        for (const auto& field : std::vector<std::pair<const char*, double*>>{
+                 {"planning_dt_sec", &t.planning_dt_sec}, {"linear_tracking_scale_m", &t.linear_tracking_scale_m},
+                 {"angular_tracking_scale_rad", &t.angular_tracking_scale_rad}, {"jerk_weight", &t.jerk_weight},
+                 {"jerk_difference_weight", &t.jerk_difference_weight},
+                 {"linear_tracking_tolerance_m", &t.linear_tracking_tolerance_m},
+                 {"angular_tracking_tolerance_rad", &t.angular_tracking_tolerance_rad},
+                 {"max_linear_tracking_slack_m", &t.max_linear_tracking_slack_m},
+                 {"max_angular_tracking_slack_rad", &t.max_angular_tracking_slack_rad},
+                 {"max_reference_chart_angle_rad", &t.max_reference_chart_angle_rad},
+                 {"feasibility_tolerance", &t.feasibility_tolerance}, {"max_solve_time_sec", &t.max_solve_time_sec}}) {
+            if (out->enable) require(sec, field.first, at);
+            if (has(sec, field.first)) *field.second = asDouble(sec[field.first], at + "." + field.first);
+        }
+        for (const char* key : {"horizon_steps", "max_working_set_recalculations"})
+            if (out->enable) require(sec, key, at);
+        if (has(sec, "horizon_steps")) {
+            const int count = asInt(sec["horizon_steps"], at + ".horizon_steps");
+            if (count < 1 || count > 30) fail(at + ".horizon_steps must be in [1, 30]", sec);
+            t.horizon_steps = static_cast<std::size_t>(count);
+        }
+        if (has(sec, "max_working_set_recalculations"))
+            t.max_working_set_recalculations = asInt(sec["max_working_set_recalculations"], at + ".max_working_set_recalculations");
+    }
+    if (has(node, "cursor")) {
+        const auto sec = node["cursor"];
+        const auto at = path + ".cursor";
+        validateAllowedKeys(sec, {"enable", "max_backlog_sec", "catchup_time_sec", "max_rate",
+            "translation_velocity_floor", "angular_velocity_floor"}, at);
+        if (out->enable) require(sec, "enable", at);
+        if (has(sec, "enable")) out->cursor.enable = asBool(sec["enable"], at + ".enable");
+        for (const auto& field : std::vector<std::pair<const char*, double*>>{
+                 {"max_backlog_sec", &out->cursor.max_backlog_sec},
+                 {"catchup_time_sec", &out->cursor.catchup_time_sec}, {"max_rate", &out->cursor.max_rate},
+                 {"translation_velocity_floor", &out->cursor.translation_velocity_floor},
+                 {"angular_velocity_floor", &out->cursor.angular_velocity_floor}}) {
+            if (out->enable) require(sec, field.first, at);
+            if (has(sec, field.first)) *field.second = asDouble(sec[field.first], at + "." + field.first);
+        }
+    }
+}
+
 void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, RuckigFollowerConfig* out) {
     if (!out) return;
     validateAllowedKeys(node, {
@@ -286,6 +366,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "reserve_steps",
         "smoothing_window",
         "output_smd",
+        "preview_execution",
         "af_damping_beta",
         "af_damping_beta_lin",
         "af_damping_beta_ang",
@@ -311,6 +392,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "core_time_stretch_max_ratio",
         "fresh_chunk_replan",
         "continuous_hold_resume",
+        "deadline_jerk_minimization",
         "plan_leash_enable",
         "plan_leash_start_m",
         "plan_leash_start_rad",
@@ -385,6 +467,16 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         parseFollowerOutputSmdConfig(
             node["output_smd"], path + ".output_smd", &out->output_smd);
     }
+    if (has(node, "preview_execution")) {
+        parsePreviewExecutionConfig(node["preview_execution"], path + ".preview_execution", &out->preview_execution);
+    }
+    auto& preview_tracker = out->preview_execution.tracker;
+    preview_tracker.max_linear_velocity_m_s = out->max_linear_velocity_m_s;
+    preview_tracker.max_linear_acceleration_m_s2 = out->max_linear_accel_m_s2;
+    preview_tracker.max_linear_jerk_m_s3 = out->max_linear_jerk_m_s3;
+    preview_tracker.max_angular_velocity_rad_s = out->max_angular_velocity_rad_s;
+    preview_tracker.max_angular_acceleration_rad_s2 = out->max_angular_accel_rad_s2;
+    preview_tracker.max_angular_jerk_rad_s3 = out->max_angular_jerk_rad_s3;
     // Legacy scalar first so the per-class keys below can override it. A config that only sets
     // `af_damping_beta` therefore keeps its exact previous behavior on both axis classes.
     if (has(node, "af_damping_beta")) {
@@ -512,6 +604,9 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     }
     if (has(node, "continuous_hold_resume")) {
         out->continuous_hold_resume = asBool(node["continuous_hold_resume"], path + ".continuous_hold_resume");
+    }
+    if (has(node, "deadline_jerk_minimization")) {
+        out->deadline_jerk_minimization = asBool(node["deadline_jerk_minimization"], path + ".deadline_jerk_minimization");
     }
     if (has(node, "plan_leash_enable")) {
         out->plan_leash_enable = asBool(node["plan_leash_enable"], path + ".plan_leash_enable");
@@ -1011,6 +1106,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "operation_mode",
         "command_timeout_sec",
         "initial_q_deg",
+        "payload",
         "speed_bar",
         "servo_t1_sec",
         "servo_t2_sec",
@@ -1040,6 +1136,34 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     if (has(sec, "command_timeout_sec")) cfg->command_timeout_sec = asDouble(sec["command_timeout_sec"], path + ".command_timeout_sec");
 
     if (has(sec, "initial_q_deg")) cfg->initial_q_deg = parseJointArray(sec["initial_q_deg"], path + ".initial_q_deg");
+    if (has(sec, "payload")) {
+        const YAML::Node p = sec["payload"];
+        if (!p.IsMap()) fail(path + ".payload must be a map", p);
+        validateAllowedKeys(p, {"enable", "mass_kg", "com_mm"}, path + ".payload");
+        auto& pl = cfg->payload;
+        if (has(p, "enable")) pl.enable = asBool(p["enable"], path + ".payload.enable");
+        if (has(p, "mass_kg")) pl.mass_kg = asDouble(p["mass_kg"], path + ".payload.mass_kg");
+        if (has(p, "com_mm")) {
+            const YAML::Node n = p["com_mm"];
+            if (!n.IsSequence() || n.size() != 3) {
+                fail(path + ".payload.com_mm must be 3 values [x, y, z] in mm", n);
+            }
+            for (std::size_t i = 0; i < 3; ++i) {
+                pl.com_mm[i] = asDouble(n[i], path + ".payload.com_mm");
+            }
+        }
+        if (pl.enable) {
+            // Fail closed on a gravity model the box would act on. A negative or
+            // non-finite mass is not a tuning mistake to warn about: the arm holds
+            // itself up with this number the instant free-drive engages.
+            if (!std::isfinite(pl.mass_kg) || pl.mass_kg < 0.0) {
+                fail(path + ".payload.mass_kg must be finite and >= 0", p);
+            }
+            for (const double c : pl.com_mm) {
+                if (!std::isfinite(c)) fail(path + ".payload.com_mm must be finite", p);
+            }
+        }
+    }
     if (has(sec, "speed_bar")) cfg->speed_bar = asDouble(sec["speed_bar"], path + ".speed_bar");
     applyDeprecatedDoubleAlias(sec, "servo_t1_sec", "servo_time_sec", path, &cfg->servo_t1_sec);
     applyDeprecatedDoubleAlias(sec, "servo_t2_sec", "servo_lookahead_sec", path, &cfg->servo_t2_sec);
@@ -1293,6 +1417,9 @@ double workerReadPeriodFromRate(double rate_hz, const std::string& name) {
 // Plan-clock pacing keys (core time-stretch + divergence leash), fail-closed: an
 // enabled gate with an unusable parameter is a configuration error, not a default.
 void validateRuckigFollowerPacing(const RuckigFollowerConfig& rf, const std::string& path) {
+    if (rf.deadline_jerk_minimization && !rf.fresh_chunk_replan) {
+        throw std::runtime_error(path + ": deadline_jerk_minimization requires fresh_chunk_replan=true");
+    }
     if ((rf.fresh_chunk_replan || rf.continuous_hold_resume) &&
         (!rf.enable || rf.controller != RuckigFollowerController::DeltaPreview)) {
         throw std::runtime_error(
@@ -2565,12 +2692,96 @@ void validateConfig(const DualArmConfig& cfg) {
         if (rf.smoothing_window < 1 || rf.smoothing_window % 2 == 0) {
             throw std::runtime_error(path + ".smoothing_window must be an odd integer >= 1");
         }
+        if (rf.preview_execution.enable) {
+            const auto& p = rf.preview_execution;
+            const auto& t = p.tracker;
+            const std::string at = path + ".preview_execution";
+#if !defined(RB_SERVO_ENABLE_PREVIEW_EXECUTION)
+            throw std::runtime_error(at + " requires a build with RB_SERVO_ENABLE_PREVIEW_EXECUTION=ON");
+#endif
+            if (!rf.enable || rf.controller != RuckigFollowerController::DeltaPreview ||
+                !rf.fresh_chunk_replan || !rf.continuous_hold_resume ||
+                !rf.plan_leash_enable || rf.output_smd.enable ||
+                rf.fallback_policy == RuckigFollowerFallbackPolicy::Smd ||
+                !p.cursor.enable) {
+                throw std::runtime_error(at + " requires enabled fresh delta_preview, continuous_hold_resume, "
+                    "plan_leash and cursor, output_smd disabled and no SMD fallback");
+            }
+            const auto positive = [&](double value, const char* key) {
+                validatePositiveFinite(value, at + "." + key);
+            };
+            const auto nonnegative = [&](double value, const char* key) {
+                if (!std::isfinite(value) || value < 0.0)
+                    throw std::runtime_error(at + "." + key + " must be finite and >= 0");
+            };
+            positive(p.replan_period_sec, "replan_period_sec");
+            positive(p.splice_lead_sec, "splice_lead_sec");
+            positive(p.max_result_age_sec, "max_result_age_sec");
+            positive(p.worker_poll_period_sec, "worker_poll_period_sec");
+            positive(t.planning_dt_sec, "tracker.planning_dt_sec");
+            positive(t.linear_tracking_scale_m, "tracker.linear_tracking_scale_m");
+            positive(t.angular_tracking_scale_rad, "tracker.angular_tracking_scale_rad");
+            positive(t.jerk_weight, "tracker.jerk_weight");
+            nonnegative(t.jerk_difference_weight, "tracker.jerk_difference_weight");
+            nonnegative(t.linear_tracking_tolerance_m, "tracker.linear_tracking_tolerance_m");
+            nonnegative(t.angular_tracking_tolerance_rad, "tracker.angular_tracking_tolerance_rad");
+            nonnegative(t.max_linear_tracking_slack_m, "tracker.max_linear_tracking_slack_m");
+            nonnegative(t.max_angular_tracking_slack_rad, "tracker.max_angular_tracking_slack_rad");
+            positive(t.max_reference_chart_angle_rad, "tracker.max_reference_chart_angle_rad");
+            positive(t.feasibility_tolerance, "tracker.feasibility_tolerance");
+            positive(t.max_solve_time_sec, "tracker.max_solve_time_sec");
+            const double servo_period = 1.0 / cfg.servo.rate_hz;
+            const double horizon = t.horizon_steps * t.planning_dt_sec;
+            if (t.horizon_steps < 1 || t.horizon_steps > control::PreviewTrajectoryTracker::kMaxHorizonSteps ||
+                !std::isfinite(horizon) || horizon < 0.2 || horizon > 0.3)
+                throw std::runtime_error(at + ".tracker horizon must be in [0.2, 0.3] seconds with at most 30 steps");
+            if (t.max_reference_chart_angle_rad > 1.4 || t.feasibility_tolerance > 1e-4 ||
+                t.max_working_set_recalculations < 1 || t.max_working_set_recalculations > 1000)
+                throw std::runtime_error(at + ".tracker chart, feasibility or working-set bounds exceed implementation limits");
+            if (p.replan_period_sec < servo_period || p.splice_lead_sec < servo_period ||
+                p.worker_poll_period_sec >= p.splice_lead_sec ||
+                p.max_result_age_sec <= p.splice_lead_sec + p.replan_period_sec ||
+                p.max_result_age_sec > horizon || t.max_solve_time_sec > p.max_result_age_sec)
+                throw std::runtime_error(at + " has inconsistent servo, worker, splice, replan or expiry timing");
+            if (p.max_source_rows < 1 || p.max_source_rows > ChunkFrameReceiver::kMaxSteps)
+                throw std::runtime_error(at + ".max_source_rows must be in [1, 64] (chunk wire limit)");
+            const auto& c = p.cursor;
+            positive(c.max_backlog_sec, "cursor.max_backlog_sec");
+            positive(c.catchup_time_sec, "cursor.catchup_time_sec");
+            positive(c.max_rate, "cursor.max_rate");
+            positive(c.translation_velocity_floor, "cursor.translation_velocity_floor");
+            positive(c.angular_velocity_floor, "cursor.angular_velocity_floor");
+            // The fixed worker snapshot has 128 history slots, including both
+            // endpoints and one spare tick. This is a storage bound, not a motion cap.
+            if (c.max_rate < 1.0 || std::ceil(c.max_backlog_sec / servo_period) + 2.0 >
+                control::PreviewExecutionRequest::kHistoryCapacity)
+                throw std::runtime_error(at + ".cursor rate or backlog exceeds the bounded history contract");
+            const double angular_v = rf.max_angular_velocity_rad_s;
+            const double angular_a = rf.max_angular_accel_rad_s2 - 0.5 * angular_v * angular_v;
+            const double angular_j = rf.max_angular_jerk_rad_s3 -
+                2.5 * angular_v * angular_a - (5.0 / 6.0) * angular_v * angular_v * angular_v;
+            if (angular_a <= 0.0 || angular_j <= 0.0 || !std::isfinite(angular_a) || !std::isfinite(angular_j))
+                throw std::runtime_error(at + " physical angular limits leave no conservative tangent budget");
+        }
         const auto validate_output_nf = [&path](double value, const char* field) {
             if (!std::isfinite(value) || value <= 0.5 || value >= 25.0) {
                 throw std::runtime_error(
                     path + ".output_smd." + field + " must be in (0.5, 25) Hz");
             }
         };
+        if (rf.output_smd.mode == FollowerOutputSmdMode::PositionLowpass2) {
+            if (!rf.output_smd.enable || !rf.enable ||
+                rf.controller != RuckigFollowerController::DeltaPreview || !rf.fresh_chunk_replan) {
+                throw std::runtime_error(path + ".output_smd.mode position_lowpass2 requires enabled output_smd and fresh delta_preview");
+            }
+            if (rf.output_smd.velocity_ff || rf.output_smd.profile_feedforward ||
+                rf.output_smd.velocity_ff_lpf_hz != 0.0 || rf.output_smd.velocity_ff_linear_gain != 1.0) {
+                throw std::runtime_error(path + ".output_smd.mode position_lowpass2 requires velocity_ff=false, profile_feedforward=false, velocity_ff_lpf_hz=0 and velocity_ff_linear_gain=1");
+            }
+            if (!std::isfinite(rf.output_smd.damping_ratio) || rf.output_smd.damping_ratio < std::sqrt(0.5)) {
+                throw std::runtime_error(path + ".output_smd.damping_ratio must be >= sqrt(0.5) for position_lowpass2");
+            }
+        }
         validate_output_nf(rf.output_smd.nf_linear_hz, "nf_linear_hz");
         validate_output_nf(rf.output_smd.nf_angular_hz, "nf_angular_hz");
         if (!std::isfinite(rf.output_smd.velocity_ff_linear_gain) ||
@@ -4952,6 +5163,34 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
 
     std::cerr << "[INFO] loaded config: " << path << "\n";
     return cfg;
+}
+
+TcpPoseTargetProfileConfig selectTcpPoseTargetProfile(
+    const CartesianControlConfig& config,
+    const std::string& requested_profile,
+    bool* found
+) {
+    const std::string& default_name = config.tcp_pose_target_profile_default;
+    const bool aliased = requested_profile.empty() || requested_profile == "default";
+    const std::string name = aliased ? default_name : requested_profile;
+    const TcpPoseTargetProfileConfig* default_profile = nullptr;
+    for (const TcpPoseTargetProfileConfig& profile : config.tcp_pose_target_profiles) {
+        if (profile.name == name) {
+            if (found) *found = true;
+            return profile;
+        }
+        if (profile.name == default_name) default_profile = &profile;
+    }
+    if (found) *found = false;
+    // Unknown (or aliased-but-unconfigured) name: the configured default PROFILE keeps
+    // the SMD / follower dynamics the stack was tuned with. Only a config without a
+    // usable default at all falls back to the bare global blocks.
+    if (default_profile != nullptr) return *default_profile;
+    TcpPoseTargetProfileConfig fallback;
+    fallback.name = default_name.empty() ? "default" : default_name;
+    fallback.pose_track_smd = config.pose_track_smd;
+    fallback.ruckig_follower = config.ruckig_follower;
+    return fallback;
 }
 
 }  // namespace rb_servo

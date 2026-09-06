@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -21,7 +22,7 @@ double norm(const Vec6& v) { return std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z+v.rx*v.rx+
 double difference(const Vec6& a, const Vec6& b) {
   return norm({a.x-b.x,a.y-b.y,a.z-b.z,a.rx-b.rx,a.ry-b.ry,a.rz-b.rz});
 }
-CartesianChunkFollowerConfig config(bool fresh) {
+CartesianChunkFollowerConfig config(bool fresh, bool minimize_jerk=false) {
   CartesianChunkFollowerConfig c;
   c.lin={.45,12.,2000.}; c.ang={1.4,40.,4000.};
   c.window={0,8,4,1}; c.core_time_stretch_enable=true;c.core_time_stretch_max_ratio=4.;
@@ -29,6 +30,7 @@ CartesianChunkFollowerConfig config(bool fresh) {
   c.guard.corner_deadband_lin_m=.0003;c.guard.corner_deadband_ang_rad=.0005;
   c.guard.corner_velocity_scale=.25;
   c.fresh_chunk_replan=fresh;c.continuous_hold_resume=fresh;
+  c.deadline_jerk_minimization=minimize_jerk;
   return c;
 }
 Pose6D origin() { return math::poseFromSe3(pinocchio::SE3(
@@ -42,7 +44,122 @@ ChunkFrame frame(std::uint64_t seq, bool turn=false) {
   }
   return c;
 }
-void synthetic() {
+
+void deadlineJerkTests() {
+  GuardConfig guard;
+  guard.af_damping_beta_lin=1.;guard.af_damping_beta_ang=1.;
+  const std::array<AxisLimit,1> limits{{{.6,12.,2000.}}};
+  ChunkFollowerSegment<1> baseline(limits,policy_dt,guard,true);
+  ChunkFollowerSegment<1> candidate(limits,policy_dt,guard,true);
+  BoundarySample<1> target;target.pf={.0002};
+  baseline.seed({0.});candidate.seed({0.});
+  const auto original=baseline.solve(target,4*policy_dt);
+  const auto reduced=candidate.solve(target,4*policy_dt,true);
+  require(original.result==ruckig::Result::Working &&
+          reduced.result==ruckig::Result::Working,"deadline fixture solve failed");
+  require(reduced.jerk_scale>0. && reduced.jerk_scale<.2 &&
+          reduced.jerk_search_calculations<=6,"unused deadline did not reduce jerk");
+  require(reduced.duration<=policy_dt+1e-9 &&
+          std::abs(reduced.chain_at_sec-original.chain_at_sec)<1e-9,
+          "jerk reduction extended the existing deadline");
+  require(reduced.target_velocity==original.target_velocity &&
+          reduced.target_acceleration==original.target_acceleration,
+          "jerk reduction altered guarded endpoint derivatives");
+  require(std::abs(candidate.p0()[0]-target.pf[0])<1e-10 &&
+          std::abs(candidate.v0()[0])<1e-10 && std::abs(candidate.a0()[0])<1e-10,
+          "jerk reduction failed to reach the original endpoint");
+
+  // For a rest-to-rest move with slack velocity/acceleration limits, the
+  // independent triangular-acceleration solution has displacement J*T^3/32.
+  // This checks the search against an analytic bound rather than its own
+  // feasibility predicate.
+  const double analytic_scale=32.*target.pf[0]/
+      (std::pow(policy_dt,3)*limits[0].j_max);
+  require(reduced.jerk_scale>=analytic_scale-1e-8 &&
+          reduced.jerk_scale<=analytic_scale+1./64.+1e-8,
+          "deadline search disagrees with analytic minimum jerk");
+  std::array<double,1> p{},v{},a{},previous_a{};
+  candidate.sample(0.,p,v,previous_a);
+  double maximum_jerk=0.;
+  constexpr int samples=4000;
+  const double h=policy_dt/samples;
+  for(int i=1;i<=samples;++i) {
+    candidate.sample(i*h,p,v,a);
+    maximum_jerk=std::max(maximum_jerk,std::abs(a[0]-previous_a[0])/h);
+    require(std::abs(v[0])<=limits[0].v_max+1e-9 &&
+            std::abs(a[0])<=limits[0].a_max+1e-9,"reduced profile exceeded v/a cap");
+    previous_a=a;
+  }
+  require(maximum_jerk<=reduced.jerk_scale*limits[0].j_max+1e-5,
+          "sampled jerk exceeded selected budget");
+
+  // Nonzero boundary v/a must remain physical and exact, including at t=0.
+  target.pf={.0011};target.vf={.033};target.af={.2};
+  baseline.seed({0.},{.03},{.1});candidate.seed({0.},{.03},{.1});
+  const auto moving_original=baseline.solve(target,4*policy_dt);
+  const auto moving=candidate.solve(target,4*policy_dt,true);
+  require(moving.result==ruckig::Result::Working && moving.jerk_scale<1.,
+          "moving boundary fixture has no reduced-jerk solution");
+  candidate.sample(0.,p,v,a);
+  require(std::abs(p[0])<1e-14 && std::abs(v[0]-.03)<1e-14 &&
+          std::abs(a[0]-.1)<1e-14,"deadline solve changed initial p/v/a");
+  require(moving.target_velocity==moving_original.target_velocity &&
+          moving.target_acceleration==moving_original.target_acceleration &&
+          std::abs(candidate.p0()[0]-target.pf[0])<1e-10 &&
+          std::abs(candidate.v0()[0]-.033)<1e-10 &&
+          std::abs(candidate.a0()[0]-.2)<1e-10,
+          "deadline solve changed nonzero terminal p/v/a");
+
+  // A deadline miss and a physical state needing full-authority braking must
+  // preserve the original trajectory byte-for-byte, not add a smoother delay.
+  for(const auto& initial:std::array<std::array<double,3>,2>{{
+      {{0.,0.,0.}},{{0.,.605,12.2}}}}) {
+    target.pf={.1};target.vf={0.};target.af={0.};
+    baseline.seed({initial[0]},{initial[1]},{initial[2]});
+    candidate.seed({initial[0]},{initial[1]},{initial[2]});
+    const auto before=baseline.solve(target,4*policy_dt);
+    const auto after=candidate.solve(target,4*policy_dt,true);
+    require(before.result==ruckig::Result::Working && after.result==before.result &&
+            after.duration==before.duration && after.jerk_scale==1. &&
+            after.jerk_search_calculations==0,"deadline fallback changed braking");
+    for(int i=0;i<=50;++i) {
+      std::array<double,1> bp{},bv{},ba{};
+      baseline.sample(i*.001,bp,bv,ba);candidate.sample(i*.001,p,v,a);
+      require(bp==p && bv==v && ba==a,"deadline fallback changed a sample");
+    }
+  }
+
+  // Benchmark six-axis solves in-process; informational, not a hardware timing
+  // acceptance criterion. The profile remains seeded identically each trial.
+  std::array<AxisLimit,6> six_limits;
+  for(int axis=0;axis<6;++axis) six_limits[axis]=axis<3?limits[0]:AxisLimit{1.4,40.,4000.};
+  ChunkFollowerSegment<6> six(six_limits,policy_dt,guard,true);
+  std::array<std::vector<double>,2> timings;
+  for(int mode=0;mode<2;++mode) for(int trial=0;trial<512;++trial) {
+    BoundarySample<6> sample;
+    for(int axis=0;axis<6;++axis)
+      sample.pf[axis]=.0001*(1.+.25*std::sin(.19*trial+axis));
+    six.seed({});
+    const auto start=std::chrono::steady_clock::now();
+    const auto solved=six.solve(sample,policy_dt,mode!=0);
+    const auto finish=std::chrono::steady_clock::now();
+    require(solved.result==ruckig::Result::Working,"timing fixture solve failed");
+    timings[mode].push_back(std::chrono::duration<double,std::micro>(finish-start).count());
+  }
+  nlohmann::json timing;
+  for(int mode=0;mode<2;++mode) {
+    auto& values=timings[mode];std::sort(values.begin(),values.end());
+    timing[mode?"deadline_search_us":"baseline_us"]={
+      {"p50",values[values.size()/2]},{"p95",values[values.size()*95/100]},
+      {"max",values.back()}};
+  }
+  timing["selected_jerk_scale"]=reduced.jerk_scale;
+  timing["analytic_minimum_scale"]=analytic_scale;
+  timing["sampled_max_jerk_m_s3"]=maximum_jerk;
+  std::cout<<"deadline jerk tests "<<timing.dump()<<'\n';
+}
+
+void synthetic(bool minimize_jerk=false) {
   // A coordinate change can expose an already-existing current-state limit
   // excess. Ruckig must brake from that state, not hide it with a sample jump.
   for(const std::array<double,2> initial :
@@ -72,7 +189,7 @@ void synthetic() {
     require(std::abs(a[0])<=40.+1e-8,"initial acceleration excess did not brake inside limit");
   }
   for(int phase=1;phase<17;++phase) {
-    auto cfg=config(true);CartesianChunkFollower f(cfg);
+    auto cfg=config(true,minimize_jerk);CartesianChunkFollower f(cfg);
     f.submitDeltaFrame(frame(1),origin());
     for(int i=0;i<phase;++i) f.tick(dt);
     const auto before=f.outputKinematics();
@@ -92,11 +209,25 @@ void synthetic() {
   CartesianChunkFollower old(config(false));old.submitDeltaFrame(frame(1),origin());
   old.tick(dt);old.tick(dt);old.submitDeltaFrame(frame(2,true),old.lastPose());old.tick(dt);
   require(old.diag().seg_wire_seq==1,"disabled fresh mode changed legacy segment consumption");
+  CartesianChunkFollower legacy(config(false)), ignored(config(false,true));
+  legacy.submitDeltaFrame(frame(1),origin());ignored.submitDeltaFrame(frame(1),origin());
+  for(int tick=0;tick<100;++tick) {
+    if(tick==5) {
+      legacy.submitDeltaFrame(frame(2,true),legacy.lastPose());
+      ignored.submitDeltaFrame(frame(2,true),ignored.lastPose());
+    }
+    const auto a=legacy.tick(dt),b=ignored.tick(dt);
+    require(a.x==b.x && a.y==b.y && a.z==b.z &&
+            difference(legacy.outputKinematics().velocity,
+                       ignored.outputKinematics().velocity)==0. &&
+            ignored.diag().last_solve.jerk_scale==1.,
+            "deadline flag affected disabled fresh path");
+  }
 
   // Test derivative continuity at an orientation tangent change as well as at
   // fresh-frame receipt. Near-limit changing-axis rotations can expose a
   // current-state clamp which a single-axis trajectory cannot.
-  CartesianChunkFollower rotating(config(true));
+  CartesianChunkFollower rotating(config(true,minimize_jerk));
   auto curved=frame(1);
   for(std::size_t i=0;i<curved.delta.size();++i) {
     curved.delta[i]={0,0,0,1.39*policy_dt,
@@ -117,7 +248,7 @@ void synthetic() {
   require(max_boundary_da<1e-2,"rotation tangent change clipped physical acceleration");
   double max_preempt_solve_dv=0,max_preempt_solve_da=0;
   for(int phase=1;phase<=100;++phase) {
-    CartesianChunkFollower candidate(config(true));
+    CartesianChunkFollower candidate(config(true,minimize_jerk));
     candidate.submitDeltaFrame(curved,origin());
     for(int i=0;i<phase;++i) candidate.tick(dt);
     const auto a=candidate.outputKinematics();
@@ -137,7 +268,7 @@ void synthetic() {
   // A fresh frame can arrive before EVERY segment boundary when the plan clock
   // is gated. The orientation tangent must still roll forward: otherwise the
   // principal logarithm of a future knot wraps at pi and reverses the plan.
-  CartesianChunkFollower preempted_rotation(config(true));
+  CartesianChunkFollower preempted_rotation(config(true,minimize_jerk));
   preempted_rotation.setPlanRateGate(.25);
   auto spin=frame(1);
   for(auto& d:spin.delta) d={0,0,0,0,0,.02};
@@ -171,7 +302,7 @@ void synthetic() {
   require(max_fresh_dv<1e-10 && max_fresh_da<1e-8,
           "repeated rotation preemption changed physical derivatives");
 
-  CartesianChunkFollower f(config(true));f.submitDeltaFrame(frame(1),origin());
+  CartesianChunkFollower f(config(true,minimize_jerk));f.submitDeltaFrame(frame(1),origin());
   for(int i=0;i<40;++i) f.tick(dt);
   const auto before=f.outputKinematics();
   f.setPlanRateGate(.25);
@@ -242,7 +373,8 @@ void synthetic() {
   for(int i=0;i<100;++i) f.holdAtSentReference(f.lastPose(),20.+i*.004);
   require(f.expireHoldPause(20.501,.5) && !f.active(),"held updates extended grace timer");
   std::cout<<"synthetic continuity/hold/gate/fold checks passed; body FD errors "
-           <<velocity_error<<" rad/s, "<<acceleration_error<<" rad/s2\n";
+           <<velocity_error<<" rad/s, "<<acceleration_error<<" rad/s2; deadline jerk="
+           <<minimize_jerk<<"\n";
 }
 
 // Optional recorded-delta replay. Input ticks include exogenous logged gate and
@@ -283,6 +415,7 @@ ReplaySettings replaySettings(bool fresh,const DualArmConfig* stack) {
   c.core_time_stretch_max_ratio=rf.core_time_stretch_max_ratio;
   c.fresh_chunk_replan=rf.fresh_chunk_replan;
   c.continuous_hold_resume=rf.continuous_hold_resume;
+  c.deadline_jerk_minimization=rf.deadline_jerk_minimization;
   out.hold_grace_sec=rf.hold_bounce_resume_sec;
   out.smd=rf.output_smd;
   return out;
@@ -297,9 +430,12 @@ nlohmann::json replayDynamics(const ReplaySettings& settings) {
     {"corner_deadband_lin_ang",{c.guard.corner_deadband_lin_m,c.guard.corner_deadband_ang_rad}},
     {"corner_velocity_scale",c.guard.corner_velocity_scale},{"eps_clamp",c.guard.eps_clamp},
     {"time_stretch_enabled",c.core_time_stretch_enable},
+    {"deadline_jerk_minimization",c.deadline_jerk_minimization},
     {"time_stretch_max_ratio",c.core_time_stretch_max_ratio},
     {"hold_grace_sec",settings.hold_grace_sec},
-    {"output_smd",{{"enable",s.enable},{"nf_linear_hz",s.nf_linear_hz},
+    {"output_smd",{{"enable",s.enable},
+      {"mode",s.mode==FollowerOutputSmdMode::PositionLowpass2?"position_lowpass2":"legacy_smd"},
+      {"nf_linear_hz",s.nf_linear_hz},
       {"nf_angular_hz",s.nf_angular_hz},{"damping_ratio",s.damping_ratio},
       {"velocity_ff",s.velocity_ff},{"velocity_ff_lpf_hz",s.velocity_ff_lpf_hz},
       {"velocity_ff_linear_gain",s.velocity_ff_linear_gain},
@@ -337,6 +473,8 @@ void replay(const std::string& path,const std::string& stack_path={},
   // Conditioner comparisons may differ; motion limits and guards must still
   // match. Both complete effective configurations are emitted with the results.
   fixed_dynamics.erase("output_smd");fresh_dynamics.erase("output_smd");
+  fixed_dynamics.erase("deadline_jerk_minimization");
+  fresh_dynamics.erase("deadline_jerk_minimization");
   require(fixed_dynamics==fresh_dynamics,
           "replay profiles differ in motion dynamics or guards");
   for(bool fresh:{false,true}) {
@@ -431,6 +569,8 @@ void replay(const std::string& path,const std::string& stack_path={},
         {"seg_step_index",follower.diag().seg_step_index},
         {"solve_corner",follower.diag().last_solve.corner},
         {"solve_duration",follower.diag().last_solve.duration},
+        {"jerk_scale",follower.diag().last_solve.jerk_scale},
+        {"jerk_search_calculations",follower.diag().last_solve.jerk_search_calculations},
         {"t_in_segment",follower.tInSegment()},{"segment_length",follower.segmentLengthSec()},
         {"blocked",blocked},{"hold_paused",follower.holdPaused()},
         {"outer_reset",reset_ticks>prior_resets},{"internal_reset",internal_reset},
@@ -460,7 +600,7 @@ void replay(const std::string& path,const std::string& stack_path={},
 }
 int main(int argc,char** argv) {
   try {
-    if(argc==1) synthetic();
+    if(argc==1) { deadlineJerkTests();synthetic();synthetic(true); }
     else if(argc>=3 && std::string(argv[1])=="--replay") {
       std::string stack_path,trace_path;
       for(int i=3;i<argc;i+=2) {

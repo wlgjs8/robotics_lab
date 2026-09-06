@@ -1624,6 +1624,53 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
             std::cerr << "[INFO] RbpodoBackend re-primed pipelined state channel after "
                       << "confirmed controller transition for " << impl_->config.name << "\n";
         }
+        // THE BOX'S GRAVITY MODEL. Pushed here, after the mode/activation transitions
+        // are confirmed, so it lands on a controller that is going to keep it.
+        //
+        // The SDK is explicit that this is program-scoped -- "the value set in this
+        // function returns to the default value after the program ends. If this
+        // function is not called in program-flow, the value set in the Setup page is
+        // used" -- so NOT calling it is not neutral, it silently delegates the arm's
+        // gravity compensation to whatever a pendant last stored. Measured 2026-09-06:
+        // with no payload ever pushed, the right arm dropped under gravity the first
+        // time direct teaching actually engaged.
+        //
+        // Failure is FATAL to initialize rather than a warning. A backend that came up
+        // "fine" while the box models a tool it does not have is the exact state that
+        // dropped the arm, and free-drive is one operator click away from it.
+        if (impl_->config.payload.enable) {
+            const auto& pl = impl_->config.payload;
+            rb::podo::ResponseCollector payload_responses;
+            const auto payload_ret = impl_->robot->set_payload_info(
+                payload_responses, pl.mass_kg,
+                pl.com_mm[0], pl.com_mm[1], pl.com_mm[2],
+                kInitializeCommandAckTimeoutSec);
+            if (impl_->config.disable_waiting_ack) {
+                rb::podo::ResponseCollector drained;
+                impl_->robot->flush(drained);
+            }
+            if (!payload_ret.is_success()) {
+                impl_->connected = false;
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    commandReturnError("set_payload_info", payload_ret, payload_responses),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
+            }
+            std::cerr << "[INFO] RbpodoBackend " << impl_->config.name
+                      << " pushed payload to the controller: mass=" << pl.mass_kg
+                      << " kg com=[" << pl.com_mm[0] << ", " << pl.com_mm[1] << ", "
+                      << pl.com_mm[2] << "] mm (flange frame); this is the gravity"
+                         " model free-drive holds the arm with\n";
+        } else {
+            // Say which owner is in force. Silence reads as "no payload", and the
+            // difference between "no tool" and "the pendant's tool" is the whole
+            // question when the arm sags.
+            std::cerr << "[INFO] RbpodoBackend " << impl_->config.name
+                      << " payload.enable is false: the CONTROLLER'S SETUP-PAGE payload"
+                         " governs its gravity compensation (direct teaching included)."
+                         " The server pushes nothing.\n";
+        }
         mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);

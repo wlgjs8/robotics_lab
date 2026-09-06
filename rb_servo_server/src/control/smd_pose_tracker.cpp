@@ -36,6 +36,36 @@ Eigen::Vector3d clampNorm(const Eigen::Vector3d& value, double max_norm, bool* c
 
 SmdPoseTracker::SmdPoseTracker(const PoseTrackSmdConfig& config) : config_(config) {}
 
+void SmdPoseTracker::reconfigure(const PoseTrackSmdConfig& config) {
+    config_ = config;
+    const double vmax = config_.max_linear_velocity_m_s;
+    const double v = velocity_.norm();
+    if (vmax > 0.0 && v > vmax) velocity_ *= vmax / v;
+    const double wmax = config_.max_angular_velocity_rad_s;
+    const double w = angular_velocity_.norm();
+    if (wmax > 0.0 && w > wmax) angular_velocity_ *= wmax / w;
+}
+
+Vec6 SmdPoseTracker::currentTwistStand() const {
+    const Eigen::Vector3d w_stand = rotation_ * angular_velocity_;
+    return Vec6{velocity_.x(), velocity_.y(), velocity_.z(), w_stand.x(), w_stand.y(), w_stand.z()};
+}
+
+void SmdPoseTracker::shift(const Eigen::Vector3d& dp_stand, const Eigen::Quaterniond& dR_stand) {
+    const Eigen::Quaterniond dR = dR_stand.normalized();
+    position_ += dp_stand;
+    goal_position_ += dp_stand;
+    previous_goal_position_ += dp_stand;
+    // angular_velocity_ lives in the body frame, which moves with rotation_: unchanged.
+    rotation_ = (dR * rotation_).normalized();
+    goal_rotation_ = (dR * goal_rotation_).normalized();
+    previous_goal_rotation_ = (dR * previous_goal_rotation_).normalized();
+    // previous_command_ is NOT moved: commands keep arriving in the nominal frame,
+    // so their deltas must keep integrating into the (shifted) goal unchanged. The
+    // shift is exactly the frozen overlay deviation the compose stage would have
+    // added; carrying it in the goal keeps the emitted pose continuous.
+}
+
 void SmdPoseTracker::reset(const Pose6D& pose) {
     if (active_) ++reanchor_count_;  // reset() while active == a genuine re-anchor
     // A re-anchor is a new pose context; the retained sigma described the old one.

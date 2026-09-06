@@ -30,6 +30,15 @@ namespace rb_servo::control {
 // The translation-only velocity_ff_linear_gain k changes (3s + wn) above to
 // ((1 + 2k)s + wn). Lower k trades ramp delay for less peaking/excitation;
 // angular FF, Ruckig limits and safety/force handling are independent of k.
+//
+// PositionLowpass2 is an explicit alternative: a position-only second-order
+// low-pass, discretized with the trapezoidal rule. For a fixed dt its scalar
+// response is the bilinear transform of wn^2/(s^2+2*zeta*wn*s+wn^2), hence has
+// unity DC gain and no gain above one when zeta >= sqrt(0.5). A finite ramp lag
+// 2*zeta/wn is the cost of causal attenuation. The same local-body dynamics are
+// used on SO(3); the scalar frequency guarantee is not a global nonlinear
+// orientation guarantee. Input v/a do not feed forward in this mode, but reset
+// still inherits the supplied physical output velocity for continuity.
 class FollowerOutputSmd {
 public:
     explicit FollowerOutputSmd(const FollowerOutputSmdConfig& config);
@@ -41,6 +50,8 @@ public:
     // With reference_body_derivatives=true, xi_ref uses stand linear /
     // reference-body angular velocity and xi_dot_ref matching wall-time
     // derivatives. False preserves the legacy untransported angular input.
+    // PositionLowpass2 consumes only reference poses after reset, and its output
+    // corresponds to the current input sample (not a dt-ahead prediction).
     // `xi_dot_ref` (optional): the reference ACCELERATION at this sample. With
     // config.profile_feedforward it is added as a feed-forward term and `xi_ref` is
     // used unfiltered, so a jerk-limited profile is tracked without lag.
@@ -61,11 +72,17 @@ public:
 
     bool active() const { return active_; }
     void deactivate() { active_ = false; }
+    // Stand-frame twist of the emitted state: what a Hold that retires this
+    // conditioner mid-motion hands to the pose-track SMD's release brake (2026-09-06).
+    Vec6 currentTwistStand() const {
+        const Eigen::Vector3d w_stand = rotation_ * angular_velocity_;
+        return Vec6{velocity_.x(), velocity_.y(), velocity_.z(), w_stand.x(), w_stand.y(), w_stand.z()};
+    }
 
     // Last-step distance from the pre-filter reference to the emitted pose.
     double lagPos() const { return lag_pos_m_; }
     double lagAng() const { return lag_ang_rad_; }
-    // Diagnostic view of the retained angular LPF state. In the opt-in FF-off
+    // Diagnostic view of the legacy mode's retained angular LPF state. In the opt-in FF-off
     // path this verifies equivalence to a filter expressed in a fixed frame.
     Eigen::Vector3d filteredAngularVelocityStand() const {
         return rotation_ * angular_velocity_ff_;
@@ -82,6 +99,10 @@ private:
     Eigen::Vector3d angular_velocity_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d velocity_ff_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d angular_velocity_ff_ = Eigen::Vector3d::Zero();
+    // The trapezoidal position-only path needs the previous input sample, which
+    // must follow every reset and common force/geometry gauge shift as well.
+    Eigen::Vector3d previous_reference_position_ = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond previous_reference_rotation_ = Eigen::Quaterniond::Identity();
     double lag_pos_m_ = 0.0;
     double lag_ang_rad_ = 0.0;
     bool reseeded_last_step_ = false;

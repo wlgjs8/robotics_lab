@@ -319,6 +319,15 @@ reference from the sensor reference origin to the TCP, applies the deadzone,
 and rotates the final value into tool/stand axes. Every published wrench key
 names both its axes and reference point.
 
+For pose-track SMD, CSV-only `*_smd_gate_*` fields record the gate snapshot
+actually consumed, before that tick's force update. The stream gate retains its
+last armed normal through scalar release while continuing to classify new
+contacts. `projection_joint_stage_trace_valid` and the per-arm
+`*_projection_{requested,solved,released}_q_deg_0..5` arrays separate geometric
+projection from its subsequent slew without changing either. Invalid joint-stage
+arrays are empty; invalid SMD-gate snapshots reset to defaults and must be ignored.
+See [UMI release behavior and diagnostic timing](reference/umi_stream_gate_release.md).
+
 The v2 calibration and law authority is `controller-manager`, specifically the
 operator-calibrated sensor/tool presets under
 `submodules/controller-manager/platforms/monkey/params-presets/`. Do not
@@ -1028,9 +1037,50 @@ legacy `pose_track_smd` tuning above. `velocity_ff_linear_gain` multiplies only 
 low-passed translation velocity in the damping term; it defaults to 1 and must be
 finite in [0, 1]. A non-default gain requires `velocity_ff: true` and
 `profile_feedforward: false`, preventing silently ignored settings. The real
-`flow_infer_fresh` profile explicitly selects 0.8; smooth and controller-sim retain
-their previous behavior. No Servo J, joint, IK, force or follower motion limit changes.
+`flow_infer_fresh` profile now selects `output_smd.mode: position_lowpass2`
+with velocity/profile FF off, neutral legacy gain 1 and LPF 0. This position-only
+Tustin filter uses 4.5/3.5 Hz and damping sqrt(0.5), with finite ramp lag.
+The default `legacy_smd`, smooth and controller-sim retain their prior behavior.
+New mode selection requires enabled fresh `delta_preview`; incompatible FF
+settings and damping below sqrt(0.5) are rejected. No Servo J, joint, IK, force
+or follower motion limit changes.
 See [selection and validation](reference/follower_output_conditioning.md).
+
+The explicit `flow_infer_preview` profile instead disables `output_smd` and
+selects `ruckig_follower.preview_execution`. Its capability includes
+`preview_execution: true` and a positive `gripper_state_max_age_sec`. Per-arm
+top-level `preview_execution` state and matching CSV fields expose its
+timestamp, epoch, plan/source IDs, status, cursor backlog/rate, plan age,
+accepted-command FK residuals, solver time and lifecycle counters. These
+residuals refer to the actually dispatched/enqueued joint target and its
+matching force gauge, not to measured robot tracking or controller ACK.
+
+The preview diagnostic extension distinguishes QP status from worker status,
+result admission and staged cancellation. Numeric status counters and static
+reason labels are paired with request/source/epoch/parent IDs and original
+generation, splice, completion and expiry timestamps. Worker completion counts
+include coalesced/dropped results; the separate result-check counts describe
+servo observations. A QP-success count alone is not an admitted-plan count.
+Latest admitted-plan time and interval expose starvation without reconstructing
+it from a changed plan ID. Angular diagnostics record the actual initial angular
+speed/acceleration norms, coupled-solve use and constraint-certificate maxima.
+
+Fold diagnostics distinguish `force`, `roi_floor`, `geometry_hold` and
+`unknown`. Booking and application times are monotonic nanoseconds. Translation
+is an additive stand-frame offset, rotation is a left-applied quaternion in xyzw
+order. The cumulative gauge resets with the execution epoch; lifecycle counts
+remain cumulative for that executor. The last-fold record is not a complete
+event stream when more than one fold occurs in a tick; cumulative gauge and
+cause counts preserve that distinction. Geometry cause bits describe safety
+participation: collision correction=1, geometric row in-band/cutting=2,
+IK branch throttle=4, legacy collision booking=8. They do not assign each
+micrometre of correction to a particular constraint row.
+
+`active` is false while waiting, braking or faulted. A braking executor may
+still send bounded stop samples through ordinary IK/safety. Policy gripper
+commands require fresh active execution telemetry. The new integration's
+qualification status and stop limitations are documented in
+[preview trajectory execution](reference/preview_trajectory_execution.md).
 
 CSV `*_follower_prefilter_stand_*` now includes the full quaternion (xyzw) and
 Euler fields in addition to the existing xyz. `*_follower_sample_velocity_0..5`
@@ -1042,6 +1092,13 @@ not `*_follower_target_velocity_*` endpoint derivatives. Inactive/reset paths
 clear them. Plan-rate scaling is included as in `outputKinematics()`; its gate
 is piecewise constant per sample, not a measured gate derivative. Logging is
 observational and does not enter the control law.
+
+`*_follower_jerk_scale` records the selected fraction of configured per-axis jerk
+ceilings, and `*_follower_jerk_search_calculations` records extra trials for the
+current segment. They clear to 1/0 on non-follower ticks. The explicit
+`deadline_jerk_minimization` capability is default-off and requires fresh
+replanning; the tracked real profile keeps it off after recorded joint-command
+comparisons. This option changes trajectory selection within existing bounds.
 
 UDP state publication preserves core data and sheds only optional visualization
 witnesses to keep the packet within a byte budget. Truncation and ongoing send

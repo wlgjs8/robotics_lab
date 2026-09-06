@@ -123,6 +123,17 @@ A hardware-free validation run is useful only when:
 
 ## Not A Hardware Acceptance
 
+The optional `RB_SERVO_BUILD_PREVIEW_EXPERIMENTS=ON` build adds a constrained
+trajectory solver and copied-follower reference tests. Its recorded replay has
+no backend/device path and no output LPF. The separate runtime flag
+`RB_SERVO_ENABLE_PREVIEW_EXECUTION` connects a worker and finite executor to the
+server under the explicit `flow_infer_preview` profile. Its native coordinator,
+contact, stop and production-loop tests are separate from instantaneous offline
+replay. Clean native integration passes 58 tests; both full recorded streams and
+the real-backend config-only preflight also pass. Physical acceptance remains
+separate; see the
+[execution contract and current status](reference/preview_trajectory_execution.md).
+
 The fresh chunk path also has dedicated hardware-free coverage:
 `chunk_fresh_continuity` exercises C++ sampled-p/v/a splices, SO(3) derivatives,
 force/plan gates and held-reference resume; `force_overlay_resume` repeats the
@@ -146,3 +157,20 @@ Pinocchio IK and joint clamps with a hashed per-arm calibrated URDF. It excludes
 plant/contact feedback and the geometric/collision safety projection. The actual
 mock servo-loop InitMotion/tare/IK-refusal regression is run separately. See
 [conditioner evidence and limitations](reference/follower_output_conditioning.md).
+
+The position-only conditioner additionally checks fixed-period non-amplification,
+SO(3) changing-axis transport, antipodal quaternion representation, variable
+periods, reset/fold and the selected profile through actual mock-loop
+InitMotion/tare/IK-refusal fixtures. The optional deadline jerk search checks
+the original p/v/a endpoint, deadline and caps, with exact fallback on braking
+or infeasible cases.
+
+`delta_follower_replay --recorded CONFIG PROFILE EVENTS OUTPUT` consumes explicit
+recorded follower inputs without devices. `--conservative-stage-leash` recomputes
+the leash from its own prior output, min-combined with the recorded gate; it is
+still a fixed-model/force/actual-feedback counterfactual. Export with
+`tools/prepare_recorded_follower_replay.py`, analyze with
+`tools/analyze_recorded_follower_replay.py`. These analytics require pandas,
+pyarrow and SciPy in the analysis interpreter. Exporter tests explicitly skip
+when pandas/pyarrow are absent from the minimal test environment; run them in
+the complete analysis environment as well, and report those skips separately.

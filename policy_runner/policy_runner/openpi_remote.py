@@ -187,6 +187,56 @@ class _OpenpiWebsocketClient:
         raise last_error  # type: ignore[misc]
 
 
+# PRINCIPAL-POINT ALIGNMENT (2026-09-06). Collection and inference use DIFFERENT physical
+# D405 units, and their principal points differ by more than their focal lengths do:
+#
+#   arm    collect SN      ppx/ppy          infer SN        ppx/ppy          shift needed
+#   left   260522277606    319.08/229.52    412622272078    321.91/237.25    (-2.83, -7.73)
+#   right  419122270010    316.93/238.20    260322278348    323.47/229.66    (-6.54, +8.54)
+#
+# The policy reads "where is the bolt in frame" as its aim command, so an unaligned principal
+# point is a systematic aim error: at a 200 mm working distance the shifts above are 4.2 mm
+# (left) and 5.5 mm (right), against a grasp that succeeds at |dxy| p50 8.9 mm. The two arms
+# shift in OPPOSITE directions, so no single global offset cancels them.
+#
+# Focal lengths differ by only 0.5-0.8% (393.32/393.78 collect vs 390.21/395.71 infer), which is
+# far below this, so only the principal point is corrected here. Translating the image by
+# (ppx_collect - ppx_infer, ppy_collect - ppy_infer) puts a given world direction back on the
+# pixel the training distribution had it on.
+#
+# OFF by default: set FLOW_INFER_PP_ALIGN=1 to enable, so this can be A/B'd on hardware without
+# a rebuild. FLOW_INFER_PP_SHIFT_LEFT/RIGHT ("dx,dy" px) override the measured constants.
+_PP_SHIFT_DEFAULT = {"left": (-2.83, -7.73), "right": (-6.54, +8.54)}
+
+
+def _pp_shift(side: str) -> tuple[float, float] | None:
+    if os.environ.get("FLOW_INFER_PP_ALIGN", "0") != "1":
+        return None
+    raw = os.environ.get(f"FLOW_INFER_PP_SHIFT_{side.upper()}")
+    if raw:
+        try:
+            dx, dy = (float(v) for v in raw.split(","))
+            return dx, dy
+        except ValueError:
+            raise ValueError(f"FLOW_INFER_PP_SHIFT_{side.upper()} must be 'dx,dy' px, got {raw!r}")
+    return _PP_SHIFT_DEFAULT.get(side)
+
+
+def _align_principal_point(rgb: np.ndarray, side: str) -> np.ndarray:
+    """Translate the frame so the inference camera's principal point lands where the
+    collection camera's did. Sub-pixel, edge-replicated; a no-op unless FLOW_INFER_PP_ALIGN=1."""
+    shift = _pp_shift(side)
+    if shift is None:
+        return rgb
+    import cv2
+
+    dx, dy = shift
+    m = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+    h, w = rgb.shape[:2]
+    return cv2.warpAffine(rgb, m, (w, h), flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+
 def _center_crop(img: np.ndarray, frac: float) -> np.ndarray:
     """Centered crop keeping `frac` of each dimension (aspect preserved).
 
@@ -1888,6 +1938,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             if self.wrist_crop_frac > 0.0:
                 rgb = _center_crop(rgb, self.wrist_crop_frac)
+            rgb = _align_principal_point(rgb, key)
             images[key] = rgb
             decode_count += 1
         if missing_count > 0 or len(images) < 2:

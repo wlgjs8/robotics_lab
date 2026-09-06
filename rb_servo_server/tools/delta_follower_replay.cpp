@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <stdexcept>
 #include <set>
+#include "recorded_follower_replay.hpp"
 
 using namespace rb_servo;
 using namespace rb_servo::control;
@@ -50,6 +51,12 @@ Vec6 blend(const Vec6& old, const Vec6& next, double w) {
 
 int main(int argc,char** argv) {
   try {
+    if (argc > 1 && std::string(argv[1]) == "--recorded") {
+      if (argc != 6 && argc != 7) throw std::runtime_error("usage: delta_follower_replay --recorded CONFIG PROFILE EVENTS.jsonl OUTPUT.csv [--conservative-stage-leash]");
+      const bool leash = argc == 7;
+      if (leash && std::string(argv[6]) != "--conservative-stage-leash") throw std::runtime_error("unknown recorded replay option");
+      return recorded_follower_replay::run(argv[2], argv[3], argv[4], argv[5], leash);
+    }
     if (argc!=5 && argc!=6) throw std::runtime_error("usage: delta_follower_replay CONFIG EVENTS.jsonl OUTPUT.csv VARIANT [VARIANT_START_SEC]");
     const std::string variant=argv[4];
     const std::set<std::string> variants={"baseline","no_force_gate","linear_relaxed","angular_relaxed",

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -128,6 +129,27 @@ public:
     // owns its cadence (options.send_period_ns > 0) and queue_sync.enable is on;
     // otherwise it stays at its neutral default so a consumer cannot mistake an
     // inactive controller for a locked one.
+    // Stop putting servo_j ON THE WIRE without stopping the cadence.
+    //
+    // Direct teaching needs the controller to fall to sdata.robot_state == 1 (Idle)
+    // before freedrive_teach_on, and it only does that when servo_j actually stops.
+    // Suppressing at the servo loop is NOT enough once this worker owns the cadence:
+    // with an empty mailbox it keeps the wire alive from SetpointInterpolator::sample,
+    // which holds at the newest setpoint forever ("exactly the legacy
+    // repeat-last-setpoint wire behaviour"). Measured 2026-09-06: every freedrive
+    // request aborted with "quiesce timeout: controller never reported idle".
+    //
+    // ONLY the send is gated. The cadence tick and the queue-sync law keep running
+    // (see run(): the law is stepped with streaming=false while suppressed), because
+    // a caller that stops stepping does not slow the law down, it stops it -- the
+    // Warmup latch measured 2026-08-26. Lifecycle commands are unaffected, which is
+    // what lets freedrive_teach_on/off through while the wire is quiet.
+    //
+    // Entering suppression DROPS the pending setpoint, the interpolator ring and the
+    // last-sent setpoint: they describe the pose the arm had before it was hand-moved,
+    // and resuming from them would interpolate the arm back to it.
+    void setSendSuppressed(bool suppressed);
+
     QueueSyncDecision queueSyncDecision() const;
     // Control-box queue occupancy from the last REAL send. Kept separate from
     // lastSendResult(): in cadence mode the loop enqueues every tick and the
@@ -226,6 +248,9 @@ private:
     // Cadence + queue sync. Touched only on the worker thread except for the
     // decision snapshot, which is published under mutex_ for telemetry readers.
     QueueSyncController queue_sync_;
+    // Wire-level send gate (setSendSuppressed). Atomic: written by the servo loop
+    // thread, read by this worker's cadence thread.
+    std::atomic<bool> send_suppressed_{false};
     QueueSyncDecision queue_sync_decision_;
     RbpodoQueueAckTelemetry latest_queue_ack_;
     // Setpoint rate conversion (options_.interpolate_setpoints). push() runs on

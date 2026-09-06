@@ -1658,9 +1658,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
     )
     flow_infer.add_argument(
         "--tcp-target-profile",
-        choices=("flow_infer_smooth", "flow_infer_fresh"),
+        choices=("flow_infer_smooth", "flow_infer_fresh", "flow_infer_preview"),
         default="flow_infer_smooth",
-        help="Explicit server-owned Cartesian profile; flow_infer_fresh must exist in the running tracked stack.",
+        help=("Explicit server-owned Cartesian profile; fresh and preview require matching "
+              "capabilities in the running tracked stack. Preview inhibits new gripper targets "
+              "until fresh server execution telemetry reports that arm active."),
     )
     flow_infer.add_argument(
         "--include-depth",

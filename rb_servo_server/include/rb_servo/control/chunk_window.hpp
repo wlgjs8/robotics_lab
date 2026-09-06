@@ -78,6 +78,18 @@ class ChunkWindow {
   int consumeBudget() const { return consume_eff_; }
   std::size_t horizon() const { return pose_.size(); }
 
+  // Planning-mailbox storage is reserved before the servo starts. Copying a
+  // snapshot is permitted only when both destination vectors already fit.
+  // This does not change the live window's activation or capacity contract.
+  void reserveSnapshotCapacity(std::size_t horizon) {
+    pose_.reserve(horizon);
+    grip_.reserve(horizon);
+  }
+  bool canCopySnapshotFrom(const ChunkWindow& source) const {
+    return pose_.capacity() >= source.pose_.size() &&
+           grip_.capacity() >= source.grip_.size();
+  }
+
  private:
   ChunkWindowConfig cfg_;
   std::vector<Pose6D> pose_;   // smoothed absolute waypoints

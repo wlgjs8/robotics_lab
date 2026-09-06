@@ -85,6 +85,7 @@ tests/test_flow_inference_gripper_mode.py
 tests/test_flow_inference_tcp_targetpose.py
 tests/test_flow_matching.py
 tests/test_flow_training.py
+tests/test_force_control_tare_gate.py
 tests/test_geometry_safety.py
 tests/test_gripper_proprio_source.py
 tests/test_gripper_runtime.py
@@ -102,6 +103,7 @@ tests/test_openpi_remote_velproprio.py
 tests/test_phase_metrics.py
 tests/test_pika_usb_pairing.py
 tests/test_policy_runner_contract.py
+tests/test_preview_execution_policy.py
 tests/test_rbpodo_controller_sim_safety.py
 tests/test_recording_and_training.py
 tests/test_rollout_step_log.py

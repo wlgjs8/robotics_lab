@@ -185,6 +185,14 @@ states that never report F/T have no tare prerequisite in this client. Manual
 cancel, configured resume-on-failure, and InitMotion sent directly to the server
 outside this override retain their existing semantics. These paths do not
 create a bias; the server still refuses force coverage without a valid bias.
+
+Separately, the current Flow action source checks every intent for enabled
+force control. Each enabled arm must report `force_torque.bias_valid: true` and
+`tare_state: accepted`; otherwise it exits before inference/publication. The
+override's wait opt-out does not bypass this requirement. Complete both-arm
+InitMotion/tare before a rollout. If a running policy observes tare invalidation
+during InitMotion, restart the policy after accepted tare returns; the server's
+native reset/resume behavior does not imply automatic Python-policy resumption.
 `[arm_init_event]` console JSON records request IDs, start/status changes,
 tare wait/timeout/ready, resume, cancel and failure. The `arm_init` state block
 also exposes each request ID, elapsed tare wait, and timeout flag.
@@ -364,6 +372,24 @@ disabled, malformed or ambiguous support raises an error before camera-gate
 fallback, inference, overlay publication or arm/gripper emission. This prevents
 an older server from silently executing an unknown profile via its default
 controller. The baseline profile does not require this new handshake.
+
+The explicit `flow_infer_preview` profile additionally requires the same entry
+to advertise `preview_execution: true` and a finite positive
+`gripper_state_max_age_sec`. This selects the server preview executor only when
+that executor is built and enabled; it never silently falls back to the fresh
+profile. The launcher forwards `FLOW_INFER_TCP_TARGET_PROFILE=flow_infer_preview`.
+Server integration and its validation status are documented in
+[the preview execution contract](../docs/reference/preview_trajectory_execution.md).
+
+For preview execution, new per-arm gripper targets require fresh
+`preview_execution.left/right` telemetry with `enabled: true`, `active: true`,
+`status: active` and `sample_time_ns` in the shared host monotonic clock. Both
+sample and state-receive ages must meet the advertised bound. Waiting, faulted,
+suppressed, missing or stale execution inhibits serial gripper dispatch and
+removes that arm's gripper target from repeated motion packets. TCP/chunk
+publication continues while the first plan is pending. An already accepted
+gripper move may still finish; this guard prevents new commands and does not
+retime model gripper rows to the server's independent execution cursor.
 
 Hardware-free scheduling tests and a measured-latency replay use the real
 dispatcher with in-memory inference completion and I/O. Run with an interpreter

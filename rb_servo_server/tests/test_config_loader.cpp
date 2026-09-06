@@ -129,6 +129,20 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.right_robot.operation_mode == "real");
         RB_CHECK(stack_real.servo.rate_hz == 500);
         {
+            // The box's gravity model. Asserted on the TRACKED file because both the
+            // numbers and the enable are the safety decision: too light and the arm
+            // sags the moment free-drive engages (measured 2026-09-06), too heavy and
+            // it pushes up. Ships DISABLED until the operator confirms whether the
+            // controller already models the F/T sensor's own 0.175 kg -- flipping this
+            // is a reviewed change, not a default.
+            for (const auto* arm : {&stack_real.left_robot, &stack_real.right_robot}) {
+                RB_CHECK(!arm->payload.enable);
+                RB_CHECK(arm->payload.mass_kg > 0.9);   // tool + sensor, not a stub
+                RB_CHECK(arm->payload.mass_kg < 1.0);
+                RB_CHECK(arm->payload.com_mm[2] > 50.0);  // flange frame, not the SRO's ~26
+            }
+        }
+        {
             // The cell-structure band the env_* geometry (the riser) is enforced
             // against. Asserted on the TRACKED file because the numbers are the
             // safety decision: at the self 40 mm floor the recorded 35.7 mm closest
@@ -180,7 +194,7 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.cartesian_control.allow_in_real);
         RB_CHECK(!stack_real.cartesian_control.allow_in_controller_simulation);
         RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profile_default == "umi_large_smooth");
-        RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profiles.size() == 4);
+        RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profiles.size() == 5);
         bool has_spacemouse = false;
         bool has_umi = false;
         bool has_flow = false;
@@ -206,6 +220,13 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(fresh_profile != nullptr);
         RB_CHECK(fresh_profile->ruckig_follower.fresh_chunk_replan);
         RB_CHECK(fresh_profile->ruckig_follower.continuous_hold_resume);
+        RB_CHECK(!fresh_profile->ruckig_follower.deadline_jerk_minimization);
+        RB_CHECK(fresh_profile->ruckig_follower.output_smd.mode == rb_servo::FollowerOutputSmdMode::PositionLowpass2);
+        RB_CHECK(!fresh_profile->ruckig_follower.output_smd.velocity_ff);
+        RB_CHECK(near(fresh_profile->ruckig_follower.output_smd.nf_linear_hz, 4.5));
+        RB_CHECK(near(fresh_profile->ruckig_follower.output_smd.nf_angular_hz, 3.5));
+        RB_CHECK(!flow_profile->ruckig_follower.deadline_jerk_minimization);
+        RB_CHECK(flow_profile->ruckig_follower.output_smd.mode == rb_servo::FollowerOutputSmdMode::LegacySmd);
         RB_CHECK(!flow_profile->ruckig_follower.fresh_chunk_replan);
         RB_CHECK(!flow_profile->ruckig_follower.continuous_hold_resume);
         RB_CHECK(umi_profile != nullptr);

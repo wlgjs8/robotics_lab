@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "rb_servo/core/types.hpp"
+#include "rb_servo/control/preview_trajectory_tracker.hpp"
 
 namespace rb_servo {
 
@@ -29,6 +30,37 @@ struct BackendConfig {
     std::vector<double> expected_link_parameter;
 
     JointArray initial_q_deg{};
+
+    // THE BOX'S OWN PAYLOAD MODEL (rbpodo set_payload_info), pushed at initialize().
+    //
+    // This is what the controller's GRAVITY COMPENSATION runs on, and free-drive is
+    // where it becomes visible: the box holds the arm against gravity using this mass
+    // and CoM, so a value lighter than the real tool makes the arm SAG the moment
+    // direct teaching engages. Measured 2026-09-06: the right arm dropped under
+    // gravity on the first successful freedrive engagement, with the server never
+    // having pushed a payload at all.
+    //
+    // Silence here is NOT a safe default, it is a different owner: the SDK states
+    // "If this function is not called in program-flow, the value set in the Setup page
+    // is used", so leaving `enable` false hands the arm's gravity model to whatever a
+    // pendant last stored. That is legitimate (it is how this cell ran until now) but
+    // it must be a decision, so the server says out loud at startup which owner is in
+    // force.
+    //
+    // FRAME: the manufacturer's default TOOL coordinate system, i.e. FLANGE-relative.
+    // NOT the sensor frame -- safety.force_torque's tool_com_mm is stated at the
+    // Sensing Reference Origin and covers only what the F/T sensor sees BELOW itself
+    // (FtIdentify.h: "origin at the Sensing Reference Origin"), so it is neither the
+    // same origin nor the same mass as this. Kept as its own measured pair rather than
+    // derived at runtime from that block: the flange->SRO offset appears only in a
+    // comment there, and silently reconstructing a gravity model from a commented
+    // number is how a wrong one ships.
+    struct PayloadConfig {
+        bool enable = false;
+        double mass_kg = 0.0;
+        std::array<double, 3> com_mm{0.0, 0.0, 0.0};
+    };
+    PayloadConfig payload;
 
     double speed_bar = 0.1;
 
@@ -2006,8 +2038,11 @@ enum class RuckigFollowerController {
 // Continuous output conditioning for the Cartesian chunk follower. This is a
 // pure post-follower stage: chunk chaining, projection, divergence, and actual-
 // lead accounting continue to use the unfiltered follower state.
+enum class FollowerOutputSmdMode { LegacySmd, PositionLowpass2 };
+
 struct FollowerOutputSmdConfig {
     bool enable = false;
+    FollowerOutputSmdMode mode = FollowerOutputSmdMode::LegacySmd;
     double nf_linear_hz = 3.5;
     double nf_angular_hz = 2.5;
     double damping_ratio = 1.0;
@@ -2026,6 +2061,28 @@ struct FollowerOutputSmdConfig {
     // 56.0-56.2 s) until it hit the reseed snap. nf then shapes only what is NOT in
     // the profile (knot noise, re-anchor steps). Off = legacy.
     bool profile_feedforward = false;
+};
+
+// Explicit opt-in to the asynchronous constrained preview executor. These
+// timing/history bounds have no usable fallback when enable=true. The tracker
+// takes its six physical motion ceilings from the enclosing follower config;
+// YAML supplies every remaining optimization/acceptance parameter explicitly.
+struct PreviewExecutionConfig {
+    bool enable = false;
+    control::PreviewTrackerConfig tracker;
+    struct CursorConfig {
+        bool enable = false;
+        double max_backlog_sec = 0.0;
+        double catchup_time_sec = 0.0;
+        double max_rate = 0.0;
+        double translation_velocity_floor = 0.0;
+        double angular_velocity_floor = 0.0;
+    } cursor;
+    double replan_period_sec = 0.0;
+    double splice_lead_sec = 0.0;
+    double max_result_age_sec = 0.0;
+    double worker_poll_period_sec = 0.0;
+    int max_source_rows = 0;
 };
 
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
@@ -2070,6 +2127,7 @@ struct RuckigFollowerConfig {
     int reserve_steps = 1;             // central-difference lookahead (>= 1)
     int smoothing_window = 3;          // odd; pre-difference chunk smoothing
     FollowerOutputSmdConfig output_smd;
+    PreviewExecutionConfig preview_execution;
     // Feedforward accel damping, (0, 1], split by axis class 2026-07-31 because the two classes
     // sit at 31% and 95% of their acceleration limits -- see control::GuardConfig for the
     // measurement and why the single scalar could not be tuned. The legacy scalar
@@ -2158,6 +2216,9 @@ struct RuckigFollowerConfig {
     // segment-completion/hold behavior unless these are selected by name.
     bool fresh_chunk_replan = false;
     bool continuous_hold_resume = false;
+    // Minimize jerk within an already-feasible policy deadline. This preserves
+    // the hard v/a/j bounds and falls back to the original solve without slack.
+    bool deadline_jerk_minimization = false;
     bool plan_leash_enable = false;
     double plan_leash_start_m = 0.0;
     double plan_leash_start_rad = 0.0;
@@ -2253,5 +2314,16 @@ struct DualArmConfig {
 };
 
 DualArmConfig loadConfigFromYaml(const std::string& path);
+
+// Resolve a command's tcp_target_profile name against the configured profiles.
+// "" and the literal "default" alias tcp_pose_target_profile_default (the server-
+// authored Hold from CommandBuffer::makeHold carries the literal "default"). An
+// unknown name yields the configured DEFAULT PROFILE with *found=false, never the
+// bare global pose_track_smd / ruckig_follower defaults: those disabled the SMD and
+// the follower under a live tracker (servo_log_20260906_194113.csv 20.698 s).
+TcpPoseTargetProfileConfig selectTcpPoseTargetProfile(
+    const CartesianControlConfig& config,
+    const std::string& requested_profile,
+    bool* found);
 
 }  // namespace rb_servo

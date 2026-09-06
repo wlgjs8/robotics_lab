@@ -6,6 +6,37 @@ schema: robotics_lab.rb_servo_server.v1
 # Real/sim env gates are retired; no RB_ALLOW_* envs are needed.
 # =====================================================================================
 left_robot:
+  # THE BOX'S GRAVITY MODEL (rbpodo set_payload_info, pushed at initialize).
+  #
+  # WHY IT EXISTS: 2026-09-06 the right arm DROPPED under gravity the first time
+  # direct teaching actually engaged. The server had never pushed a payload, and the
+  # SDK is explicit about what that means -- "if this function is not called in
+  # program-flow, the value set in the Setup page is used" -- so the box was holding
+  # a ~0.96 kg tool with whatever a pendant last stored.
+  #
+  # FRAME: the manufacturer's default TOOL frame, i.e. FLANGE-relative, mm.
+  # NOT safety.force_torque's tool_com_mm, which is stated at the Sensing Reference
+  # Origin and covers only what the F/T sensor sees BELOW itself.
+  #
+  # DERIVATION of the numbers below, from the measured values in this same file:
+  #   sensor          0.175 kg  @ [0, 0, 21.5] mm          (flange frame)
+  #   tool (SRO)      0.7912 kg  @ [-0.02, 3.24, 25.34] mm  (CM `ft identify` 2026-08-17 14:08, residual 0.62 N)
+  #   flange -> SRO   +45 mm on z ("flange -> TCP = 45 + 202.642", force_torque block)
+  #   => tool at the flange   [-0.02, 3.24, 70.34] mm
+  #   => combined     0.9662 kg @ [-0.02, 2.65, 61.49] mm
+  #
+  # DISABLED PENDING ONE CHECK, and this is the check: does the controller ALREADY
+  # account for the F/T sensor's own 0.175 kg (it has an external-FT-sensor selection
+  # of its own)? If it does, this double-counts and the arm will PUSH UP in free-drive
+  # instead of sagging -- the opposite failure, equally wrong. Read the box's Setup
+  # page first, then set enable: true with the matching pair:
+  #     sensor NOT modelled by the box (combined):  mass_kg 0.9887  com_mm [0.26, 1.55, 63.75]
+  #     sensor already modelled (tool only):        mass_kg 0.8137  com_mm [0.32, 1.88, 72.84]
+  #     (numbers refreshed from the 2026-09-06 re-identification, residual 0.21 N rms)
+  payload:
+    enable: false
+    mass_kg: 0.9887
+    com_mm: [0.26, 1.55, 63.75]
   backend_type: rbpodo
   run_mode: real
   name: left_stack_real
@@ -47,6 +78,37 @@ left_robot:
   state_read_pipelined: true
 
 right_robot:
+  # THE BOX'S GRAVITY MODEL (rbpodo set_payload_info, pushed at initialize).
+  #
+  # WHY IT EXISTS: 2026-09-06 the right arm DROPPED under gravity the first time
+  # direct teaching actually engaged. The server had never pushed a payload, and the
+  # SDK is explicit about what that means -- "if this function is not called in
+  # program-flow, the value set in the Setup page is used" -- so the box was holding
+  # a ~0.96 kg tool with whatever a pendant last stored.
+  #
+  # FRAME: the manufacturer's default TOOL frame, i.e. FLANGE-relative, mm.
+  # NOT safety.force_torque's tool_com_mm, which is stated at the Sensing Reference
+  # Origin and covers only what the F/T sensor sees BELOW itself.
+  #
+  # DERIVATION of the numbers below, from the measured values in this same file:
+  #   sensor          0.175 kg  @ [0, 0, 21.5] mm          (flange frame)
+  #   tool (SRO)      0.7822 kg  @ [-1.24, 4.03, 26.56] mm  (CM `ft identify` 2026-08-17 14:10, residual 0.59 N)
+  #   flange -> SRO   +45 mm on z ("flange -> TCP = 45 + 202.642", force_torque block)
+  #   => tool at the flange   [-1.24, 4.03, 71.56] mm
+  #   => combined     0.9572 kg @ [-1.01, 3.29, 62.41] mm
+  #
+  # DISABLED PENDING ONE CHECK, and this is the check: does the controller ALREADY
+  # account for the F/T sensor's own 0.175 kg (it has an external-FT-sensor selection
+  # of its own)? If it does, this double-counts and the arm will PUSH UP in free-drive
+  # instead of sagging -- the opposite failure, equally wrong. Read the box's Setup
+  # page first, then set enable: true with the matching pair:
+  #     sensor NOT modelled by the box (combined):  mass_kg 0.9889  com_mm [-0.82, 2.49, 62.75]
+  #     sensor already modelled (tool only):        mass_kg 0.8139  com_mm [-1.00, 3.02, 71.62]
+  #     (numbers refreshed from the 2026-09-06 re-identification, residual 0.31 N rms)
+  payload:
+    enable: false
+    mass_kg: 0.9889
+    com_mm: [-0.82, 2.49, 62.75]
   backend_type: rbpodo
   run_mode: real
   name: right_stack_real
@@ -2770,7 +2832,7 @@ cartesian_control:
       max_smd_goal_lead_m: 0.080
       max_smd_goal_lead_rad: 0.35
     # Explicit experimental execution profile. Same limits as this stack's
-    # flow_infer_smooth; fresh retargeting, held resume and linear output FF differ.
+    # flow_infer_smooth; fresh retargeting, held resume and output conditioning differ.
     flow_infer_fresh:
       pose_track_smd:
         enable: true
@@ -2803,15 +2865,16 @@ cartesian_control:
         smoothing_window: 1
         output_smd:
           enable: true
-          nf_linear_hz: 3.5
-          nf_angular_hz: 2.5
-          damping_ratio: 1.0
-          velocity_ff: true
+          mode: position_lowpass2
+          nf_linear_hz: 4.5
+          nf_angular_hz: 3.5
+          damping_ratio: 0.7071067811865476
+          velocity_ff: false
           velocity_ff_lpf_hz: 0.0
-          # 2026-09-06 recorded-reference tradeoff: less 2 Hz peaking / 3-20 Hz
-          # excitation with minimal added lag. Angular conditioning is unchanged.
-          velocity_ff_linear_gain: 0.8
-          # Acceleration feedforward remains off; see low-frequency evidence report.
+          # Position-only Tustin low-pass: no scalar low-frequency amplification.
+          # Selected from recorded dual-arm lag / joint-band comparisons.
+          # Legacy-only FF controls retain neutral values; the loader rejects mixing.
+          velocity_ff_linear_gain: 1.0
           profile_feedforward: false
         af_damping_beta_lin: 1.0
         af_damping_beta_ang: 1.0
@@ -2849,6 +2912,122 @@ cartesian_control:
         fallback_policy: hold
         engage_timeout_sec: 3.0
         fresh_chunk_replan: true
+        # Implemented/validated, but fixed-input IK commands were quieter with
+        # this search off. Lower prefilter jerk alone did not lower sent jitter.
+        deadline_jerk_minimization: false
+        continuous_hold_resume: true
+      max_smd_goal_lead_m: 0.08
+      max_smd_goal_lead_rad: 0.35
+    # Explicit no-LPF constrained-preview profile. Selected only by name;
+    # existing flow_infer_fresh retains its conditioner and settings unchanged.
+    flow_infer_preview:
+      pose_track_smd:
+        enable: true
+        damping_ratio_linear: 1.0
+        damping_ratio_angular: 1.0
+        natural_frequency_linear_hz: 1.6
+        natural_frequency_angular_hz: 1.6
+        velocity_feedforward: true
+        max_linear_velocity_m_s: 0.5
+        max_linear_accel_m_s2: 1.2
+        max_angular_velocity_rad_s: 1.8
+        max_angular_accel_rad_s2: 5.0
+        reengage_relatch_max_step_m: 0.01
+        reengage_relatch_max_step_rad: 0.1
+        singularity_scale_full_sigma: 0.12
+        singularity_scale_floor_sigma: 0.05
+        singularity_scale_min: 0.12
+      ruckig_follower:
+        enable: true
+        controller: delta_preview
+        max_linear_velocity_m_s: 0.6
+        max_linear_accel_m_s2: 12.0
+        max_linear_jerk_m_s3: 2000.0
+        max_angular_velocity_rad_s: 1.4
+        max_angular_accel_rad_s2: 40.0
+        max_angular_jerk_rad_s3: 4000.0
+        discard_head_steps: 0
+        consume_steps: 8
+        reserve_steps: 4
+        smoothing_window: 1
+        # The constrained worker owns output p/v/a. No output low-pass stage.
+        output_smd:
+          enable: false
+          mode: legacy_smd
+        preview_execution:
+          enable: true
+          # 100 Hz worker replans, spliced five 500 Hz ticks into the future.
+          # Results expire from snapshot generation; the preview horizon is not
+          # permission to consume an old plan after source/safety changes.
+          replan_period_sec: 0.01
+          splice_lead_sec: 0.01
+          max_result_age_sec: 0.05
+          worker_poll_period_sec: 0.0005
+          max_source_rows: 32  # Explicit snapshot bound, below the 64-row wire cap.
+          # Offline candidate jerk_2000_r10.json. Six physical ceilings are
+          # inherited from this follower, with angular norm semantics in the QP.
+          tracker:
+            planning_dt_sec: 0.01
+            horizon_steps: 24
+            linear_tracking_scale_m: 0.01
+            angular_tracking_scale_rad: 0.03
+            jerk_weight: 2000.0
+            jerk_difference_weight: 0.01
+            linear_tracking_tolerance_m: 0.02
+            angular_tracking_tolerance_rad: 0.08
+            max_linear_tracking_slack_m: 0.06
+            max_angular_tracking_slack_rad: 0.27
+            max_reference_chart_angle_rad: 1.0
+            feasibility_tolerance: 0.0000001
+            max_working_set_recalculations: 200
+            max_solve_time_sec: 0.05
+          # Offline execution_cursor_v1.json: bounded lag, no target-origin fold.
+          cursor:
+            enable: true
+            max_backlog_sec: 0.1
+            catchup_time_sec: 0.2
+            max_rate: 1.1
+            translation_velocity_floor: 0.000001
+            angular_velocity_floor: 0.000001
+        af_damping_beta_lin: 1.0
+        af_damping_beta_ang: 1.0
+        corner_deadband_lin_m: 0.0003
+        corner_deadband_ang_rad: 0.0005
+        corner_velocity_scale: 1.0
+        delta_twist_clear_residual_on_new_frame: true
+        delta_twist_min_time_to_go_sec: 0.015
+        delta_twist_tau_sec: 0.02
+        delta_twist_residual_drain_steps: 1
+        delta_twist_max_residual_m: 0.006
+        delta_twist_max_residual_rad: 0.05
+        delta_twist_max_lead_m: 0.02
+        delta_twist_max_lead_rad: 0.06
+        delta_twist_stale_residual_timeout_sec: 0.15
+        preview_max_projection_error_m: 0.002
+        preview_max_projection_error_rad: 0.00436332313
+        preview_max_consecutive_projection_errors: 12
+        preview_projection_fault_policy: warn
+        preview_max_actual_lead_m: 0.035
+        preview_max_actual_lead_rad: 0.08726646259
+        preview_max_consecutive_actual_lead_errors: 3
+        preview_lead_reanchor_window_sec: 2.0
+        preview_max_lead_reanchors_in_window: 5
+        core_time_stretch_enable: true
+        core_time_stretch_max_ratio: 4.0
+        plan_leash_enable: true
+        plan_leash_start_m: 0.01
+        plan_leash_start_rad: 0.0349
+        plan_leash_full_m: 0.05
+        plan_leash_full_rad: 0.1
+        plan_leash_min_gate: 0.25
+        hold_bounce_resume_sec: 0.5
+        chunk_feed_timeout_sec: 1.5
+        fallback_policy: hold
+        engage_timeout_sec: 3.0
+        fresh_chunk_replan: true
+        # Implemented/validated, but fixed-input IK commands were quieter with
+        # this search off. Lower prefilter jerk alone did not lower sent jitter.
+        deadline_jerk_minimization: false
         continuous_hold_resume: true
       max_smd_goal_lead_m: 0.08
       max_smd_goal_lead_rad: 0.35

@@ -1,5 +1,14 @@
 # rb_servo_server
 
+The [constrained preview executor](../docs/reference/preview_trajectory_execution.md)
+is selectable as `flow_infer_preview` when built with
+`RB_SERVO_ENABLE_PREVIEW_EXECUTION=ON` (the build default). Recorded replay,
+clean native integration and the real-backend config preflight pass; consult
+the linked results and operator command for a supervised physical trial.
+It uses an off-servo optimizer with no pose-output low-pass filter. Existing
+`flow_infer_fresh` retains its conditioner. The optional
+`RB_SERVO_BUILD_PREVIEW_EXPERIMENTS=ON` adds offline recorded replay tools.
+
 C++ control server for synchronizing two Rainbow RB5-850 arms through a shared `servo_j`-style control loop.
 
 The server is designed for:
@@ -208,6 +217,50 @@ Reset a latched fault:
 python3 tools/send_reset_fault.py
 ```
 
+## Direct teaching (free-drive)
+
+`Freedrive` hands one arm to a human guide. The controller only accepts
+`freedrive_teach_on()` from an idle state (otherwise M151, "Cannot run this
+function"), so the server arms it in stages — `arming_quiesce` → `arming_confirm`
+→ `active` — waiting for `sdata.robot_state == 1` (Idle) before issuing teach_on
+and for `sdata.is_freedrive_mode` before calling it engaged. `servo.allow_freedrive`
+gates the whole path, fail-closed.
+
+**Quiescing means the WIRE goes quiet, not just the servo loop.** From the moment an
+arm leaves `off`, `currentSendPolicy()` returns `freedrive` and no target is staged —
+but that alone only empties each `ArmWorker`'s mailbox. Once the worker owns the
+cadence (`servo.io_model: worker` + `queue_sync.enable`, which is the RB5 control-box
+sync configuration) it keeps the stream alive on its own: `SetpointInterpolator::sample`
+holds at the newest setpoint indefinitely, by design, because a skipped send is a FIFO
+entry the box never receives. The controller therefore stayed in `robot_state == 3` and
+every freedrive request aborted with `quiesce timeout: controller never reported idle`
+(measured 2026-09-06).
+
+`DualArmServoLoop::setWorkerSendSuppressed()` closes that gap by gating the worker's
+wire send directly, driven by `anyFreedriveActive()` every tick. Three properties
+matter:
+
+- **Only the send is gated.** The cadence keeps ticking and the queue-sync law keeps
+  being stepped, with `streaming=false`. A caller that stops stepping does not slow the
+  law down, it stops it (`Warmup` latched forever, measured 2026-08-26).
+- **Re-entry re-drains by itself.** `streaming=false` drops `QueueSyncController` to
+  `idle`, so resuming re-runs `warmup` → `drain` → `track` against the real queue
+  rather than a pre-gap fill and a wound-up integral. No separate drain call exists or
+  is needed.
+- **Entering suppression drops the cached setpoints** (mailbox, interpolator ring,
+  last-sent point). They describe the pose the arm is about to be hand-moved away from;
+  resuming from them would interpolate the arm back to it, downstream of every
+  loop-side safety clamp. `resyncArmAfterFreedrive()` handles the same hazard on the
+  loop side.
+
+Lifecycle commands are unaffected — that is the path `freedrive_teach_on/off` itself
+takes, so it still reaches the controller while the wire is quiet.
+
+Freedrive is the ONLY suppressed policy that stops the wire. `fault_latched`,
+`emergency_latched`, `read_only` and pre-arming keep streaming the held reference,
+which is the behaviour those paths were validated with; changing them is a separate
+decision with its own queue re-entry evidence to gather.
+
 ## Real robot config boundary
 
 Real motion is config-driven and operator-supervised. Do not run real robot
@@ -231,9 +284,12 @@ unreachable Cartesian pose appear solvable.
 The optional `flow_infer_fresh` profile preserves each stack's motion limits
 and enables `fresh_chunk_replan` and `continuous_hold_resume`. Both flags require
 enabled `delta_preview` and default to false. The real profile additionally
-sets `output_smd.velocity_ff_linear_gain: 0.8` (legacy/default `1.0`), reducing
-translation velocity feedforward while preserving angular conditioning. The
-controller-simulation profile keeps its existing disabled output conditioner. Fresh frames replan from the current sampled p/v/a instead
+selects `output_smd.mode: position_lowpass2` at 4.5/3.5 Hz with damping
+sqrt(0.5) and velocity/profile feedforward off. Both translation and rotation
+are conditioned, with finite tracking lag. The optional
+`deadline_jerk_minimization` search is implemented but remains false: recorded
+IK command spectra favored the filter alone. The controller-simulation profile
+keeps its existing disabled output conditioner. Fresh frames replan from the current sampled p/v/a instead
 of waiting for the previous segment endpoint; repeated IK refusal holds the
 nominal sent reference without repeatedly cold-starting the output filter.
 State JSON advertises these capabilities in `chunk_execution_profiles` so
@@ -273,6 +329,13 @@ Minimal command:
 The C++ receive timestamp is used for timeout checks.
 
 ## Force-control status
+
+The UMI stream gate now retains the last armed contact normal during its existing
+scalar release. CSV traces distinguish the consumed gate from the later force
+update and the geometric projection from its release slew. See
+[behavior, replay tradeoff and next-run fields](../docs/reference/umi_stream_gate_release.md).
+The change has offline validation only; the latest-left replay reduces ripple
+while increasing transient goal error, so both need checking on the next run.
 
 Force-control v2 is live. V1 was removed on 2026-08-26 and archived, then v2
 was rebuilt from controller-manager's operator-calibrated sensor/tool presets.

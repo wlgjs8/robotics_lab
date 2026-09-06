@@ -7,6 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -409,11 +410,19 @@ bool testSelectedRealConditioner() {
     const auto selected=std::find_if(profiles.begin(),profiles.end(),[](const auto& p){return p.name=="flow_infer_fresh";});
     RB_CHECK(selected!=profiles.end());
     const auto cfg=selected->ruckig_follower.output_smd;
-    RB_CHECK(cfg.enable && cfg.velocity_ff && !cfg.profile_feedforward);
-    RB_CHECK(cfg.velocity_ff_linear_gain==0.8 && cfg.nf_linear_hz==3.5);
-    RB_CHECK(cfg.nf_angular_hz==2.5 && cfg.damping_ratio==1.0);
-    for (double f : {2.0,3.0,10.0,13.0,20.0}) {
-        RB_CHECK(measuredSineGain(f,cfg) < 0.92*measuredSineGain(f));
+    if (cfg.mode == rb_servo::FollowerOutputSmdMode::PositionLowpass2) {
+        RB_CHECK(cfg.enable && !cfg.velocity_ff && !cfg.profile_feedforward);
+        RB_CHECK(cfg.damping_ratio >= std::sqrt(0.5));
+        for (double f : {0.5,1.0,2.0,3.0,5.0,8.0,10.0,13.0,20.0,25.0}) {
+            RB_CHECK(measuredSineGain(f,cfg) <= 1.001);
+        }
+    } else {
+        RB_CHECK(cfg.enable && cfg.velocity_ff && !cfg.profile_feedforward);
+        RB_CHECK(cfg.velocity_ff_linear_gain==0.8 && cfg.nf_linear_hz==3.5);
+        RB_CHECK(cfg.nf_angular_hz==2.5 && cfg.damping_ratio==1.0);
+        for (double f : {2.0,3.0,10.0,13.0,20.0}) {
+            RB_CHECK(measuredSineGain(f,cfg) < 0.92*measuredSineGain(f));
+        }
     }
     // A moving reference that actually stops exercises retained velocity FF;
     // a position step with zero input velocity does not expose this transient.
@@ -434,9 +443,170 @@ bool testSelectedRealConditioner() {
     const auto candidate=stop(cfg),baseline=stop(config());
     std::cout << "selected 150 mm/s ramp: lag=" << candidate[0]*1000
               << " mm, stop overshoot=" << baseline[1]*1000 << " -> " << candidate[1]*1000 << " mm\n";
-    RB_CHECK(candidate[0] < .003);
+    if (cfg.mode == rb_servo::FollowerOutputSmdMode::PositionLowpass2) {
+        const double analytic_ramp_lag = 2.0*cfg.damping_ratio*.15/(kTwoPi*cfg.nf_linear_hz);
+        RB_CHECK(std::abs(candidate[0]-analytic_ramp_lag) < 1e-6);
+    } else {
+        RB_CHECK(candidate[0] < .003);
+    }
     RB_CHECK(candidate[1] < baseline[1]);
     RB_CHECK(candidate[2] < 1e-8);
+    return true;
+}
+
+rb_servo::FollowerOutputSmdConfig positionLowpass2Config(double damping = std::sqrt(0.5)) {
+    auto cfg = config(false, false);
+    cfg.mode = rb_servo::FollowerOutputSmdMode::PositionLowpass2;
+    cfg.nf_linear_hz = 5.0;
+    cfg.nf_angular_hz = 4.0;
+    cfg.damping_ratio = damping;
+    return cfg;
+}
+
+// A fixed-axis SO(3) trajectory commutes, so its transfer must match the scalar
+// Tustin response independently of the chosen physical axis and quaternion sign.
+// Test >=4 complete periods, including .1 Hz; short non-integer sine records can
+// hide low-frequency peaking through leakage/transient bias.
+bool testPositionLowpass2FrequencyResponse() {
+    const Eigen::Vector3d axis = Eigen::Vector3d(.4,-.7,.2).normalized();
+    constexpr double amplitude_m = .001, amplitude_rad = .02;
+    for (double damping : {std::sqrt(0.5), .8, 1.0}) {
+        const auto cfg = positionLowpass2Config(damping);
+        for (double f : {.1,.5,1.,2.,3.,4.,5.,8.,10.,13.,17.,20.,25.}) {
+            rb_servo::control::FollowerOutputSmd smd(cfg);
+            const double w = kTwoPi*f;
+            const Eigen::Vector3d initial_w = amplitude_rad*w*axis;
+            smd.reset(poseAt(0), {amplitude_m*w,0,0,initial_w.x(),initial_w.y(),initial_w.z()});
+            const int settle = 1500;
+            const int samples = static_cast<int>(std::ceil(std::max(4.,4./f)/kDt));
+            double linear_sin=0,linear_cos=0,angular_sin=0,angular_cos=0;
+            for (int i=1;i<=settle+samples;++i) {
+                const double phase=w*i*kDt;
+                auto reference=rb_servo::math::poseFromSe3(pinocchio::SE3(
+                    rb_servo::math::exp3(amplitude_rad*std::sin(phase)*axis),
+                    Eigen::Vector3d(amplitude_m*std::sin(phase),0,0)));
+                if (i%2==0) for (double& q:*reference.quaternion_xyzw) q=-q;
+                // Position-only means velocity/acceleration must not be a second
+                // inconsistent reference. Large finite values make leakage fail.
+                const rb_servo::Vec6 unused{100,-100,100,-100,100,-100};
+                const auto out=smd.step(reference,unused,kDt,&unused,true);
+                RB_CHECK(!smd.reseededLastStep());
+                if (i<=settle) continue;
+                const double angle=axis.dot(rb_servo::math::log3(rb_servo::math::rotationFromPose(out)));
+                linear_sin+=out.x*std::sin(phase); linear_cos+=out.x*std::cos(phase);
+                angular_sin+=angle*std::sin(phase); angular_cos+=angle*std::cos(phase);
+            }
+            const double linear_gain=2*std::hypot(linear_sin,linear_cos)/(samples*amplitude_m);
+            const double angular_gain=2*std::hypot(angular_sin,angular_cos)/(samples*amplitude_rad);
+            const auto analytic=[&](double nf) {
+                const double wn=kTwoPi*nf;
+                const double warped=2/kDt*std::tan(.5*w*kDt);
+                return wn*wn/std::hypot(wn*wn-warped*warped,2*damping*wn*warped);
+            };
+            RB_CHECK(linear_gain<=1.00001 && angular_gain<=1.00001);
+            RB_CHECK(std::abs(linear_gain-analytic(cfg.nf_linear_hz))<1e-5);
+            RB_CHECK(std::abs(angular_gain-analytic(cfg.nf_angular_hz))<1e-5);
+        }
+    }
+    return true;
+}
+
+bool testPositionLowpass2RampAndStop() {
+    for (double damping : {std::sqrt(0.5), .8, 1.0}) {
+        const auto cfg=positionLowpass2Config(damping);
+        rb_servo::control::FollowerOutputSmd smd(cfg);
+        constexpr double speed=.15, omega=.2;
+        smd.reset(poseAt(0), {speed,0,0,0,0,omega});
+        double max_stop_overshoot=0;
+        rb_servo::Pose6D out;
+        for (int i=1;i<=2500;++i) {
+            const double t=i*kDt,phase=std::min(t,2.0);
+            const auto reference=rb_servo::math::poseFromSe3(pinocchio::SE3(
+                rb_servo::math::exp3(Eigen::Vector3d(0,0,omega*phase)),
+                Eigen::Vector3d(speed*phase,0,0)));
+            out=smd.step(reference,{},kDt,nullptr,true);
+            RB_CHECK(!smd.reseededLastStep());
+            if (i==1000) {
+                RB_CHECK(std::abs((reference.x-out.x)-2*damping*speed/(kTwoPi*cfg.nf_linear_hz))<1e-8);
+                const double lag=rb_servo::math::orientationDistanceRad(reference,out);
+                RB_CHECK(std::abs(lag-2*damping*omega/(kTwoPi*cfg.nf_angular_hz))<1e-8);
+            }
+            if (i>1000) max_stop_overshoot=std::max(max_stop_overshoot,out.x-.3);
+        }
+        RB_CHECK(std::abs(out.x-.3)<1e-10);
+        // A nonpeaking sinusoidal response need not have a monotone step/stop.
+        // The bounded overshoot is measured explicitly, rather than claiming it
+        // is absent for underdamping (Butterworth damping has 4.3% step overshoot).
+        RB_CHECK(max_stop_overshoot<.001);
+        std::cout<<"position_lowpass2 zeta="<<damping<<" 150 mm/s stop overshoot="
+                 <<max_stop_overshoot*1000<<" mm\n";
+    }
+    return true;
+}
+
+bool testPositionLowpass2ChangingAxisFoldAndReset() {
+    const auto cfg=positionLowpass2Config(.8);
+    rb_servo::control::FollowerOutputSmd baseline(cfg),folded(cfg);
+    Eigen::Quaterniond gauge=Eigen::Quaterniond::Identity();
+    Eigen::Vector3d dp=Eigen::Vector3d::Zero();
+    const auto target=[](double t) {
+        return rb_servo::math::poseFromSe3(pinocchio::SE3(
+            rb_servo::math::exp3(Eigen::Vector3d(.4,-.2,.3))*
+            rb_servo::math::exp3(Eigen::Vector3d(.12*std::sin(2*t),.08*std::cos(3*t),.1*std::sin(t))),
+            Eigen::Vector3d(.01*std::sin(t),.02*std::sin(2*t),.01*std::cos(t))));
+    };
+    baseline.reset(target(0),{});folded.reset(target(0),{});
+    double t=0,max_error=0;
+    for (int i=1;i<=4000;++i) {
+        // Recorded 500 Hz scheduling jitter changes dt, not the physical state.
+        const double dt=std::array<double,4>{.0018,.0022,.0019,.0021}[i%4];
+        t+=dt;
+        if (i==1500) {
+            gauge=Eigen::Quaterniond(rb_servo::math::exp3(Eigen::Vector3d(.08,-.05,.07)));
+            dp=Eigen::Vector3d(.007,-.004,.006);
+            folded.shift(dp,gauge);
+        }
+        const auto reference=target(t);
+        auto shifted=rb_servo::math::poseFromSe3(pinocchio::SE3(
+            gauge.toRotationMatrix()*rb_servo::math::rotationFromPose(reference),
+            Eigen::Vector3d(reference.x,reference.y,reference.z)+dp));
+        if (i%2==0) for(double& q:*shifted.quaternion_xyzw) q=-q;
+        const auto a=baseline.step(reference,{},dt,nullptr,true);
+        const rb_servo::Vec6 ignored{42,-7,13,100,-200,300};
+        const auto b=folded.step(shifted,ignored,dt,&ignored,false);
+        const auto expected=rb_servo::math::poseFromSe3(pinocchio::SE3(
+            gauge.toRotationMatrix()*rb_servo::math::rotationFromPose(a),
+            Eigen::Vector3d(a.x,a.y,a.z)+dp));
+        RB_CHECK(!baseline.reseededLastStep() && !folded.reseededLastStep());
+        RB_CHECK(rb_servo::math::positionDistance(b,expected)<1e-11);
+        RB_CHECK(rb_servo::math::orientationDistanceRad(b,expected)<1e-11);
+        RB_CHECK(std::abs(Eigen::Quaterniond(rb_servo::math::rotationFromPose(b)).norm()-1)<1e-12);
+        max_error=std::max(max_error,rb_servo::math::orientationDistanceRad(a,reference));
+    }
+    RB_CHECK(max_error<.05);
+    // A stationary hold reset must discard BOTH state velocity and reference
+    // history. Otherwise the first trapezoidal step can pull toward an old input.
+    const auto hold=poseAt(.6);
+    folded.reset(hold,{});
+    for(int i=0;i<100;++i) {
+        const auto out=folded.step(hold,{},kDt,nullptr,true);
+        RB_CHECK(rb_servo::math::positionDistance(out,hold)<1e-12);
+        RB_CHECK(rb_servo::math::orientationDistanceRad(out,hold)<1e-12);
+    }
+    const auto unchanged=folded.step(poseAt(.61),{},0,nullptr,true);
+    RB_CHECK(rb_servo::math::positionDistance(unchanged,hold)<1e-12);
+    folded.step(poseAt(.61),{},std::numeric_limits<double>::quiet_NaN(),nullptr,true);
+    RB_CHECK(rb_servo::math::positionDistance(folded.step(hold,{},kDt),hold)<1e-12);
+    folded.deactivate();
+    const auto cold=folded.step(poseAt(.7),{},kDt,nullptr,true);
+    RB_CHECK(folded.reseededLastStep() && std::abs(cold.x-.7)<1e-12);
+    const auto jumped=folded.step(poseAt(.9),{},kDt,nullptr,true);
+    RB_CHECK(folded.reseededLastStep() && std::abs(jumped.x-.9)<1e-12);
+    RB_CHECK(std::abs(folded.step(poseAt(.9),{},kDt).x-.9)<1e-12);
+    // A moving reset does retain the supplied physical velocity.
+    folded.reset(hold,{.04,0,0,0,0,0});
+    const auto moving=folded.step(hold,{},kDt,nullptr,true);
+    RB_CHECK(moving.x>hold.x && moving.x<hold.x+.04*kDt);
     return true;
 }
 
@@ -480,8 +650,9 @@ int replayRecordedReference(const char* input_path, const char* output_path,
         if (!std::isfinite(dt) || dt<=0 || dt>0.02) throw std::runtime_error("invalid replay dt");
         rb_servo::Vec6 xi{};
         if (row.contains("reference_velocity")) xi=velocity(row.at("reference_velocity"));
-        else if (smd_cfg.velocity_ff_linear_gain!=0.0 ||
-                 rb_servo::math::orientationDistanceRad(reference,poseAt(0.0))>1e-12)
+        else if (smd_cfg.mode==rb_servo::FollowerOutputSmdMode::LegacySmd &&
+                 (smd_cfg.velocity_ff_linear_gain!=0.0 ||
+                  rb_servo::math::orientationDistanceRad(reference,poseAt(0.0))>1e-12))
             throw std::runtime_error("reference_velocity required for this replay");
         if (row.contains("shift_m")) {
             const auto& d=row.at("shift_m"); const auto& q=row.at("shift_quat_wxyz");
@@ -504,6 +675,26 @@ int replayRecordedReference(const char* input_path, const char* output_path,
 
 }  // namespace
 
+bool testCurrentTwistStandAfterReset() {
+    // The hand-over twist a Hold reads off this conditioner is the stand-frame twist it
+    // was seeded with (2026-09-06), independent of the output orientation.
+    rb_servo::control::FollowerOutputSmd smd(config());
+    rb_servo::Pose6D pose = poseAt(0.0);
+    pose.rz = 1.2;
+    pose.rx = -0.4;
+    const rb_servo::Vec6 xi{0.12, -0.03, 0.05, 0.2, 0.1, -0.3};
+    smd.reset(pose, xi);
+    const rb_servo::Vec6 back = smd.currentTwistStand();
+    RB_CHECK(std::abs(back.x - xi.x) < 1e-12 && std::abs(back.y - xi.y) < 1e-12 &&
+             std::abs(back.z - xi.z) < 1e-12);
+    // reset() stores the angular part as given; the accessor rotates the body rate out
+    // through the same orientation, so the norm is preserved.
+    const double n_in = std::sqrt(xi.rx * xi.rx + xi.ry * xi.ry + xi.rz * xi.rz);
+    const double n_out = std::sqrt(back.rx * back.rx + back.ry * back.ry + back.rz * back.rz);
+    RB_CHECK(std::abs(n_in - n_out) < 1e-9);
+    return true;
+}
+
 int main(int argc, char** argv) {
     if (argc!=1) {
         try {
@@ -512,6 +703,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("usage: test_follower_output_smd [--replay-reference INPUT OUTPUT STACK_YAML PROFILE]");
         } catch (const std::exception& e) {std::cerr << e.what() << '\n';return 1;}
     }
+    if (!testCurrentTwistStandAfterReset()) return 1;
     if (!testStepNoOvershoot()) return 1;
     if (!testRampLag()) return 1;
     if (!testSineResponse()) return 1;
@@ -522,6 +714,9 @@ int main(int argc, char** argv) {
     if (!testChangingAxisProfile()) return 1;
     if (!testPhysicalAngularLowPass()) return 1;
     if (!testLinearFeedforwardGain()) return 1;
+    if (!testPositionLowpass2FrequencyResponse()) return 1;
+    if (!testPositionLowpass2RampAndStop()) return 1;
+    if (!testPositionLowpass2ChangingAxisFoldAndReset()) return 1;
     if (!testSelectedRealConditioner()) return 1;
     return 0;
 }
