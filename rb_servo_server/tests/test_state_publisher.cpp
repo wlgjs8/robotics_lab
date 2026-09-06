@@ -425,6 +425,10 @@ bool testStatePublisherSerializesPerPairSelfCollisionBands() {
     grip.gripper_gripper = true;
     grip.d_hard_m = 0.025;
     grip.d_slow_m = 0.067;
+    // + = separating. The viewer needs this to tell a pair the barrier is braking from
+    // one that merely parks inside the band (this cell holds nine of those all run).
+    intra.rate_m_s = 0.0;
+    grip.rate_m_s = -0.012;
     snapshot.self_collision_near_pairs = {intra, grip};
 
     rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
@@ -439,6 +443,8 @@ bool testStatePublisherSerializesPerPairSelfCollisionBands() {
     RB_CHECK(a.at("d_slow_m").get<double>() == 0.015);
     // Nearest, but NOT violating: 22.9 mm is well outside its own 5 mm floor.
     RB_CHECK(a.at("clearance_m").get<double>() >= a.at("d_hard_m").get<double>());
+    // ...and not closing either, so a viewer must not paint it as being braked.
+    RB_CHECK(a.at("rate_m_s").get<double>() == 0.0);
 
     const auto& b = pairs.at(1);
     RB_CHECK(b.at("gripper_gripper").get<bool>());
@@ -446,6 +452,7 @@ bool testStatePublisherSerializesPerPairSelfCollisionBands() {
     RB_CHECK(b.at("d_hard_m").get<double>() == 0.025);
     // Ranked second, but this is the pair actually in hard violation.
     RB_CHECK(b.at("clearance_m").get<double>() < b.at("d_hard_m").get<double>());
+    RB_CHECK(b.at("rate_m_s").get<double>() < 0.0);  // and closing
     return true;
 }
 

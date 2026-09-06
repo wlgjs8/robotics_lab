@@ -87,6 +87,20 @@ Side is decided by the manifest's `left_prefix`/`right_prefix`, not by searching
 the words "left"/"right": the unified URDF has stand links named `stand_left_arm_base`,
 and the articulated gripper has `<right_prefix>pika_finger_left`.
 
+The close-call tubes are coloured per pair: **red** below the pair's own `d_hard_m`,
+**blue** inside its own `d_slow_m` *while closing* — the barrier is braking that pair —
+and green otherwise. Red and blue are drawn **without** the self-collision debug
+checkbox (2026-09-06); only the green "near but not acted on" tubes need it. Before
+that, nothing was drawn unless the checkbox was on, so an operator watching the arm get
+slowed down had no way to see which pair was doing it.
+
+Blue keys on `rate_m_s < 0`, not on clearance alone, and that is load-bearing: this
+cell parks `link1` 82–84 mm from the stand against a 90 mm self slow band on every
+tick, so clearance alone paints **nine permanent tubes** that never mean anything. The
+barrier removes only the *closing* component, so closing is what separates a pair it is
+acting on from one that merely sits in the band. A pair with no `rate_m_s` (older
+server) falls back to clearance alone, which is the conservative direction.
+
 `d_hard_m` / `d_slow_m` (and the `intra_arm` / `gripper_gripper` flags) are published
 per near pair by the server because **nearest is not violating**. `near_pairs` is
 ordered by RAW clearance while the monitor enforces five bands with floors an order of

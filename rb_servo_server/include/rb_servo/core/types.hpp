@@ -1495,6 +1495,13 @@ struct SelfCollisionNearPairViz {
     // structural pairs red and names the wrong parts as the colliding ones.
     double d_hard_m = 0.0;
     double d_slow_m = 0.0;
+    // Signed clearance rate of THIS pair, + = separating. Published so a viewer can
+    // tell a pair the barrier is ACTING on from one that merely sits inside the band
+    // forever: the RB5's shoulders park link1 at 82-84 mm against the 90 mm self slow
+    // band on every tick, so "inside d_slow" alone paints nine permanent tubes that
+    // never mean anything. The barrier only removes the CLOSING component, so closing
+    // is the property that separates the two.
+    double rate_m_s = 0.0;
 };
 
 struct ServoSnapshot {

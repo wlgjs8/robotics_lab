@@ -7008,9 +7008,12 @@ class SelfCollisionNearPairVizTest(unittest.TestCase):
         return store.latest()
 
     @staticmethod
-    def _pair(name_a, name_b, clearance):
-        return {"name_a": name_a, "name_b": name_b,
+    def _pair(name_a, name_b, clearance, rate=None):
+        pair = {"name_a": name_a, "name_b": name_b,
                 "p_a_m": [0.0, 0.0, 0.0], "p_b_m": [0.0, 0.0, clearance], "clearance_m": clearance}
+        if rate is not None:
+            pair["rate_m_s"] = rate
+        return pair
 
     def test_near_pair_color_bands(self):
         from rb_servo_gui import scene
@@ -7034,7 +7037,7 @@ class SelfCollisionNearPairVizTest(unittest.TestCase):
         handles = {"_server": server}
         latest = self._latest([
             self._pair("a", "b", 0.003),   # < d_hard -> red
-            self._pair("c", "d", 0.012),   # [d_hard, d_slow) -> amber
+            self._pair("c", "d", 0.012),   # [d_hard, d_slow) -> blue
             self._pair("e", "f", 0.040),   # >= d_slow -> green
         ], d_slow=0.025)
         update_self_collision_near_pairs(handles, latest, show=True)
@@ -7042,6 +7045,73 @@ class SelfCollisionNearPairVizTest(unittest.TestCase):
         self.assertIn(scene._SELF_COLLISION_NEAR_HARD_RGB, colors)
         self.assertIn(scene._SELF_COLLISION_NEAR_CAUTION_RGB, colors)
         self.assertIn(scene._SELF_COLLISION_NEAR_OK_RGB, colors)
+
+    def _near_pair_scene(self):
+        class _Scene:
+            def __init__(self):
+                self.colors = {}
+
+            def add_frame(self, name, **kw):
+                return object()
+
+            def add_mesh_simple(self, name, **kw):
+                self.colors[name] = kw.get("color")
+                return type("_H", (), {"visible": kw.get("visible")})()
+
+        return type("_Server", (), {"scene": _Scene()})()
+
+    def test_braked_pairs_are_drawn_without_the_debug_toggle(self):
+        """Red (breached) and blue (being braked) do not need the checkbox.
+
+        Until 2026-09-06 every near-pair tube was gated on the self-collision debug
+        overlay, so an operator watching the arm slow down could not see which pair was
+        doing it. The green "near but not acted on" tubes stay behind the toggle.
+        """
+        from rb_servo_gui import scene
+
+        server = self._near_pair_scene()
+        handles = {"_server": server}
+        latest = self._latest([
+            self._pair("a", "b", 0.003, rate=-0.01),   # breached  -> red
+            self._pair("c", "d", 0.012, rate=-0.01),   # braking   -> blue
+            self._pair("e", "f", 0.040, rate=-0.01),   # far       -> green, debug only
+        ], d_slow=0.025)
+        update_self_collision_near_pairs(handles, latest, show=False)
+        colors = list(server.scene.colors.values())
+        self.assertIn(scene._SELF_COLLISION_NEAR_HARD_RGB, colors)
+        self.assertIn(scene._SELF_COLLISION_NEAR_CAUTION_RGB, colors)
+        self.assertNotIn(scene._SELF_COLLISION_NEAR_OK_RGB, colors)
+
+    def test_pair_inside_the_slow_band_but_not_closing_is_not_blue(self):
+        """Inside d_slow is not the same as being braked.
+
+        This cell parks link1 82-84 mm from the stand against a 90 mm self slow band on
+        every tick. Banding on clearance alone paints nine permanent tubes that never
+        mean anything; the barrier only removes the CLOSING component, so a pair that is
+        not approaching is not being acted on.
+        """
+        from rb_servo_gui import scene
+
+        for rate, expected in ((+0.02, "separating"), (0.0, "stationary")):
+            server = self._near_pair_scene()
+            handles = {"_server": server}
+            latest = self._latest(
+                [self._pair("a", "b", 0.012, rate=rate)], d_slow=0.025)
+            update_self_collision_near_pairs(handles, latest, show=True)
+            colors = list(server.scene.colors.values())
+            self.assertNotIn(scene._SELF_COLLISION_NEAR_CAUTION_RGB, colors, msg=expected)
+            self.assertIn(scene._SELF_COLLISION_NEAR_OK_RGB, colors, msg=expected)
+
+    def test_pair_without_a_published_rate_keeps_the_clearance_only_band(self):
+        """An older server publishes no rate_m_s; do not silently stop warning."""
+        from rb_servo_gui import scene
+
+        server = self._near_pair_scene()
+        handles = {"_server": server}
+        latest = self._latest([self._pair("a", "b", 0.012)], d_slow=0.025)
+        update_self_collision_near_pairs(handles, latest, show=True)
+        self.assertIn(scene._SELF_COLLISION_NEAR_CAUTION_RGB,
+                      list(server.scene.colors.values()))
 
     def test_status_names_closest_pair(self):
         latest = self._latest([

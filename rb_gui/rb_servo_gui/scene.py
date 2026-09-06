@@ -2034,14 +2034,17 @@ def _place_capsule(handle: Any, p0: tuple[float, float, float], p1: tuple[float,
 # closest checked pairs as witness segments {p_a_m, p_b_m, clearance_m}; we draw a
 # thin tube per pair, red when within the hard floor, yellow when merely close.
 _SELF_COLLISION_NEAR_HARD_RGB = (235, 40, 40)       # clearance < d_hard
-_SELF_COLLISION_NEAR_CAUTION_RGB = (255, 210, 40)   # d_hard <= clearance < d_slow
-_SELF_COLLISION_NEAR_OK_RGB = (70, 200, 90)         # clearance >= d_slow (in viz reach)
+_SELF_COLLISION_NEAR_CAUTION_RGB = (40, 120, 255)   # in d_slow AND closing: being braked
+_SELF_COLLISION_NEAR_OK_RGB = (70, 200, 90)         # everything else in viz reach
 # EXTERNAL pairs (arm<->floor/ground_plane) get a distinct blue/cyan palette so the
 # operator can tell the floor barrier apart from robot self-collision, and are banded
 # against the external d_hard/d_slow (which differ from the self thresholds).
 _EXTERNAL_NEAR_HARD_RGB = (190, 60, 235)            # clearance < external d_hard (violet)
 _EXTERNAL_NEAR_CAUTION_RGB = (60, 200, 235)         # external [d_hard, d_slow) (cyan)
 _EXTERNAL_NEAR_OK_RGB = (60, 110, 235)              # clearance >= external d_slow (blue)
+# Below this the pair is not approaching in any way the barrier would act on. It is a
+# deadband on a finite difference between monitor evaluations, not a physical bound.
+_NEAR_PAIR_CLOSING_EPS_M_S = 0.001
 _SELF_COLLISION_NEAR_RADIUS_M = 0.004
 _SELF_COLLISION_NEAR_OPACITY = 0.9
 
@@ -2105,25 +2108,40 @@ def _near_pair_band(
         palette = (_SELF_COLLISION_NEAR_HARD_RGB, _SELF_COLLISION_NEAR_CAUTION_RGB, _SELF_COLLISION_NEAR_OK_RGB)
     if clearance_m < d_hard:
         return kind, "hard", palette[0]
-    if clearance_m < d_slow:
+    # CLOSING, not merely inside the band. The barrier removes only the closing
+    # component, and this cell parks link1 82-84 mm from the stand against a 90 mm
+    # slow band on every tick -- banding on clearance alone paints nine tubes that are
+    # permanent and mean nothing. A pair with no published rate (older server) keeps
+    # the clearance-only behaviour.
+    rate = pair.get("rate_m_s")
+    closing = (not isinstance(rate, (int, float)) or isinstance(rate, bool)
+               or not math.isfinite(float(rate)) or float(rate) < -_NEAR_PAIR_CLOSING_EPS_M_S)
+    if clearance_m < d_slow and closing:
         return kind, "caution", palette[1]
     return kind, "ok", palette[2]
 
 
 def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
     """Show/update the URDF-mesh close-call segments from self_collision.near_pairs.
-    A thin tube spans each checked pair's witness points, colored by clearance band.
-    SELF pairs (robot<->robot/stand): red < d_hard, amber in [d_hard, d_slow), green
-    >= d_slow. EXTERNAL pairs (arm<->floor/ground_plane, pair.external=true): a distinct
-    violet/cyan/blue palette banded against the external d_hard/d_slow. Driven by the
-    COMMANDED (q_sent) verdict the server publishes, so it mirrors what the guard checks
-    even when the displayed q_actual diverges."""
+
+    A thin tube spans each checked pair's witness points, colored by band: RED below
+    the pair's own d_hard, BLUE inside its own d_slow while CLOSING (the barrier is
+    braking that pair), green otherwise. EXTERNAL pairs (arm<->floor/ground_plane,
+    pair.external=true) use a distinct violet/cyan/blue palette banded against the
+    external thresholds. Driven by the COMMANDED (q_sent) verdict the server publishes,
+    so it mirrors what the guard checks even when the displayed q_actual diverges.
+
+    `show` is the DEBUG view (the "자기충돌 검사 표시" checkbox): it adds the green
+    "near but not acted on" tubes. Red and blue are drawn WITHOUT it, because a pair
+    being braked or breached is not a debugging detail -- before 2026-09-06 nothing was
+    drawn at all unless that checkbox was on, so an operator watching the arm get
+    slowed down had no way to see which pair was doing it."""
     if not isinstance(scene_handles, dict):
         return
     server = scene_handles.get("_server")
     cache = scene_handles.setdefault("_self_collision_near_cache", {})
     used_keys: set[str] = set()
-    if show and server is not None:
+    if server is not None:
         sc = getattr(latest, "self_collision", None) if latest is not None else None
         if isinstance(sc, Mapping):
             hard = _finite_or(sc.get("margin_m"), 0.005)  # margin_m == mesh d_hard_m
@@ -2144,6 +2162,8 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
                         continue
                     kind, band, rgb = _near_pair_band(
                         pair, float(clearance), hard, slow, ext_hard, ext_slow)
+                    if band == "ok" and not show:
+                        continue
                     key = f"{i}_{kind}_{band}"
                     handle = _ensure_near_pair_handle(server, scene_handles, key, math.dist(a, b), rgb)
                     if handle is None:
@@ -2154,7 +2174,7 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
                         pass
                     used_keys.add(key)
     for key, entry in cache.items():
-        _set_visible(entry["handle"], show and key in used_keys)
+        _set_visible(entry["handle"], key in used_keys)
 
 
 def _is_finite(value: Any) -> bool:

@@ -2013,6 +2013,10 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
                 // once the categories carry different floors.
                 entry["d_hard_m"] = p.d_hard_m;
                 entry["d_slow_m"] = p.d_slow_m;
+                // + = separating. Lets the viewer draw the pairs the barrier is acting
+                // on rather than every pair inside the band (see the struct comment:
+                // nine of them are permanent on this cell).
+                entry["rate_m_s"] = p.rate_m_s;
                 arr.push_back(std::move(entry));
             }
             self_collision["near_pairs"] = std::move(arr);
