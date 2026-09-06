@@ -185,6 +185,13 @@ struct CollisionMonitorConfig {
     double gripper_gripper_a_brake_m_s2 = 4.0;
     double gripper_gripper_hyst_m = 0.005;
     double gripper_gripper_recover_speed_m_s = 0.0;
+    // The floor kept when the caller excludes these pairs (force control covers both
+    // arms). 0 = the exclusion is total. > 0 builds the row with d_slow == d_hard, so
+    // there is NO slow band: nothing is braked until the pairs are this close, and
+    // then the closing component is simply removed. See config.hpp for why: coverage
+    // handed the grippers to an untared sensor for 93.6 % of a 517 s rollout and they
+    // reached -48.7 mm (servo_log_20260906_195814).
+    double gripper_gripper_covered_d_hard_m = 0.0;
 
     // ---- EXTERNAL-BOX keep-out velocity-barrier params ----
     // Applied ONLY to arm<->runtime-external-box pairs (the detected NTC-321 keep-out

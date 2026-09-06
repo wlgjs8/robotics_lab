@@ -907,6 +907,24 @@ safety:
       # inside the floor that means no deeper, opening free -- never a latch.
       gripper_gripper:
         exclude_when_force_covered: true
+        # ...but never all the way. A BARE floor with no slow band: the handover is
+        # unobstructed down to 5 mm and then closing simply stops.
+        #
+        # 2026-09-06, servo_log_20260906_195814 (517 s pi0.5 rollout). The exclusion
+        # turned out to be one-sided. Coverage was on for 93.6 % of ticks while NO tare
+        # was ever accepted -- so the sensor that the exclusion hands the contact to
+        # could not have felt it -- the grippers closed to -6 mm with the barrier off,
+        # and when coverage dropped the restored 25 mm floor could only hold them:
+        # clamp_hold stops further closing and never pushes out, so the model ran to
+        # -48.7 mm. The tare hole is closed separately (policy_runner refuses a rollout
+        # with compliance enabled and no accepted tare); this bounds the damage if
+        # coverage is ever wrong again for some other reason.
+        #
+        # 5 mm, not 25: it must not obstruct the tip-to-tip handover the exclusion
+        # exists for. It is also now backed by geometry -- the 2026-09-06 mount
+        # calibration took the arm-to-arm model error to ~1 mm, where the 25 mm figure
+        # below was sized for the ~20 mm error measured on 2026-09-04.
+        covered_d_hard_m: 0.005
         # 2026-09-05: pinned at the pre-2026-09-05 self values (they used to inherit
         # 25/67). NOT tightened to "exact" yet: seven real gripper-gripper contacts on
         # 2026-09-04 (mirror F/T forces, cos 0.89-1.00) happened while THIS model

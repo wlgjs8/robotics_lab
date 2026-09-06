@@ -1121,6 +1121,36 @@ static bool runGripperClassAndExtrapolation() {
     cons.clear();
     engaged.clear();
 
+    // covered_d_hard_m: the exclusion keeps a BARE floor. Coverage handed the grippers
+    // to an untared sensor for 93.6 % of a 517 s rollout and they reached -48.7 mm
+    // (servo_log_20260906_195814); a floor that is never removed bounds that, and with
+    // d_slow == d_hard it costs the handover nothing until the pairs are that close.
+    CollisionMonitorConfig floored = cfg;
+    floored.gripper_gripper_covered_d_hard_m = 0.005;
+    // 20 mm: inside the 30 mm gripper band, so the UNCOVERED barrier acts...
+    buildCollisionConstraints(grip, floored, 0.0, cons, &engaged);
+    RB_CHECK(cons.size() == 1);
+    cons.clear();
+    engaged.clear();
+    // ...while covered it is above the kept floor, so nothing is built: no slow band.
+    buildCollisionConstraints(grip, floored, 0.0, cons, &engaged, excl);
+    RB_CHECK(cons.empty() && engaged.empty());
+    // 3 mm: below the kept floor. A row appears even though force control covers both
+    // arms, and being under the floor it blocks closing outright rather than braking.
+    CollisionVerdict deep = makePairVerdict(0.003, 0.0, jl, jr);
+    deep.near.front().gripper_gripper = true;
+    buildCollisionConstraints(deep, floored, 0.0, cons, &engaged, excl);
+    RB_CHECK(cons.size() == 1);
+    RB_CHECK(std::abs(cons[0].d_hard - 0.005) < 1e-12);
+    RB_CHECK(cons[0].xi == -floored.gripper_gripper_recover_speed_m_s);
+    cons.clear();
+    engaged.clear();
+    // covered_d_hard_m = 0 is the pre-2026-09-06 behaviour: excluded all the way down.
+    buildCollisionConstraints(deep, cfg, 0.0, cons, &engaged, excl);
+    RB_CHECK(cons.empty());
+    cons.clear();
+    engaged.clear();
+
     // Extrapolation by configuration: the verdict was evaluated at q_eval = 0; the
     // command starts from q = +0.1 rad on the closing joint, so the clearance the
     // row must use is d + Jn.dq = 0.050 - 0.100 = -0.050 (already through the

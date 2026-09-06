@@ -2307,6 +2307,9 @@ DualArmServoLoop::DualArmServoLoop(
             inherit(m.gripper_gripper.hyst_m, m.hyst_m);
         collision_monitor_cfg_.gripper_gripper_recover_speed_m_s =
             inherit(m.gripper_gripper.recover_speed_m_s, m.recover_speed_m_s);
+        // NOT inherited: 0 means "the exclusion is total", which is a real setting.
+        collision_monitor_cfg_.gripper_gripper_covered_d_hard_m =
+            m.gripper_gripper.covered_d_hard_m;
         // Cell structure (env_* geometry). Unset values inherit the self set, which is
         // the conservative direction: a wider floor, never a narrower one.
         collision_monitor_cfg_.environment_d_hard_m =

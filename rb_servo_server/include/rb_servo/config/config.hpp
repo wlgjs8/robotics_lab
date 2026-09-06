@@ -695,6 +695,20 @@ struct SelfCollisionConfig {
             double a_brake_m_s2 = -1.0;
             double hyst_m = -1.0;
             double recover_speed_m_s = -1.0;
+            // The floor that SURVIVES exclude_when_force_covered. 0 = the exclusion is
+            // total (behaviour before 2026-09-06); > 0 keeps a bare hard floor with NO
+            // slow band, so the handover is unobstructed right up to this distance and
+            // then closing simply stops.
+            //
+            // It exists because the exclusion turned out to be one-sided in practice.
+            // On servo_log_20260906_195814 (517 s pi0.5 rollout) coverage was on for
+            // 93.6 % of ticks -- with no tare ever accepted, so the sensor could not
+            // have handled the contact it was being handed -- the grippers closed to
+            // -6 mm while it was on, and when it dropped the restored 25 mm barrier
+            // could only hold them there: clamp_hold stops further closing and never
+            // pushes out, so the model went to -48.7 mm. A floor that is never removed
+            // bounds that, and 5 mm is well inside the handover envelope.
+            double covered_d_hard_m = 0.0;
         };
         GripperGripperConfig gripper_gripper;
 

@@ -775,8 +775,57 @@ class FlowMatchingActionSource:
                 "continuous_hold_resume=true; refusing policy inference and motion"
             )
 
+    def _require_force_control_tare(self, payload: dict[str, Any] | None) -> None:
+        """Refuse to run compliance that has no F/T bias behind it.
+
+        force_control decides per tick whether it "covers" an arm, and an untared
+        sensor makes that decision flip: the server reports
+        `coverage_reason = "F/T has no bias yet - run a tare before enabling
+        compliance"`, coverage drops, and it comes back as soon as the next sample
+        looks plausible. That flicker is not benign, because
+        `gripper_gripper.exclude_when_force_covered` hands the two grippers to the F/T
+        sensor whenever coverage is on. Measured on servo_log_20260906_195814 (517 s
+        pi0.5 rollout): coverage was on for 93.6 % of ticks with no tare ever accepted,
+        the grippers were free to close on each other while it was on, and by the time
+        it dropped they were already 6 mm inside each other -- clamp_hold then held
+        them there down to -48.7 mm, because the barrier stops further closing and
+        never pushes out. So the arms got the permissive half of compliance (barrier
+        off) without the half that is supposed to replace it (a sensor that can feel
+        the contact).
+
+        Checked on every snapshot, not once at startup: a tare can be lost to a
+        reconnect mid-run, and this is exactly the case that produced the collision.
+        """
+        if not isinstance(payload, dict):
+            return
+        offenders = []
+        for arm in ("left", "right"):
+            side = payload.get(arm)
+            if not isinstance(side, dict):
+                continue
+            fc = side.get("force_control")
+            if not isinstance(fc, dict) or fc.get("enabled") is not True:
+                continue  # compliance off on this arm: nothing to back with a tare
+            ft = side.get("force_torque")
+            ft = ft if isinstance(ft, dict) else {}
+            if ft.get("bias_valid") is True and str(ft.get("tare_state", "")) == "accepted":
+                continue
+            offenders.append(
+                f"{arm}: tare_state={str(ft.get('tare_state', '')) or 'missing'}, "
+                f"bias_valid={ft.get('bias_valid')!r}"
+            )
+        if offenders:
+            raise ValueError(
+                "force_control is enabled without an accepted F/T tare (" + "; ".join(offenders)
+                + "). Tare both arms before the rollout: while compliance claims coverage "
+                "the gripper<->gripper barrier is handed to the sensor, so an untared "
+                "sensor removes the guard without replacing it. Refusing policy "
+                "inference and motion."
+            )
+
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         self._require_chunk_execution_profile(snapshot.payload)
+        self._require_force_control_tare(snapshot.payload)
         self._last_overlay_payload = snapshot.payload
         self._handle_server_motion_epoch(snapshot)
         self._before_policy_intent(snapshot, now_monotonic)

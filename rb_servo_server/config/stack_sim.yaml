@@ -390,6 +390,10 @@ safety:
       # inside the floor that means no deeper, opening free -- never a latch.
       gripper_gripper:
         exclude_when_force_covered: true
+        # Bare floor kept through the exclusion, matching stack_real.yaml (see the
+        # evidence there: an untared sensor held coverage for 93.6 % of a 517 s rollout
+        # and the grippers reached -48.7 mm).
+        covered_d_hard_m: 0.005
         # 2026-09-05: pinned at the pre-2026-09-05 self values (they used to inherit
         # 25/67). NOT tightened to "exact" yet: seven real gripper-gripper contacts on
         # 2026-09-04 (mirror F/T forces, cos 0.89-1.00) happened while THIS model

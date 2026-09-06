@@ -234,15 +234,23 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
             (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.geom_a)) << 32) |
             static_cast<std::uint32_t>(p.geom_b);
         const bool grip = p.gripper_gripper;
-        if (grip && opts.exclude_gripper_gripper) {
-            // Force control owns this contact: no row, and it is not "engaged".
+        // Force control owns this contact -- but only down to a floor that is never
+        // handed over. With gripper_gripper_covered_d_hard_m > 0 the row is still
+        // built, with d_slow == d_hard so there is NO slow band: the handover is
+        // unobstructed until the pairs are that close, and then closing stops. At 0
+        // the exclusion is total, which is what shipped before 2026-09-06.
+        const bool grip_covered = grip && opts.exclude_gripper_gripper;
+        const bool grip_covered_floor = grip_covered && cfg.gripper_gripper_covered_d_hard_m > 0.0;
+        if (grip_covered && !grip_covered_floor) {
             if (engaged_pairs) engaged_pairs->erase(pair_key);
             continue;
         }
         // Shared with the near-pair telemetry (nearPairHardFloorM/SlowBandM) so a
         // viewer bands each pair against the SAME floor the barrier enforces here.
-        const double d_hard = nearPairHardFloorM(cfg, p);
-        const double d_slow = nearPairSlowBandM(cfg, p);
+        const double d_hard = grip_covered_floor ? cfg.gripper_gripper_covered_d_hard_m
+                                                 : nearPairHardFloorM(cfg, p);
+        const double d_slow = grip_covered_floor ? cfg.gripper_gripper_covered_d_hard_m
+                                                 : nearPairSlowBandM(cfg, p);
         const double a_brake = p.external_box ? cfg.external_box_a_brake_m_s2
                              : p.external     ? cfg.external_a_brake_m_s2
                              : p.intra_arm    ? cfg.intra_arm_a_brake_m_s2

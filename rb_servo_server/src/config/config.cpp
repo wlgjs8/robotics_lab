@@ -1553,6 +1553,31 @@ void validateConfig(const DualArmConfig& cfg) {
                 throw std::runtime_error(
                     "safety.self_collision.mesh.gripper_gripper.d_slow_m must be >= d_hard_m");
             }
+            // The floor that survives the force-covered exclusion. It is deliberately a
+            // BARE floor (no slow band), so the only thing to check is that it is a
+            // floor at all and that it is not wider than the one it stands in for --
+            // a covered floor above gg_hard would make coverage MORE restrictive than
+            // no coverage, which inverts what the exclusion is for.
+            if (!std::isfinite(m.gripper_gripper.covered_d_hard_m) ||
+                m.gripper_gripper.covered_d_hard_m < 0.0) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.gripper_gripper.covered_d_hard_m must be "
+                    "finite and >= 0 (0 = no floor kept while force control covers both arms)");
+            }
+            if (m.gripper_gripper.covered_d_hard_m > gg_hard) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.gripper_gripper.covered_d_hard_m (" +
+                    std::to_string(m.gripper_gripper.covered_d_hard_m) +
+                    ") must be <= d_hard_m (" + std::to_string(gg_hard) +
+                    "): the covered floor may only ever be looser than the uncovered one");
+            }
+            if (m.gripper_gripper.covered_d_hard_m > 0.0 &&
+                !m.gripper_gripper.exclude_when_force_covered) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.gripper_gripper.covered_d_hard_m is set but "
+                    "exclude_when_force_covered is false: nothing is ever excluded, so the "
+                    "covered floor would never apply");
+            }
             if (v_max > 0.0 && gg_slow + 1e-9 < need(gg_hard, gg_a)) {
                 throw std::runtime_error(
                     "safety.self_collision.mesh.gripper_gripper.d_slow_m (" + std::to_string(gg_slow) +
@@ -3592,7 +3617,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     if (!g.IsMap()) fail("safety.self_collision.mesh.gripper_gripper must be a map", g);
                     validateAllowedKeys(g, {
                         "exclude_when_force_covered", "d_hard_m", "d_slow_m", "a_brake_m_s2",
-                        "hyst_m", "recover_speed_m_s",
+                        "hyst_m", "recover_speed_m_s", "covered_d_hard_m",
                     }, "safety.self_collision.mesh.gripper_gripper");
                     auto& gg = mc.gripper_gripper;
                     if (has(g, "exclude_when_force_covered")) gg.exclude_when_force_covered = asBool(g["exclude_when_force_covered"], "safety.self_collision.mesh.gripper_gripper.exclude_when_force_covered");
@@ -3601,6 +3626,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     if (has(g, "a_brake_m_s2")) gg.a_brake_m_s2 = asDouble(g["a_brake_m_s2"], "safety.self_collision.mesh.gripper_gripper.a_brake_m_s2");
                     if (has(g, "hyst_m")) gg.hyst_m = asDouble(g["hyst_m"], "safety.self_collision.mesh.gripper_gripper.hyst_m");
                     if (has(g, "recover_speed_m_s")) gg.recover_speed_m_s = asDouble(g["recover_speed_m_s"], "safety.self_collision.mesh.gripper_gripper.recover_speed_m_s");
+                    if (has(g, "covered_d_hard_m")) gg.covered_d_hard_m = asDouble(g["covered_d_hard_m"], "safety.self_collision.mesh.gripper_gripper.covered_d_hard_m");
                 }
                 if (has(m, "environment")) {
                     const YAML::Node e = m["environment"];
