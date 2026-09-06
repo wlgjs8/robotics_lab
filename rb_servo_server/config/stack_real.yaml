@@ -94,11 +94,24 @@ right_robot:
 # poses (TCPs on the stand, and the two TCPs touching each other) these mounts put
 # the left and right TCPs within 0.95 mm of a common tool length. See
 # tools/make_rb5_850e_urdfs.py for the poses and the joint angles.
+#
+# 2026-09-06: UPSTREAM ver2 -> ver1. Upstream ships two RB5 stands whose mounts differ
+# by 15.00 mm along the 45 deg plate (21.2 mm of arm-to-arm Y separation), and this
+# cell has ver1. Evidence, in make_rb5_850e_urdfs.py's header: the operator's tape on
+# the stand's Y width (ver1 507.3 mm vs ver2 521.4), plus a right-arm contact on the
+# base column -- far enough from its own mount for the offset to show -- that lands
+# 0.50 mm off the true stand surface under ver1 and 7.00 mm under ver2. The "0.95 mm
+# common tool length" check above does NOT discriminate the two: it is a per-arm
+# quantity, and the ver1/ver2 difference is symmetric, so it stays satisfied either
+# way. That is why this went unnoticed since 2026-09-02.
+# These MUST stay equal to the stand->stand_<side>_arm_base transform in
+# descriptions/urdf/dual_rb5_850e_ver3.urdf; rb_gui asserts exactly that
+# (test_default_mounts_match_the_tracked_unified_urdf).
 left_mount:
-  base_pose_in_stand: [0.17036, 0.19707, 0.57036, 2.185914, 0.523132, -2.186649]
+  base_pose_in_stand: [0.16285534, 0.18646447, 0.56285534, 2.185914, 0.523132, -2.186649]
 
 right_mount:
-  base_pose_in_stand: [0.17036, -0.19707, 0.57036, 2.185914, -0.523132, -0.954944]
+  base_pose_in_stand: [0.16285534, -0.18646447, 0.56285534, 2.185914, -0.523132, -0.954944]
 
 servo:
   rate_hz: 500

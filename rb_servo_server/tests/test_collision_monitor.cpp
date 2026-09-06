@@ -123,12 +123,14 @@ static bool run() {
 
     CollisionMonitor mon(cfg);
 
-    // geometry: link0..6 hulls (left 12 / right 12) + stand 7 + 2 gripper = 33
     std::cout << "geoms=" << mon.numGeometries() << " pairs=" << mon.numPairs() << "\n";
-    // 52, not 51: env_stand_riser carries a <collision> since 2026-09-06 (it is the
-    // one cell structure the arms approach — 35.7 mm measured), so it is a checked
-    // stand-side geometry in its own `environment` barrier class.
-    RB_CHECK(mon.numGeometries() == 52);  // see the breakdown in runArticulatedGripper
+    // 45 = 11 link hulls x 2 arms + 1 single-hull gripper x 2 + 20 stand CoACD hulls
+    //      + 1 env_stand_riser.
+    // The riser carries a <collision> since 2026-09-06 (it is the one cell structure
+    // the arms approach — 35.7 mm measured), so it is a checked stand-side geometry in
+    // its own `environment` barrier class. The stand contributes hulls ONLY since
+    // 2026-09-06: upstream ver1 has no primitive stand boxes (ver2's 7 went with it).
+    RB_CHECK(mon.numGeometries() == 45);  // see the breakdown in runArticulatedGripper
     RB_CHECK(mon.numPairs() > 0);
 
     {
@@ -987,17 +989,17 @@ static bool runArticulatedGripper() {
     RB_CHECK(mon.hasArticulatedGripper());
     // RB5-850E, derived rather than guessed:
     //   per arm  11 link hulls (link0,1,4,5,6 single + link2,link3 CoACD x3)
-    //          +  3 gripper (base + 2 fingers)          = 14
-    //   stand     7 primitive boxes + 20 CoACD hulls    = 27
-    //   total    14 x 2 + 27                            = 55
-    // The single-hull baseline replaces the 3 gripper geoms with 1, so 51.
+    //          +  3 gripper (base + 2 fingers)                    = 14
+    //   stand    20 CoACD hulls + 1 env_stand_riser               = 21
+    //   total    14 x 2 + 21                                      = 49
+    // The single-hull baseline replaces the 3 gripper geoms with 1, so 45.
     // The gripper bolts straight to the flange -- the F/T sensor is inside
     // pika_gripper.STL, not a separate body (docs/reference/pika_tool_geometry.md).
+    // The stand is hulls ONLY since the 2026-09-06 ver2 -> ver1 switch: upstream ver1
+    // ships no primitive stand boxes, and its raw stand mesh is dropped by the
+    // generator because a non-convex BVH blows the per-eval budget.
     std::cout << "articulated geoms=" << mon.numGeometries() << "\n";
-    // 56, not 55: env_stand_riser carries a <collision> since 2026-09-06, so the
-    // cell riser is a checked stand-side geometry (its own `environment` barrier
-    // class). 11 arm-link + 3 pika hulls per arm, 28 stand-side.
-    RB_CHECK(mon.numGeometries() == 56);
+    RB_CHECK(mon.numGeometries() == 49);
 
     const JointArray init = kInitPose;
     auto fingerClears = [](const CollisionVerdict& v) {

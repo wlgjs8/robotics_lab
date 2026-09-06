@@ -2,9 +2,9 @@
   "num_convex_hulls": 20,
   "threshold": 0.08,
   "max_convex_hull": 20,
-  "source": "dual_rb5_850e_stand_ver2.stl",
+  "source": "dual_rb5_850e_stand_ver1.stl",
   "units": "mm (URDF applies scale 0.001, same as dual_rb3_730e)",
-  "timestamp": "2026-09-02T21:00:30.979320",
+  "timestamp": "2026-09-06T16:38:47.745168",
   "coacd_parameters": {
     "threshold": 0.08,
     "max_convex_hull": 20,

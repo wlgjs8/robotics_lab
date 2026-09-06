@@ -1,18 +1,44 @@
 #!/usr/bin/env python3
-"""Derive dual_rb5_850e_ver3.urdf (our self-collision model) from upstream ver2.
+"""Derive dual_rb5_850e_ver3.urdf (our self-collision model) from upstream ver1.
+
+VER1, NOT VER2 -- WHICH STAND IS ACTUALLY BOLTED TO THE FLOOR (2026-09-06)
+=========================================================================
+Upstream ships two RB5 stands and they are NOT interchangeable: ver2 mounts each arm
+15.00 mm further out along the 45 deg plate than ver1
+(0.17036, +/-0.19707, 0.57036) vs (0.16285534, +/-0.18646447, 0.56285534), same rpy,
+which puts the two arms 21.2 mm further apart in Y. This repo derived from ver2 from
+2026-09-02 (commit de96559) until this change, and that was wrong for our cell.
+
+Measured, three ways:
+  * TAPE. The stand's full Y width is a direct check that needs no robot: ver1
+    predicts 507.3 mm, ver2 521.4 mm. The operator measured ver1. (Height above the
+    base-plate top is the same kind of check: 669.4 vs 681.5 mm.)
+  * CONTACT, far from the mount. Both arms were hand-parked touching the stand and
+    the joints read off the boxes. The RIGHT arm touched the base column at z~0.11-
+    0.21 m, far enough from its own mount for the 15 mm to show: the model's contact
+    point sits 7.00 mm off the true stand surface under ver2 and 0.50 mm under ver1.
+    (The LEFT arm touched just under its own mount, where arm and stand move
+    together, so it cannot tell the two apart -- 0.27 vs 0.29 mm. That degeneracy is
+    why the error survived this long.)
+  * ARM-TO-ARM. A hand-built 15 mm tip-to-wrist fixture reads 43.9 mm under ver2 and
+    22.9 mm under ver1.
+The two stands' SURFACES are identical wherever those contacts landed, so this is a
+mount-origin difference, not a shape one -- but they do differ elsewhere (up to
+68.7 mm, mostly the |y| > 0.10 m wings), which is why the whole model is regenerated
+from ver1 rather than the mount origins being patched.
 
 WHY A GENERATOR AND NOT A HAND-EDITED FILE
 ==========================================
 The unified URDF is the geometry the async CollisionMonitor enforces, so the
 property that must never break silently is that ver3's KINEMATICS are bit-identical
-to ver2's: the joints, the links and their placements are upstream's, and nothing is
-moved. A 44 KB hand edit cannot demonstrate that; a transform plus an FK regression
+to upstream's: the joints, the links and their placements are upstream's, and nothing
+is moved. A 44 KB hand edit cannot demonstrate that; a transform plus an FK regression
 can, and this script is re-runnable when upstream ships a new ver. The regression is:
 over 500 random configurations every shared frame deviates by 0.
 
 WHAT IT CHANGES, AND WHY
 ========================
-1. Convex collision shells. Upstream ver2 points link0/1/4/5/6 at raw *.stl that
+1. Convex collision shells. Upstream points link0/1/4/5/6 at raw *.stl that
    are NOT convex (measured mesh/hull volume ratio: link0 0.634, link6 0.917,
    link1/4/5 ~0.961). collision_monitor.cpp:672 tests convexity and keeps a
    non-convex mesh as a BVH -- distances stay CORRECT, but the per-eval servo
@@ -20,18 +46,24 @@ WHAT IT CHANGES, AND WHY
    and RB5 would have shipped 10 such geoms (5 links x 2 arms). We swap in
    precomputed hulls (link2/link3 keep upstream's CoACD sets).
 
-2. Elbow bound +/-165 deg, not upstream's +/-179.9. The catalog value for RB5-850
+2. Elbow bound +/-165 deg, not upstream's +/-179.9 (ver1 and ver2 both ship
+   +/-3.14 rad). The catalog value for RB5-850
    is +/-165 (Rainbow RB Series catalog p7). Shipping a wider URDF bound recreates
    exactly the trap docs/joint_range_policy.md records for RB3: JointTarget and
    InitMotion bypass IK and clear only the safety clamp, so they can park the elbow
    in the band the URDF allows but the controller refuses, and every subsequent
    Cartesian tick is then rejected. safety.q_min_deg/q_max_deg must agree.
 
-3. A stand_collision link carrying CoACD hulls of the real stand, added ALONGSIDE
-   upstream's primitive boxes (dual_rb3_730e_ver5 does the same). The boxes alone
-   cover only 77.0% of the true stand surface with a 36.9 mm max gap (60k surface
-   samples) -- i.e. a fifth of the stand is invisible to the guard. The 20 hulls
-   cover 100.0%.
+3. A stand_collision link carrying CoACD hulls of the real stand, REPLACING the raw
+   stand mesh ver1 ships as its only <collision>. That mesh is 38 k non-convex
+   triangles: coal keeps a non-convex mesh as a BVH, so it would be correct but far
+   outside the per-eval budget, exactly the problem (1) exists to avoid. (ver2 also
+   carried primitive boxes -- stand_base_col / stand_body_upper / stand_body_shoulder
+   -- which ver1 does not have; the hulls were added alongside them then and stand
+   alone now.) Measured on 6 k surface samples with a proper half-space containment
+   test: the 20 hulls cover 100.0% of the true surface with no gap, and over-
+   approximate it by mean 1.41 mm / p95 8.76 / max 29.87. The ver2 set they replace
+   was mean 4.59 / p95 14.76 / max 37.80, so the guard also got ~3x tighter.
 
 4. Visual elements are dropped. The sole consumer is
    buildGeom(model, urdf, pinocchio::COLLISION, ...), so visuals are never read,
@@ -54,7 +86,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 UPSTREAM = (REPO.parent / "mo_robot_descriptions/mo_robot_descriptions/robots/urdf"
-            "/dual_rb5_850e/dual_rb5_850e_ver2.urdf")
+            "/dual_rb5_850e/dual_rb5_850e_ver1.urdf")
 OUT = REPO / "rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf"
 UPSTREAM_SINGLE = (REPO.parent / "mo_robot_descriptions/mo_robot_descriptions/robots/urdf"
                    "/rb5_850e/rb5_850e.urdf")
@@ -101,9 +133,9 @@ ARM_COLLISION = {                      # link -> our collision mesh(es), URDF-re
     "link6": ["../meshes/robots/rb5_850e/collision/link6_hull.stl"],
 }
 # Stand display mesh, vendored here so rb_gui needs nothing outside this repo. Origin
-# is upstream ver2's stand visual origin verbatim -- identity, unlike RB3 ver5 whose
+# is upstream ver1's stand visual origin verbatim -- identity, unlike RB3 ver5 whose
 # stand visual carried rpy [0,0,-1.5708] to undo its own base->stand +90 deg joint.
-STAND_VISUAL_MESH = "../meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver2.stl"
+STAND_VISUAL_MESH = "../meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver1.stl"
 
 # Display meshes for rb5_850e_pika_articulated.urdf (rb_gui only; the C++ FK/IK never
 # reads it). Vendored .dae rather than upstream's per-material .obj: the two are the
@@ -172,7 +204,7 @@ TOOL_MATERIALS = {
 FINGER_TRAVEL_M = 0.049
 STAND_VISUAL_XYZ = "0.0 0.0 0.0"
 STAND_VISUAL_RPY = "0.0 0.0 0.0"
-STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver2/stand_hull_{i:03d}.stl"
+STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver1/stand_hull_{i:03d}.stl"
                for i in range(20)]
 
 # ---------------------------------------------------------------------------
@@ -367,6 +399,14 @@ def build(src: Path) -> ET.ElementTree:
     stand_link = root.find("link[@name='stand']")
     if stand_link is None:
         raise SystemExit("dual: no stand link to attach the display mesh to")
+    # ver1 ships the raw 38 k-triangle stand mesh as the stand's ONLY <collision>.
+    # coal cannot hull a non-convex mesh, so it would be kept as a BVH: correct
+    # distances, but far outside the per-eval budget the monitor's contract assumes.
+    # Drop it here; step (3) below re-adds the same surface as 20 CoACD hulls.
+    dropped_stand_cols = 0
+    for col in stand_link.findall("collision"):
+        stand_link.remove(col)
+        dropped_stand_cols += 1
     vis = ET.SubElement(stand_link, "visual")
     ET.SubElement(vis, "origin", {"xyz": STAND_VISUAL_XYZ, "rpy": STAND_VISUAL_RPY})
     geo = ET.SubElement(vis, "geometry")
@@ -398,7 +438,7 @@ def build(src: Path) -> ET.ElementTree:
         limit.set("upper", f"{hi:.6f}")
         elbows += 1
 
-    # (3) stand hulls alongside the upstream boxes
+    # (3) stand hulls, replacing the raw stand mesh dropped above
     if root.find("link[@name='stand_collision']") is not None:
         raise SystemExit("upstream already defines stand_collision; rework this step")
     stand = ET.SubElement(root, "link", {"name": "stand_collision"})
@@ -425,6 +465,12 @@ def build(src: Path) -> ET.ElementTree:
         raise SystemExit(f"expected both arms' collision shells, replaced {replaced}")
     if elbows != 2:
         raise SystemExit(f"expected 2 elbow joints, found {elbows}")
+    # Fail closed if upstream ever stops shipping the raw stand collision: silently
+    # emitting only the hulls would be fine, but silently emitting the hulls PLUS a
+    # 38 k-triangle BVH (because this stopped matching) would not.
+    if dropped_stand_cols != 1:
+        raise SystemExit(
+            f"expected exactly 1 raw <collision> on the stand link, dropped {dropped_stand_cols}")
 
     ET.indent(tree, space="  ")
     return tree
@@ -578,7 +624,7 @@ def main(argv=None) -> int:
                     help="verify the committed URDFs match what this script produces")
     args = ap.parse_args(argv)
 
-    targets = [(UPSTREAM, OUT, build, "dual_rb5_850e_ver2.urdf"),
+    targets = [(UPSTREAM, OUT, build, "dual_rb5_850e_ver1.urdf"),
                (UPSTREAM_SINGLE, OUT_SINGLE, build_single, "rb5_850e.urdf"),
                (UPSTREAM_SINGLE, OUT_DISPLAY, build_display, "rb5_850e.urdf")]
     for src, _dst, _fn, _label in targets:

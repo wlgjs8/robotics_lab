@@ -78,9 +78,18 @@ limits, the joint-limit barrier, IK, examples, and runbooks — `[-165 deg, +165
 on the RB5-850E in service since 2026-09-02, `[-150, +150]` on the RB3-730E it
 replaced. The bound is a property of the arm, not a tuning knob: never restore a
 wider site margin, and never widen the URDF to hide an unreachable Cartesian target.
-Upstream's `dual_rb5_850e_ver2.urdf` ships `+/-179.9 deg`, which is NOT the catalog
+Upstream's `dual_rb5_850e_ver1.urdf` ships `+/-179.9 deg`, which is NOT the catalog
 value — the tracked URDFs are generated with the correct bound by
 `rb_servo_server/tools/make_rb5_850e_urdfs.py`. See `docs/joint_range_policy.md`.
+
+The unified collision URDF is generated from upstream **ver1**, not ver2 (changed
+2026-09-06). Upstream ships two RB5 stands whose arm mounts differ by 15.00 mm along
+the 45 deg plate — 21.2 mm of arm-to-arm Y separation — and this cell has ver1
+(operator tape on the stand's Y width, 507 mm not 521, plus a right-arm stand contact
+that lands 0.50 mm off the true surface under ver1 vs 7.00 mm under ver2). The mounts
+in `left_mount`/`right_mount` of both stack configs MUST equal that URDF's
+`stand -> stand_<side>_arm_base` transform; `rb_gui` asserts it
+(`test_default_mounts_match_the_tracked_unified_urdf`).
 
 ## Motion Primitives (don't blur)
 

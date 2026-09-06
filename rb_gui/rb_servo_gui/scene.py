@@ -33,8 +33,10 @@ _ROBOT_JOINT_NAMES = (
 # _mount_pose_from_mounts() prefers those. Kept in step with stack_real.yaml so the
 # first frames before state arrives are not visibly wrong. RB5-850E as of 2026-09-02
 # -- note the arms mirror in Y now, where RB3 mirrored in X.
-_DEFAULT_LEFT_POSE = (0.17036, 0.19707, 0.57036, 2.185914, 0.523132, -2.186649)
-_DEFAULT_RIGHT_POSE = (0.17036, -0.19707, 0.57036, 2.185914, -0.523132, -0.954944)
+# 2026-09-06: upstream stand ver2 -> ver1 (mounts 15.00 mm in along the 45 deg plate;
+# the cell's stand is ver1, measured -- see tools/make_rb5_850e_urdfs.py).
+_DEFAULT_LEFT_POSE = (0.16285534, 0.18646447, 0.56285534, 2.185914, 0.523132, -2.186649)
+_DEFAULT_RIGHT_POSE = (0.16285534, -0.18646447, 0.56285534, 2.185914, -0.523132, -0.954944)
 # LAST-RESORT fallback only; the live value comes from the unified URDF's stand
 # visual origin via _stand_mesh_pose(). This is dual_rb3_730e_ver5's value, kept so a
 # missing/unparsable URDF still renders something rather than nothing.
@@ -264,7 +266,7 @@ def _stand_mesh_path() -> Path:
     found = _stand_visual_from_urdf(_unified_urdf_path())
     if found is not None:
         return found[0]
-    return _descriptions_dir() / "meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver2.stl"
+    return _descriptions_dir() / "meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver1.stl"
 
 
 def _stand_mesh_pose() -> tuple:
