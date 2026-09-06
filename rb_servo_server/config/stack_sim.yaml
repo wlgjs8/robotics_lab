@@ -38,11 +38,13 @@ right_robot:
 # 2026-09-06: upstream ver2 -> ver1 mounts, matching stack_real.yaml. See the evidence
 # block there and in tools/make_rb5_850e_urdfs.py; these must equal the
 # stand->stand_<side>_arm_base transform in the tracked unified URDF.
+# 2026-09-06 site mount calibration applied too (see stack_real.yaml and
+# make_rb5_850e_urdfs.py MOUNT_CALIBRATION_M): sim and real must model the same cell.
 left_mount:
-  base_pose_in_stand: [0.16285534, 0.18646447, 0.56285534, 2.185914, 0.523132, -2.186649]
+  base_pose_in_stand: [0.16176534, 0.18457447, 0.56270534, 2.185914, 0.523132, -2.186649]
 
 right_mount:
-  base_pose_in_stand: [0.16285534, -0.18646447, 0.56285534, 2.185914, -0.523132, -0.954944]
+  base_pose_in_stand: [0.16098534, -0.18516447, 0.56214534, 2.185914, -0.523132, -0.954944]
 
 servo:
   rate_hz: 500

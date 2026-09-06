@@ -202,6 +202,49 @@ TOOL_MATERIALS = {
 # (make_pika_tool_meshes.py). Keep this equal to rb_gui's _GRIPPER_FINGER_TRAVEL_M and
 # the config's gripper_finger_travel_m.
 FINGER_TRAVEL_M = 0.049
+# ---------------------------------------------------------------------------
+# SITE MOUNT CALIBRATION (2026-09-06). Everything else in this file is upstream's
+# geometry plus safety corrections; this is the one entry that is a property of THIS
+# CELL, measured on it, and it must be re-measured if an arm is ever unbolted.
+#
+# HOW IT WAS MEASURED. 27 hand-parked CONTACT poses with both jaws at the mechanical
+# open stop: the tip of one arm touching the other arm (6), or touching the stand
+# (21, both arms). A contact means the true clearance is 0, so the model's residual
+# distance at that pose is pure model error along that contact's normal -- one scalar
+# equation each, which is why the campaign chased normal DIVERSITY rather than pose
+# count. Solved for both mounts by least squares (tools: the offline audit built on
+# CollisionMonitor itself, so the model being fitted is the one that gets enforced).
+#
+# Three things had to be handled or the answer came out wrong:
+#   * The stand side is measured against the SOURCE STL, never the CoACD hulls --
+#     those over-approximate by mean 1.4 / max 29.9 mm.
+#   * The finger side uses the REAL printed mesh, not its convex hull: the hull fills
+#     the TPU blade's honeycomb (p50 0.04 mm, but p90 5.2 / max 15.2 mm).
+#   * A 7th unknown, a uniform stand SURFACE offset, is fitted alongside the mounts and
+#     then DISCARDED. It comes out +1.94 +/- 0.32 mm (the real stand sits that far
+#     outside its own STL -- paint, finish, or a nominal-dimension CAD). Leaving it out
+#     of the fit biased both mounts, because every stand contact carries it; leaving it
+#     out of the MODEL is correct, since it makes the guard conservative, not optimistic.
+# Fit quality with that 7th term: residual RMS 1.06 mm, leave-one-out 1.51 mm, against
+# a 0.2-0.6 mm repeatability floor measured by touching one spot from different arm
+# postures. Condition number 3.2.
+#
+# WHAT IT IS WORTH, measured by re-evaluating all 27 contacts through the corrected
+# model (excluding 4 where the closest pair switched, so before/after is not the same
+# quantity): arm-to-arm error 2.54 -> 1.14 mm mean, and centred on zero (+1.74 ->
+# +0.06). Arm-to-stand is unchanged (spread 1.54 -> 1.64 mm) -- this correction buys
+# the CROSS-ARM pairs, which is where it matters: 187 arm<->arm plus the 9
+# gripper<->gripper pairs a handover runs through.
+#
+# HONEST ABOUT THE Z. Per-component 1-sigma is 0.5-0.7 mm, so x and y are 2-3 sigma
+# but BOTH z terms are inside their own error bar (-0.15 +/- 0.7, -0.71 +/- 0.7).
+# They are applied because the least-squares estimate is unbiased, not because z is
+# resolved. Do not read them as measured.
+MOUNT_CALIBRATION_M = {           # added to upstream's stand_<side>_arm_base origin
+    "left": (-0.00109, -0.00189, -0.00015),
+    "right": (-0.00187, +0.00130, -0.00071),
+}
+
 STAND_VISUAL_XYZ = "0.0 0.0 0.0"
 STAND_VISUAL_RPY = "0.0 0.0 0.0"
 STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver1/stand_hull_{i:03d}.stl"
@@ -449,6 +492,23 @@ def build(src: Path) -> ET.ElementTree:
     ET.SubElement(joint, "parent", {"link": "stand"})
     ET.SubElement(joint, "child", {"link": "stand_collision"})
     ET.SubElement(joint, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+
+    # (6) site mount calibration (see MOUNT_CALIBRATION_M). Applied here so the URDF
+    # the CollisionMonitor loads and `left_mount`/`right_mount` in the stack configs
+    # cannot drift apart -- rb_gui asserts they are equal
+    # (test_default_mounts_match_the_tracked_unified_urdf), and the servo loop's FK/IK
+    # reads the config while the guard reads this file.
+    calibrated = 0
+    for side, delta in MOUNT_CALIBRATION_M.items():
+        joint = root.find(f"joint[@name='stand_{side}_arm_base_fixed']")
+        if joint is None:
+            raise SystemExit(f"upstream has no stand_{side}_arm_base_fixed to calibrate")
+        origin = joint.find("origin")
+        xyz = [float(v) for v in origin.get("xyz").split()]
+        origin.set("xyz", " ".join(f"{v + d:.8f}" for v, d in zip(xyz, delta)))
+        calibrated += 1
+    if calibrated != 2:
+        raise SystemExit(f"expected 2 arm mounts to calibrate, did {calibrated}")
 
     # (5) cell furniture: env_* boxes fixed to the stand (see ENVIRONMENT). Visual
     # only unless the entry opts into `collision`, which is what adds it to the

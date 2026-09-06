@@ -34,9 +34,11 @@ _ROBOT_JOINT_NAMES = (
 # first frames before state arrives are not visibly wrong. RB5-850E as of 2026-09-02
 # -- note the arms mirror in Y now, where RB3 mirrored in X.
 # 2026-09-06: upstream stand ver2 -> ver1 (mounts 15.00 mm in along the 45 deg plate;
-# the cell's stand is ver1, measured -- see tools/make_rb5_850e_urdfs.py).
-_DEFAULT_LEFT_POSE = (0.16285534, 0.18646447, 0.56285534, 2.185914, 0.523132, -2.186649)
-_DEFAULT_RIGHT_POSE = (0.16285534, -0.18646447, 0.56285534, 2.185914, -0.523132, -0.954944)
+# the cell's stand is ver1, measured), plus the site mount calibration fitted from 27
+# contact poses -- both derived in tools/make_rb5_850e_urdfs.py, which generates the
+# URDF these are asserted against (test_default_mounts_match_the_tracked_unified_urdf).
+_DEFAULT_LEFT_POSE = (0.16176534, 0.18457447, 0.56270534, 2.185914, 0.523132, -2.186649)
+_DEFAULT_RIGHT_POSE = (0.16098534, -0.18516447, 0.56214534, 2.185914, -0.523132, -0.954944)
 # LAST-RESORT fallback only; the live value comes from the unified URDF's stand
 # visual origin via _stand_mesh_pose(). This is dual_rb3_730e_ver5's value, kept so a
 # missing/unparsable URDF still renders something rather than nothing.

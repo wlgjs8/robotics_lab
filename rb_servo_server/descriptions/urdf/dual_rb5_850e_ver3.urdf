@@ -298,7 +298,7 @@
   <joint name="stand_left_arm_base_fixed" type="fixed">
     <parent link="world" />
     <child link="stand_left_arm_base" />
-    <origin xyz="0.16285534 0.18646447 0.56285534" rpy="2.185913927779314 0.5231323161197823 -2.186648937497128" />
+    <origin xyz="0.16176534 0.18457447 0.56270534" rpy="2.185913927779314 0.5231323161197823 -2.186648937497128" />
   </joint>
   <joint name="dual_rb5_850e_left_world_fixed" type="fixed">
     <parent link="stand_left_arm_base" />
@@ -313,7 +313,7 @@
   <joint name="stand_right_arm_base_fixed" type="fixed">
     <parent link="world" />
     <child link="stand_right_arm_base" />
-    <origin xyz="0.16285534 -0.18646447 0.56285534" rpy="2.1859138555489475 -0.5231322390070723 -0.9549437348744108" />
+    <origin xyz="0.16098534 -0.18516447 0.56214534" rpy="2.1859138555489475 -0.5231322390070723 -0.9549437348744108" />
   </joint>
   <joint name="dual_rb5_850e_right_world_fixed" type="fixed">
     <parent link="stand_right_arm_base" />

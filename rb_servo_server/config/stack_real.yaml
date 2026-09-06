@@ -107,11 +107,19 @@ right_robot:
 # These MUST stay equal to the stand->stand_<side>_arm_base transform in
 # descriptions/urdf/dual_rb5_850e_ver3.urdf; rb_gui asserts exactly that
 # (test_default_mounts_match_the_tracked_unified_urdf).
+#
+# 2026-09-06 SITE MOUNT CALIBRATION, on top of ver1: left (-1.09, -1.89, -0.15) mm,
+# right (-1.87, +1.30, -0.71) mm. Fitted from 27 hand-parked CONTACT poses (tips on
+# the other arm or on the stand, jaws at the open stop) -- the derivation, the fit
+# quality and the honest error bars live in make_rb5_850e_urdfs.py's
+# MOUNT_CALIBRATION_M, which is what generates the URDF these must equal. Worth
+# 2.54 -> 1.14 mm of cross-arm error; arm<->stand is unchanged. Per-component sigma
+# is 0.5-0.7 mm, so both z terms are inside their own error bar.
 left_mount:
-  base_pose_in_stand: [0.16285534, 0.18646447, 0.56285534, 2.185914, 0.523132, -2.186649]
+  base_pose_in_stand: [0.16176534, 0.18457447, 0.56270534, 2.185914, 0.523132, -2.186649]
 
 right_mount:
-  base_pose_in_stand: [0.16285534, -0.18646447, 0.56285534, 2.185914, -0.523132, -0.954944]
+  base_pose_in_stand: [0.16098534, -0.18516447, 0.56214534, 2.185914, -0.523132, -0.954944]
 
 servo:
   rate_hz: 500
