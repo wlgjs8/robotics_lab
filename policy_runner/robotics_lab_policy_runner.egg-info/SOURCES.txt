@@ -94,6 +94,7 @@ tests/test_gripper_startup_open_config.py
 tests/test_hdf5_audit.py
 tests/test_hdf5_recording.py
 tests/test_hdf5_viewer.py
+tests/test_init_tare_runner_integration.py
 tests/test_isaac_transport.py
 tests/test_joint_limit_stall_abort.py
 tests/test_openpi_remote_blank_depth.py
@@ -104,6 +105,7 @@ tests/test_phase_metrics.py
 tests/test_pika_usb_pairing.py
 tests/test_policy_runner_contract.py
 tests/test_preview_execution_policy.py
+tests/test_preview_recovery_policy.py
 tests/test_rbpodo_controller_sim_safety.py
 tests/test_recording_and_training.py
 tests/test_rollout_step_log.py

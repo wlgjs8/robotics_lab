@@ -254,6 +254,13 @@ int run(const char* stack,const char* profile,const char* events,const char* con
           {"contact_decomposed",last_result.diagnostics.contact_decomposed},
           {"contact_coupled_fallback",last_result.diagnostics.contact_coupled_fallback},
           {"contact_constraint_rows",last_result.diagnostics.contact_constraint_rows},
+          {"angular_norm_coupled",last_result.diagnostics.angular_norm_coupled},
+          {"angular_norm_cuts",last_result.diagnostics.angular_norm_cuts},
+          {"max_angular_chart_velocity_norm",last_result.diagnostics.max_angular_chart_velocity_norm},
+          {"max_angular_chart_acceleration_norm",last_result.diagnostics.max_angular_chart_acceleration_norm},
+          {"max_angular_velocity_norm",last_result.diagnostics.max_angular_velocity_norm},
+          {"max_angular_acceleration_norm",last_result.diagnostics.max_angular_acceleration_norm},
+          {"max_angular_jerk_norm",last_result.diagnostics.max_angular_jerk_norm},
           {"initial_pose",{s.pose.x,s.pose.y,s.pose.z,s.pose.rx,s.pose.ry,s.pose.rz}},
           {"initial_linear_velocity",vector(s.linear_velocity)},{"initial_linear_acceleration",vector(s.linear_acceleration)},
           {"initial_angular_velocity_body",vector(s.angular_velocity_body)},
@@ -295,6 +302,9 @@ int run(const char* stack,const char* profile,const char* events,const char* con
     auto audit=rr::liveAudit(tele);
     audit["schema"]="robotics_lab.preview_replay_audit.v1";audit["tick"]=tick;audit["t"]=t;audit["mono"]=mono;
     audit["status"]=current.reason;audit["admission_gap_sec"]=admission_gap;
+    audit["recovery_active"]=live->recovering();
+    audit["recovery_stopped"]=live->recoveryStopped();
+    audit["recovery_cause"]=toString(live->recoveryCause());
     audit["time_since_admission_sec"]=last_admission_time>0?execution_mono-last_admission_time:0.;
     audit["applied_reconstructed_fold"]=applied_fold_json;audit["observed_stage_valid"]=observed_stage_valid;
     if(j.contains("recorded_geometry"))audit["recorded_geometry"]=j.at("recorded_geometry");

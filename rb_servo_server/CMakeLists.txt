@@ -193,7 +193,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING AND RB_SERVO_ENABLE_PREVIEW_EXECUTION)
-    foreach(_preview_test preview_execution_config preview_execution_worker live_preview_execution preview_brake preview_contact_qp preview_servo_integration)
+    foreach(_preview_test preview_execution_config preview_execution_worker live_preview_execution preview_brake preview_contact_qp preview_servo_integration preview_recovery_contract)
         add_executable(test_${_preview_test} tests/test_${_preview_test}.cpp)
         target_link_libraries(test_${_preview_test} PRIVATE rb_servo_core)
         add_test(NAME ${_preview_test} COMMAND test_${_preview_test})

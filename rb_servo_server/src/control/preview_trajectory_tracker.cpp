@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 namespace pinocchio {
 template <>
@@ -155,7 +156,9 @@ struct PreviewTrajectoryTracker::Impl {
   std::array<AxisQp, 6> axes;
   ContactQp contact;
   ContactQp normal_contact;
-  ContactQp angular_norm;
+  std::vector<ContactQp> angular_norm_pool;
+  Matrix angular_norm_cuts;
+  Vector angular_norm_upper;
   double angular_objective_scale{1.0};
   Eigen::LLT<Matrix> translation_factor;
   Matrix unconstrained_translation;
@@ -294,35 +297,44 @@ struct PreviewTrajectoryTracker::Impl {
     // Fast independent angular optima are accepted only if their complete
     // Bernstein controls satisfy the norm balls. Otherwise a bounded QP
     // cutting-plane solve couples the three axes. All storage is worker-owned.
-    auto& angular=angular_norm;
-    const int angular_variables=3*n, angular_constraints=(9+kAngularCutsPerInterval)*n;
-    angular.H=Matrix::Zero(angular_variables,angular_variables);
-    angular.C=Matrix::Zero(angular_constraints,angular_variables);
-    angular.full_C=Matrix::Zero(kAngularCutsPerInterval*n,angular_variables);
-    angular.full_upper=Vector::Zero(kAngularCutsPerInterval*n);
-    angular.g=Vector::Zero(angular_variables);angular.solution=Vector::Zero(angular_variables);
-    angular.lower=Vector::Constant(angular_variables,-1.0);
-    angular.upper=Vector::Constant(angular_variables,1.0);
-    angular.lower_c=Vector::Constant(angular_constraints,-qpOASES::INFTY);
-    angular.upper_c=Vector::Constant(angular_constraints,qpOASES::INFTY);
-    for(int axis=0;axis<3;++axis) {
-      angular.H.block(axis*n,axis*n,n,n)=axes[axis+3].H;
-      angular.C.block(axis*3*n,axis*n,3*n,n)=axes[axis+3].C;
-      angular.lower_c.segment(axis*3*n,3*n)=axes[axis+3].lower_c;
-      angular.upper_c.segment(axis*3*n,3*n)=axes[axis+3].upper_c;
-    }
-    // Common positive objective scaling preserves the minimizer and relative
-    // tracking/jerk weights while reducing the absolute Hessian range seen by
-    // qpOASES. It is not a change to jerk normalization or physical limits.
+    const int angular_variables=3*n, maximum_cuts=kAngularCutsPerInterval*n;
+    angular_norm_cuts=Matrix::Zero(maximum_cuts,angular_variables);
+    angular_norm_upper=Vector::Constant(maximum_cuts,qpOASES::INFTY);
+    // Retain the original component velocity/acceleration outer boxes: although
+    // redundant after vector-norm certification, they tighten the intermediate
+    // relaxation and preserve convergence at rebased nonzero accelerations.
+    // A small pool avoids scanning hundreds of unused support-plane rows for
+    // the ordinary case. Complex requests use the original full-sized QP from
+    // their first solve; repeated capacity promotions would discard active-set
+    // progress and waste the fixed iteration budget. One full fallback remains
+    // if the initially small problem grows. No support plane is ever dropped.
     angular_objective_scale=1.0/axes[3].H.cwiseAbs().maxCoeff();
-    angular.H*=angular_objective_scale;
-    angular.previous_C=angular.C;
-    angular.qp=std::make_unique<qpOASES::SQProblem>(angular_variables,angular_constraints,qpOASES::HST_POSDEF);
-    angular.qp->setOptions(options);iterations=1000;startup_budget=1.0;
-    if(angular.qp->init(angular.H.data(),angular.g.data(),angular.C.data(),angular.lower.data(),angular.upper.data(),
-        angular.lower_c.data(),angular.upper_c.data(),iterations,&startup_budget)!=qpOASES::SUCCESSFUL_RETURN)
-      throw std::runtime_error("Preview angular norm QP prewarm failed");
-    angular.warm=false;
+    for(int capacity=std::min(32,maximum_cuts);;capacity=maximum_cuts) {
+      angular_norm_pool.emplace_back();
+      auto& angular=angular_norm_pool.back();
+      angular.H=Matrix::Zero(angular_variables,angular_variables);
+      angular.C=Matrix::Zero(9*n+capacity,angular_variables);
+      angular.g=Vector::Zero(angular_variables);angular.solution=Vector::Zero(angular_variables);
+      angular.lower=Vector::Constant(angular_variables,-1.0);
+      angular.upper=Vector::Constant(angular_variables,1.0);
+      angular.lower_c=Vector::Constant(9*n+capacity,-qpOASES::INFTY);
+      angular.upper_c=Vector::Constant(9*n+capacity,qpOASES::INFTY);
+      for(int axis=0;axis<3;++axis) {
+        angular.H.block(axis*n,axis*n,n,n)=angular_objective_scale*axes[axis+3].H;
+        angular.C.block(axis*3*n,axis*n,3*n,n)=axes[axis+3].C;
+        angular.lower_c.segment(axis*3*n,3*n)=axes[axis+3].lower_c;
+        angular.upper_c.segment(axis*3*n,3*n)=axes[axis+3].upper_c;
+      }
+      // Common positive H/g scaling leaves tracking/jerk ratios unchanged.
+      angular.previous_C=angular.C;
+      angular.qp=std::make_unique<qpOASES::SQProblem>(angular_variables,9*n+capacity,qpOASES::HST_POSDEF);
+      angular.qp->setOptions(options);iterations=1000;startup_budget=1.0;
+      if(angular.qp->init(angular.H.data(),angular.g.data(),angular.C.data(),angular.lower.data(),angular.upper.data(),
+          angular.lower_c.data(),angular.upper_c.data(),iterations,&startup_budget)!=qpOASES::SUCCESSFUL_RETURN)
+        throw std::runtime_error("Preview angular norm QP prewarm failed");
+      angular.warm=false;
+      if(capacity==maximum_cuts)break;
+    }
   }
 
   void bounds(int axis, double v0, double a0) {
@@ -421,7 +433,8 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
 PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
                                                 const PreviewMotionState& initial,
                                                 const PreviewContactConstraint& authority,
-                                                PreviewContactSolveMode mode) {
+                                                PreviewContactSolveMode mode,
+                                                double request_solve_budget_sec) {
   auto& x=*impl_; const auto& cfg=x.cfg; const auto begin=Clock::now();
   PreviewSolveResult result;
   auto elapsed=[&] { return std::chrono::duration<double>(Clock::now()-begin).count(); };
@@ -429,6 +442,10 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
     result.status=status; result.diagnostics.status=status;
     result.diagnostics.solve_time_sec=elapsed(); return result;
   };
+  if(std::isnan(request_solve_budget_sec) || request_solve_budget_sec<0.0)
+    return finish(PreviewSolveStatus::InvalidReference);
+  const double solve_budget=std::min(cfg.max_solve_time_sec,request_solve_budget_sec);
+  if(solve_budget<=0.0)return finish(PreviewSolveStatus::TimeBudgetExceeded);
   if (!validPose(initial.pose) || !initial.linear_velocity.allFinite() ||
       !initial.linear_acceleration.allFinite() || !initial.angular_velocity_body.allFinite() ||
       !initial.angular_acceleration_body.allFinite()) return finish(PreviewSolveStatus::InvalidInitialState);
@@ -527,7 +544,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         for(int k=0;k<cut_count;++k) {
           q.C.row(base_rows+k)=q.full_C.row(cuts[k]);q.upper_c[base_rows+k]=q.full_upper[cuts[k]];
         }
-        double remaining=cfg.max_solve_time_sec-elapsed();
+        double remaining=solve_budget-elapsed();
         if(remaining<=0.0)return PreviewSolveStatus::TimeBudgetExceeded;
         int iterations=cfg.max_working_set_recalculations-result.diagnostics.working_set_recalculations;
         if(iterations<=0)return PreviewSolveStatus::IterationLimit;
@@ -545,7 +562,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         q.C.swap(q.previous_C);
         result.diagnostics.working_set_recalculations+=iterations;
         q.warm=status==qpOASES::SUCCESSFUL_RETURN;
-        if(elapsed()>cfg.max_solve_time_sec)return PreviewSolveStatus::TimeBudgetExceeded;
+        if(elapsed()>solve_budget)return PreviewSolveStatus::TimeBudgetExceeded;
         if(!q.warm) {
           if(status==qpOASES::RET_MAX_NWSR_REACHED)return PreviewSolveStatus::IterationLimit;
           if(status==qpOASES::RET_INIT_FAILED_INFEASIBILITY || status==qpOASES::RET_QP_INFEASIBLE ||
@@ -632,7 +649,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
   for(int axis=authority.enabled?3:0;axis<6;++axis) {
     prepare_axis(axis);
     auto& q=x.axes[axis];
-    double remaining=cfg.max_solve_time_sec-elapsed();
+    double remaining=solve_budget-elapsed();
     if (remaining<=0.0) return finish(PreviewSolveStatus::TimeBudgetExceeded);
     int iterations=cfg.max_working_set_recalculations;
     qpOASES::returnValue status;
@@ -645,7 +662,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
     }
     result.diagnostics.working_set_recalculations+=iterations;
     q.warm=status==qpOASES::SUCCESSFUL_RETURN;
-    if(elapsed()>cfg.max_solve_time_sec) return finish(PreviewSolveStatus::TimeBudgetExceeded);
+    if(elapsed()>solve_budget) return finish(PreviewSolveStatus::TimeBudgetExceeded);
     if(!q.warm) {
       if(status==qpOASES::RET_MAX_NWSR_REACHED) return finish(PreviewSolveStatus::IterationLimit);
       if(status==qpOASES::RET_INIT_FAILED_INFEASIBILITY || status==qpOASES::RET_QP_INFEASIBLE ||
@@ -694,14 +711,13 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
   };
   if(angular_certificate()>cfg.feasibility_tolerance) {
     result.diagnostics.angular_norm_coupled=true;
-    auto& q=x.angular_norm;
     const int base_rows=9*x.n,cut_rows=kAngularCutsPerInterval*x.n;
     // Store cuts separately from qpOASES's previous A buffer. Each plane is
     // an outer approximation of a norm ball. No plan is accepted merely for
     // satisfying these planes: the complete norm certificate is rechecked.
-    auto& cuts=q.full_C;auto& cut_upper=q.full_upper;
+    auto& cuts=x.angular_norm_cuts;auto& cut_upper=x.angular_norm_upper;
     cuts.setZero();cut_upper.setConstant(qpOASES::INFTY);
-    q.warm=false; // each new nonlinear problem starts with its own plane set
+    for(auto& pool:x.angular_norm_pool)pool.warm=false; // one plane set per nonlinear problem
     int retained_cuts=0;
     std::size_t cuts_added=0;
     for(;;) {
@@ -730,6 +746,10 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         ++cuts_added;
       }
       result.diagnostics.angular_norm_cuts=cuts_added;
+      auto pool=std::find_if(x.angular_norm_pool.begin(),x.angular_norm_pool.end(),
+          [&](const Impl::ContactQp& candidate){return candidate.C.rows()>=base_rows+retained_cuts;});
+      if(pool==x.angular_norm_pool.end())return finish(PreviewSolveStatus::IterationLimit);
+      auto& q=*pool;
       q.C.setZero();q.lower_c.setConstant(-qpOASES::INFTY);q.upper_c.setConstant(qpOASES::INFTY);
       for(int axis=0;axis<3;++axis) {
         const auto& aq=x.axes[axis+3];
@@ -738,9 +758,9 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         q.lower_c.segment(axis*3*x.n,3*x.n)=aq.lower_c;
         q.upper_c.segment(axis*3*x.n,3*x.n)=aq.upper_c;
       }
-      q.C.block(base_rows,0,cut_rows,3*x.n)=cuts;
-      q.upper_c.segment(base_rows,cut_rows)=cut_upper;
-      double remaining=cfg.max_solve_time_sec-elapsed();
+      q.C.middleRows(base_rows,retained_cuts)=cuts.topRows(retained_cuts);
+      q.upper_c.segment(base_rows,retained_cuts)=cut_upper.head(retained_cuts);
+      double remaining=solve_budget-elapsed();
       if(remaining<=0)return finish(PreviewSolveStatus::TimeBudgetExceeded);
       int iterations=std::min(3*cfg.max_working_set_recalculations,
           6*cfg.max_working_set_recalculations-result.diagnostics.working_set_recalculations);
@@ -756,7 +776,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
       q.C.swap(q.previous_C); // keep the old shallow A view intact during hotstart
       result.diagnostics.working_set_recalculations+=iterations;
       q.warm=status==qpOASES::SUCCESSFUL_RETURN;
-      if(elapsed()>cfg.max_solve_time_sec)return finish(PreviewSolveStatus::TimeBudgetExceeded);
+      if(elapsed()>solve_budget)return finish(PreviewSolveStatus::TimeBudgetExceeded);
       if(!q.warm) {
         if(status==qpOASES::RET_MAX_NWSR_REACHED)return finish(PreviewSolveStatus::IterationLimit);
         if(status==qpOASES::RET_INIT_FAILED_INFEASIBILITY || status==qpOASES::RET_QP_INFEASIBLE ||
@@ -766,7 +786,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
       if(q.qp->getPrimalSolution(q.solution.data())!=qpOASES::SUCCESSFUL_RETURN || !q.solution.allFinite())
         return finish(PreviewSolveStatus::NumericalFailure);
       double violation=std::max(0.0,q.solution.cwiseAbs().maxCoeff()-1.0);
-      for(int row=0;row<base_rows+cut_rows;++row) {
+      for(int row=0;row<base_rows+retained_cuts;++row) {
         const double value=q.previous_C.row(row).dot(q.solution);
         violation=std::max({violation,q.lower_c[row]-value,value-q.upper_c[row]});
       }
@@ -801,7 +821,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
       if(d.max_contact_velocity_violation_m_s>cfg.feasibility_tolerance)
         return finish(PreviewSolveStatus::NumericalFailure);
     }
-    if(elapsed()>cfg.max_solve_time_sec) return finish(PreviewSolveStatus::TimeBudgetExceeded);
+    if(elapsed()>solve_budget) return finish(PreviewSolveStatus::TimeBudgetExceeded);
   }
   auto& d=result.diagnostics;
   const double e=cfg.feasibility_tolerance;
@@ -817,7 +837,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
   if(d.max_position_tracking_slack_m>cfg.max_linear_tracking_slack_m ||
      d.max_orientation_tracking_slack_rad>cfg.max_angular_tracking_slack_rad)
     return finish(PreviewSolveStatus::TrackingBudgetExceeded);
-  if(elapsed()>cfg.max_solve_time_sec) return finish(PreviewSolveStatus::TimeBudgetExceeded);
+  if(elapsed()>solve_budget) return finish(PreviewSolveStatus::TimeBudgetExceeded);
   x.trajectory=candidate;
   return finish(PreviewSolveStatus::Solved);
 }

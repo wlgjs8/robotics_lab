@@ -897,7 +897,25 @@ safety:
       # the 25 mm floor, measured min 24.7 mm). gripper_gripper below keeps the OLD
       # 25/67 explicitly so handovers do not tighten with this. Braking:
       # sqrt(2 * 3.0 * 0.050) = 0.55 m/s of closing speed, above the TCP ceiling.
-      d_hard_m: 0.040
+      #
+      # 2026-09-07: 40/90 -> 30/75 (operator request). The 40 mm floor was sized for
+      # the ~20 mm dual-arm relative error measured on 2026-09-04. That error is gone:
+      # the 2026-09-06 mount calibration (b5ac8c5, 27 contact poses) took arm-to-arm
+      # model error to 1.14 mm mean, arm-to-stand spread 1.64 mm, and the stand hulls
+      # (45dd8fd) over-approximate the surface by mean 1.4 mm, so the model is now
+      # conservative by construction. Remaining known error: left box DH oracle 5.4 mm
+      # at the TCP (server.log 2026-09-07 01:53), which 30 mm covers 5x. Not tighter
+      # than 30 because arm<->stand hull over-approximation is uneven (p95 8.8 mm) and
+      # the real stand sits +1.9 mm outside its own STL. Invariant at the 0.60 m/s
+      # ceiling and a_brake 4.5: d_slow >= 0.030 + 0.040 = 0.070; 0.075 leaves 5 mm.
+      # Measured on the 7 rollouts of 2026-09-07 01:18-02:03: the 40 mm floor WAS
+      # binding. servo_log_20260907_012415 / _013306 clamp_hold at 40.0 mm for 195 and
+      # 1601 ticks (7.6 s and 83 s windows, TcpPoseTarget, chunk engaged) on
+      # left link3 <-> right link5 / right gripper base -- the left elbow crossing over
+      # the right wrist -- applied corrections up to 4.7 / 5.9 deg/s. Those poses sit
+      # at 30 mm clearance or more under the 30 mm floor. The last two runs' closest
+      # self pair was 63.9 mm.
+      d_hard_m: 0.030
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # 2026-08-26: THIS INVARIANT WAS BEING VIOLATED, and the comment below it had gone
@@ -916,7 +934,9 @@ safety:
       # command ceiling and thus inert until the arm is genuinely closing.
       # 2026-06-19 rationale for the old value ("wider slow zone reduces boundary
       # chatter") is unchanged and still argues for the wider zone, not the narrower one.
-      d_slow_m: 0.090
+      # 2026-09-07: 0.090 -> 0.075 with the floor (see d_hard_m above). Band width
+      # 45 mm, need 40 mm at 0.60 m/s / 4.5 m/s^2.
+      d_slow_m: 0.075
       # 2026-09-06: 3.0 -> 4.5 m/s^2 (both self-collision families). The loader requires
       # d_slow >= d_hard + v_max^2 / (2 a_brake) against the highest commanded TCP
       # ceiling; that ceiling rose 0.50 -> 0.60 m/s (flow_infer max_linear_velocity),
@@ -992,9 +1012,17 @@ safety:
         # 2026-09-04 (mirror F/T forces, cos 0.89-1.00) happened while THIS model
         # reported 18-29 mm of clearance, so the model's relative gripper pose is
         # off by ~20 mm at the rail ends and an exact check would let them touch.
-        d_hard_m: 0.025
-        d_slow_m: 0.067
-        a_brake_m_s2: 4.5   # 3.0 -> 4.5 (2026-09-06, see the mesh note: v_max 0.60 needs d_hard + v^2/2a = 0.065 <= 0.067)
+        # 2026-09-07: 25/67 -> 20/62 (operator request, with the self set). The ~20 mm
+        # relative error above was the pre-calibration mounts; the 2026-09-06 mount
+        # calibration (b5ac8c5) puts arm-to-arm at 1.14 mm mean. Still 20, not less:
+        # the finger hulls fill the TPU honeycomb (p90 5.2 / max 15.2 mm) and the
+        # gripper BASE hull over-approximates by up to 45.5 mm, so the model reads
+        # HIGH clearance only on the conservative side, but the left arm's box DH
+        # oracle still misses by 5.4 mm at the TCP. Invariant: 0.020 + 0.040 = 0.060
+        # <= 0.062. covered_d_hard_m (5 mm) is unchanged.
+        d_hard_m: 0.020
+        d_slow_m: 0.062
+        a_brake_m_s2: 4.5   # 3.0 -> 4.5 (2026-09-06, see the mesh note: v_max 0.60 needs d_hard + v^2/2a = 0.060 <= 0.062)
         hyst_m: 0.010
       # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
       # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
@@ -1026,9 +1054,23 @@ safety:
       # a_brake (4.5) the requirement is 0.025 + 0.60^2/9 = 0.065 <= 0.067. Pinning
       # a_brake at 3.0 would need 0.085 and the loader refuses to start -- which is how
       # this was caught. If a_brake is ever lowered, widen d_slow with it.
+      #
+      # 2026-09-07: 25/67 -> 20/62 (operator request, with the self set). The riser
+      # box is an 8-contact mesh fit, rms 2.50 mm, whose 3.3 mm arm-to-arm bias term
+      # is now ~1 mm after the mount calibration (b5ac8c5), so its position
+      # uncertainty is ~4 mm and 20 mm covers it 5x. Measured on the 7 rollouts of
+      # 2026-09-07 01:18-02:03: closest arm link to the riser 30.4 mm (right link3,
+      # servo_log_20260907_015315, the elbow over the pick tray), so at 20 mm nothing
+      # in those runs violates and the closest approach keeps 10 mm. NOTE what this
+      # does NOT change: in that run the barrier applied 0 deg/s on every tick (the
+      # elbow's closing speed never reached sqrt(2 a (d - d_hard)) = 0.22 m/s at the
+      # closest point); the right arm's up-and-down over the tray was the policy's own
+      # command (target z == commanded z within 1 mm). rb_gui paints a closing pair
+      # inside d_slow as "braking" whether or not the allowance binds. Invariant:
+      # 0.020 + 0.60^2/9 = 0.060 <= 0.062.
       environment:
-        d_hard_m: 0.025
-        d_slow_m: 0.067
+        d_hard_m: 0.020
+        d_slow_m: 0.062
         recover_speed_m_s: 0.0
       extra_collision: []
       #   - { name: left_wrist_camera,  shape: box, parent_frame: dual_rb3_730e_left_attachment_site,
@@ -1240,7 +1282,7 @@ queue_sync:
   # NOTE the deliberate asymmetry: teleop lead is DISCARDED, not deferred. There
   # is no safe way to replay 0.69 s of hand motion the arm never made.
   hold_motion_until_track: true
-  target_fill: 5
+  target_fill: 2
 
   # ---- THE DIAGNOSTIC BAND (2026-09-03) ---------------------------------------
   # Between "regulating normally" and protect_fill (1, near-empty) there was NOTHING
@@ -1257,7 +1299,8 @@ queue_sync:
   # 4 is one below our measured ripple floor: across 1.5M fresh observations on
   # v8.9.1 (2026-09-03) the fill held 5, with 10 samples at 4 and none below. So this
   # line is silent today and speaks only when something changes.
-  warn_fill: 4
+  protect_fill: 0   # 2026-09-07: target 2 -> hard early-wake only on an EMPTY box (1 = every ripple trough at this setpoint)
+  warn_fill: 1      # 2026-09-07: was 4 (target 5). Loader needs protect_fill <= warn_fill < target_fill; 1 = one below setpoint
   # Consecutive FRESH observations at/below protect_fill before an underrun counts.
   # One sample of an integer scraped out of a TCP stream is not evidence -- CM had
   # exactly one bad sample de-energize a healthy cell. We only count, so what this
@@ -1607,9 +1650,9 @@ force_control:
   # 30.7 kN/m rigid jig that 6/500 was. Same k = 0 row for hold. To revert: m 6.0.
   stream:
     translation:
-      - {m: 100.0, b: 500.0, k: 400.0}   # x   10 N / 25 mm; m 12 = the 2026-09-04 trial
-      - {m: 100.0, b: 500.0, k: 400.0}   # y
-      - {m: 100.0, b: 500.0, k: 400.0}   # z
+      - {m: 20.0, b: 500.0, k: 0.0}   # x   10 N / 25 mm; m 12 = the 2026-09-04 trial
+      - {m: 20.0, b: 500.0, k: 0.0}   # y
+      - {m: 20.0, b: 500.0, k: 0.0}   # z
     # ROTATION: CM ships m 0.3 / b 10 / k 0 (derived for its 140 mm lever). On the
     # pika's 202.642 mm lever the rotational environment stiffness is k_env * L^2 =
     # 2.1x CM's, and CM's row reads -6.2 dB at T_d 12 ms / -8.6 dB at 18 ms against
@@ -1651,9 +1694,9 @@ force_control:
   # the rate caps are what stop it drifting when nobody is pushing.
   hold:
     translation:
-      - {m: 100.0, b: 500.0, k: 0.0}     # x   10 N -> 20 mm/s (same row as stream; m 12 trial)
-      - {m: 100.0, b: 500.0, k: 0.0}     # y
-      - {m: 100.0, b: 500.0, k: 0.0}     # z
+      - {m: 20.0, b: 500.0, k: 0.0}     # x   10 N -> 20 mm/s (same row as stream; m 12 trial)
+      - {m: 20.0, b: 500.0, k: 0.0}     # y
+      - {m: 20.0, b: 500.0, k: 0.0}     # z
     # RIGID, same reason as the stream law above: the hand-guide is a TRANSLATION
     # stage. Push anywhere on the tool and the TCP translates along the force; nothing
     # you do by hand turns it. (Orientation changes are a TcpLinearMove / policy job.)
@@ -1710,7 +1753,7 @@ force_control:
     # filter on the vector with these values armed 0 % on 7 of 10 arm-runs and
     # <= 2 % on the rest (real light contacts are not excluded there). A 15 N
     # press arms it in ~180 ms and half-closes it at ~250 ms; then it fades as before.
-    stream_judge_lpf_hz:     2.0    # contact band; 8-30 Hz vibration is 20-200x down
+    stream_judge_lpf_hz:     0.0    # 2026-09-07: OFF (raw vector; was 2.0 = contact band, 8-30 Hz vibration 20-200x down). jhkim A/B
     stream_arm_force_n:      5.0    # = hold_engage_force_n: one notion of "contact"
     stream_release_force_n:  2.0    # = hold_release_force_n
     stream_arm_dwell_sec:    0.10   # 3-5 vibration cycles (12-33 ms each measured)
@@ -1747,7 +1790,7 @@ force_control:
   # 25 Hz: one pole, ~6 ms of lag against the box's own 12 ms pipeline, well above
   # the 0.8 Hz admittance corner so the steady contact force is untouched. Set 0
   # to feed the law the raw wrench (pre-2026-08-27 behaviour) for an A/B.
-  wrench_filter_hz: 25.0
+  wrench_filter_hz: 0.0    # 2026-09-07: raw wrench to the law (A/B vs 25 Hz; jhkim request)
 
   # OSCILLATION GUARD (2026-08-27 incident, servo_log_20260827_101144.csv). A hand
   # push pinned the 40 mm translation fence, then a ~5.3 Hz coupled oscillation
@@ -2989,6 +3032,12 @@ cartesian_control:
             max_rate: 1.1
             translation_velocity_floor: 0.000001
             angular_velocity_floor: 0.000001
+            phase_lookahead_sec: 0.0  # Future-window candidates retained for offline comparison; tracking-preserving default.
+          recovery:
+            enable: true
+            fresh_plan_timeout_sec: 2.0
+            max_attempts: 3
+            attempts_reset_sec: 5.0   # 2026-09-07: budget is a rate; Paused re-arms after this (was a lifetime total -> latched)
         af_damping_beta_lin: 1.0
         af_damping_beta_ang: 1.0
         corner_deadband_lin_m: 0.0003

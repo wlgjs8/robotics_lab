@@ -133,6 +133,10 @@ inline ReconstructedHoldFold readReconstructedHoldFold(const json& j, std::uint6
 template<class T,class=void> struct HasLiveAudit:std::false_type {};
 template<class T> struct HasLiveAudit<T,std::void_t<decltype(std::declval<T>().fold_cause),
     decltype(std::declval<T>().staged_cancel_counts),decltype(std::declval<T>().result_gauge_transported)>>:std::true_type {};
+template<class T,class=void> struct HasPhaseWindowAudit:std::false_type {};
+template<class T> struct HasPhaseWindowAudit<T,std::void_t<decltype(std::declval<T>().phase_window_used),
+    decltype(std::declval<T>().phase_window_sec),decltype(std::declval<T>().phase_window_used_count),
+    decltype(std::declval<T>().phase_window_fallback_count)>>:std::true_type {};
 template<class Live> void applyReconstructedHoldFold(Live& live,const ReconstructedHoldFold& f,
                                                     std::uint64_t applied_time_ns,bool transport) {
     if(applied_time_ns<=f.booked_time_ns)throw std::runtime_error("fold application must follow its monotonic booking clock");
@@ -165,6 +169,13 @@ template<class Telemetry> json liveAudit(const Telemetry& t) {
         AUDIT(brake_counts);AUDIT(last_brake_reason);AUDIT(last_brake_start_time_sec);AUDIT(last_brake_origin_sec);
         AUDIT(request_invalid);AUDIT(request_mailbox_full);AUDIT(request_coalesced);AUDIT(result_publish_dropped);AUDIT(result_coalesced);
 #undef AUDIT
+    }
+    j["phase_window_diagnostics_available"]=HasPhaseWindowAudit<Telemetry>::value;
+    if constexpr(HasPhaseWindowAudit<Telemetry>::value) {
+        j["phase_window_used"]=t.phase_window_used;
+        j["phase_window_sec"]=t.phase_window_sec;
+        j["phase_window_used_count"]=t.phase_window_used_count;
+        j["phase_window_fallback_count"]=t.phase_window_fallback_count;
     }
     return j;
 }

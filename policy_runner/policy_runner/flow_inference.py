@@ -49,6 +49,7 @@ from .robot_state_client import StateSnapshot
 from .rollout_step_log import ChunkRowLogger, RolloutStepLogger
 from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollout_mode
 from .servo_command_client import CommandIntent
+from .servo_command_history import command_pose, observation_stamp
 
 
 def validate_chunk_activation_mode(
@@ -643,6 +644,29 @@ class FlowMatchingActionSource:
         self._rollout_step_active_chunk_id: int | None = None
 
     # --------------------------------------------------------- override hooks --
+    def set_arm_init_suspension(self, arms: tuple[str, ...], *, passive: bool = False) -> None:
+        """Runner-owned authority, separate from model masks or server payloads.
+
+        apply_source_arm_mask calls this only after masking every suspended arm.
+        External init owns the whole command packet: no policy heartbeat may
+        cancel its committed move. Invalidate in-flight results at that edge.
+        """
+        suspended = frozenset(arms)
+        if not suspended.issubset({"left", "right"}):
+            raise ValueError("invalid InitMotion suspension arms")
+        if passive and not getattr(self, "_arm_init_passive", False):
+            self._clear_target_pose_state()
+            self._invalidate_policy_chunks(reason="external_init_start")
+        self._arm_init_suspended_arms = suspended
+        self._arm_init_passive = bool(passive)
+
+    def _arm_suspended_for_init(self, arm: str) -> bool:
+        if arm not in getattr(self, "_arm_init_suspended_arms", ()):
+            return False
+        index = 0 if arm == "left" else 1
+        mask = getattr(self, "arm_mask", ())
+        return len(mask) > index and mask[index] == 0.0
+
     def on_arm_init_override_start(self, arms: tuple[str, ...], snapshot: StateSnapshot) -> None:
         before_mask = self.arm_mask.tolist() if hasattr(self.arm_mask, "tolist") else list(self.arm_mask)
         after_mask = list(before_mask)
@@ -813,6 +837,10 @@ class FlowMatchingActionSource:
             return
         offenders = []
         for arm in ("left", "right"):
+            if self._arm_suspended_for_init(arm):
+                # No policy TCP/gripper for this arm; runner's InitMotion/Hold
+                # composer owns it until connected, accepted tare readback.
+                continue
             side = payload.get(arm)
             if not isinstance(side, dict):
                 continue
@@ -848,6 +876,9 @@ class FlowMatchingActionSource:
             return
         allowed = {"left": False, "right": False}
         self._preview_gripper_allowed = allowed
+        if (getattr(self, "_preview_recovery_enabled", False)
+                and getattr(self, "_preview_recovery_state", None) != "tracking"):
+            return
         payload = snapshot.payload
         profiles = payload.get("chunk_execution_profiles", [])
         matching = [p for p in profiles if isinstance(p, dict) and p.get("name") == "flow_infer_preview"]
@@ -872,14 +903,181 @@ class FlowMatchingActionSource:
             stamp = state.get("sample_time_ns")
             if isinstance(stamp, bool) or not isinstance(stamp, int) or stamp <= 0:
                 continue
-            age = now_monotonic - stamp * 1e-9
+            age = (round(now_monotonic * 1e9) - stamp) * 1e-9
             allowed[arm] = (
                 state.get("enabled") is True and state.get("active") is True
                 and state.get("status") == "active"
                 and 0.0 <= age <= max_age
             )
+        if getattr(self, "_preview_recovery_enabled", False) and not all(allowed.values()):
+            allowed.update(left=False, right=False)
+
+    @staticmethod
+    def _without_grippers(intent: CommandIntent | None) -> CommandIntent | None:
+        if intent is None:
+            return None
+        return replace(intent, **{
+            arm: ({k: v for k, v in value.items() if k != "gripper_target"}
+                  if isinstance(value := getattr(intent, arm), dict) else value)
+            for arm in ("left", "right")
+        })
+
+    def _update_preview_recovery(self, snapshot: StateSnapshot, now_monotonic: float) -> None:
+        """Observe the server's shared recovery transaction before any policy work.
+
+        This preserves the source's existing TCP heartbeat, not its old delta
+        plan. The native recovery state owns braking and ignores that target.
+        A restart can use verified server command FK, never a guessed hold pose.
+        """
+        if str(getattr(self, "tcp_target_profile", "")) != "flow_infer_preview":
+            return
+        payload = snapshot.payload
+        profiles = payload.get("chunk_execution_profiles")
+        matching = ([p for p in profiles
+                     if isinstance(p, dict) and p.get("name") == "flow_infer_preview"]
+                    if isinstance(profiles, list) else [])
+        advertised = len(matching) == 1 and matching[0].get("preview_recovery") is True
+        block = payload.get("preview_recovery")
+        previously_enabled = bool(getattr(self, "_preview_recovery_enabled", False))
+        if not advertised and not previously_enabled and not (
+                isinstance(block, dict) and block.get("enabled") is True):
+            return  # Older, non-recovery preview profile retains its contract.
+        valid = advertised and isinstance(block, dict) and block.get("enabled") is True
+        if valid:
+            for name in ("epoch", "min_observation_time_ns", "sample_time_ns", "attempts"):
+                value = block.get(name)
+                valid = valid and type(value) is int and 0 <= value < 2**64
+            valid = valid and isinstance(block.get("state"), str) and block["state"] in {
+                "tracking", "braking", "waiting_fresh", "starting", "paused"}
+            valid = valid and isinstance(block.get("reason"), str)
+        if valid:
+            max_age = matching[0].get("gripper_state_max_age_sec")
+            received = getattr(snapshot, "received_monotonic", None)
+            valid = all(type(value) in (int, float) and np.isfinite(value)
+                        for value in (max_age, received, now_monotonic))
+            valid = valid and max_age > 0.0
+        if valid:
+            valid = (block["sample_time_ns"] > 0
+                     and 0.0 <= (round(now_monotonic * 1e9) - block["sample_time_ns"]) * 1e-9 <= max_age
+                     and 0.0 <= now_monotonic - received <= max_age)
+            if block["state"] in {"waiting_fresh", "starting"}:
+                valid = valid and 0 < block["min_observation_time_ns"] <= block["sample_time_ns"]
+        if not valid:
+            raise ValueError("preview recovery telemetry unavailable, malformed or stale; "
+                             "refusing policy inference and motion")
+        old_epoch = getattr(self, "_preview_recovery_epoch", None)
+        old_state = getattr(self, "_preview_recovery_state", None)
+        epoch, state = block["epoch"], block["state"]
+        self._preview_recovery_enabled = True
+        if ((old_epoch is not None and epoch != old_epoch)
+                or (old_epoch is None and state != "tracking")
+                or (state in {"braking", "paused"} and state != old_state)):
+            current = getattr(self, "_current_step_intent", None)
+            if current is not None:
+                self._preview_recovery_heartbeat = self._without_grippers(current)
+            self._invalidate_policy_chunks(reason="preview_recovery")
+            self._clear_target_pose_state()
+            self._active_chunk_metadata = None
+            self._prev_emitted_twist_by_arm = {"left": None, "right": None}
+            self._overlay_chain_prev = {"left": None, "right": None}
+            self._overlay_chain_pending = {"left": None, "right": None}
+            self._preview_recovery_candidate_published = False
+            self._preview_recovery_resume_row_pending = False
+            reset_rtc = getattr(self, "reset_rtc", None)
+            if callable(reset_rtc):
+                reset_rtc()
+        self._preview_recovery_epoch = epoch
+        self._preview_recovery_state = state
+        self._preview_recovery_min_observation_time_ns = block["min_observation_time_ns"]
+        self._preview_recovery_state_max_age_sec = float(max_age)
+        if old_epoch != epoch or old_state != state:
+            print("[preview_recovery] " + json.dumps(block, separators=(",", ":")),
+                  file=getattr(self, "stderr", sys.stderr), flush=True)
+
+    def _verified_preview_recovery_heartbeat(
+        self, snapshot: StateSnapshot, now_monotonic: float
+    ) -> CommandIntent | None:
+        """Expose a restarted policy session while native recovery owns output.
+
+        Command FK is a reference from the coordinator, not a controller ACK.
+        No model row is integrated here; the native recovery branch must ignore
+        this TCP reference and use its own accepted p/v/a to hold or stop.
+        """
+        payload = snapshot.payload
+        if (payload.get("fault_latched") is True or payload.get("send_suppressed") is True
+                or payload.get("motion_state") in {"FaultLatched", "EmergencyLatched"}):
+            return None
+        try:
+            stamp, _, _ = observation_stamp(payload)
+            max_age = self._preview_recovery_state_max_age_sec
+            if not 0.0 <= (round(now_monotonic * 1e9) - stamp) * 1e-9 <= max_age:
+                return None
+            # Read both before constructing the command: a partial valid arm
+            # must never become an asymmetric recovery motion/hold packet.
+            poses = {arm: command_pose(payload, arm).tolist() for arm in ("left", "right")}
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            return None
+        return tcp_pose_target_stand_intent(
+            left=poses["left"], right=poses["right"], timeout_sec=self.timeout_sec,
+            tcp_target_profile="flow_infer_preview",
+            metadata={"action_source": "flow_infer",
+                      "source_conditioning_mode": "preview_recovery_reference"})
+
+    def _preview_recovery_intent(
+        self, snapshot: StateSnapshot, now_monotonic: float
+    ) -> tuple[bool, CommandIntent | None]:
+        if (not getattr(self, "_preview_recovery_enabled", False)
+                or getattr(self, "_preview_recovery_state", None) == "tracking"):
+            return False, None
+        heartbeat = getattr(self, "_preview_recovery_heartbeat", None)
+        if heartbeat is None:
+            heartbeat = self._verified_preview_recovery_heartbeat(snapshot, now_monotonic)
+            self._preview_recovery_heartbeat = heartbeat
+        if self._preview_recovery_state != "waiting_fresh":
+            return True, heartbeat
+        # Publish a single post-stop candidate without committing its row 0,
+        # gripper, or next inference. Both native arms must accept it first.
+        if getattr(self, "_preview_recovery_candidate_published", False):
+            return True, heartbeat
+        self._ensure_stream_state()
+        candidate = self._take_prefetched()
+        if candidate is not None:
+            metadata = getattr(self, "_stream_activation_candidate_metadata", None) or {}
+            stamp = metadata.get("observation_time_ns")
+            eligible = (
+                metadata.get("generation") == self._stream_generation
+                and metadata.get("preview_recovery_epoch") == self._preview_recovery_epoch
+                and type(stamp) is int
+                and self._preview_recovery_min_observation_time_ns < stamp <= int(now_monotonic * 1e9)
+            )
+            if eligible:
+                self._activate_chunk(candidate, now_monotonic)
+                if self._chunk is not None:
+                    self._preview_recovery_candidate_published = True
+                    self._preview_recovery_resume_row_pending = True
+                    return True, heartbeat
+            self._stream_ready_discard_count = int(getattr(self, "_stream_ready_discard_count", 0)) + 1
+            self._stream_activation_candidate_metadata = None
+            self._stream_activation_candidate_timing = None
+        self._request_prefetch(snapshot.payload)
+        return True, heartbeat
+
+    def _inference_recovery_metadata(self, payload: dict[str, Any]) -> dict[str, int]:
+        block = payload.get("preview_recovery")
+        epoch = block.get("epoch") if isinstance(block, dict) else None
+        stamp = getattr(self, "_last_obs_camera_observation_time_ns", None)
+        return {
+            "preview_recovery_epoch": epoch if type(epoch) is int and epoch >= 0 else 0,
+            "observation_time_ns": stamp if type(stamp) is int and stamp > 0 else 0,
+        }
 
     def _preview_gripper_arm_allowed(self, arm: str) -> bool:
+        if self._arm_suspended_for_init(arm):
+            return False
+        if (str(getattr(self, "tcp_target_profile", "")) == "flow_infer_preview"
+                and getattr(self, "_preview_recovery_enabled", False)
+                and getattr(self, "_preview_recovery_state", None) != "tracking"):
+            return False
         return (
             str(getattr(self, "tcp_target_profile", "")) != "flow_infer_preview"
             or getattr(self, "_preview_gripper_allowed", {}).get(arm) is True
@@ -900,10 +1098,18 @@ class FlowMatchingActionSource:
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         self._require_chunk_execution_profile(snapshot.payload)
         self._require_force_control_tare(snapshot.payload)
+        if all(self._arm_suspended_for_init(arm) for arm in ("left", "right")):
+            # Do not run inference/recovery heartbeats with both arms suspended.
+            # main.run still composes the locally owned InitMotion/Hold packet.
+            return None
+        self._update_preview_recovery(snapshot, now_monotonic)
         self._update_preview_gripper_authority(snapshot, now_monotonic)
         self._last_overlay_payload = snapshot.payload
         self._handle_server_motion_epoch(snapshot)
         self._before_policy_intent(snapshot, now_monotonic)
+        recovery_blocked, recovery_intent = self._preview_recovery_intent(snapshot, now_monotonic)
+        if recovery_blocked:
+            return recovery_intent
         if getattr(self, "enable_async_chunking", False):
             return self._guard_preview_gripper_intent(self._next_intent_streamed(snapshot, now_monotonic))
         payload = snapshot.payload
@@ -1091,7 +1297,13 @@ class FlowMatchingActionSource:
         self._ensure_stream_state()
 
         advanced = False
-        if self._chunk is None:
+        if getattr(self, "_preview_recovery_resume_row_pending", False) and self._chunk is not None:
+            self._preview_recovery_resume_row_pending = False
+            self._preview_recovery_candidate_published = False
+            self._chunk_index = 0
+            self._step_deadline = now_monotonic + float(self.policy_dt_sec)
+            advanced = True
+        elif self._chunk is None:
             # Need a chunk: live real/controller rollouts should never block the
             # command loop on inference. Unit tests and offline/synchronous callers
             # keep the legacy one-shot inline sample unless the runner sets
@@ -2186,6 +2398,7 @@ class FlowMatchingActionSource:
                     "inference_seq": int(inference_seq),
                     "observation_step_seq": observation_step_seq,
                     "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
+                    **self._inference_recovery_metadata(payload_snapshot),
                     "proprio": copy.deepcopy(
                         getattr(self, "_last_velproprio_diagnostics", None)
                     ),
@@ -2285,6 +2498,7 @@ class FlowMatchingActionSource:
                         "inference_seq": int(inference_seq),
                         "observation_step_seq": observation_step_seq,
                         "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
+                        **self._inference_recovery_metadata(payload),
                         "proprio": copy.deepcopy(
                             getattr(self, "_last_velproprio_diagnostics", None)
                         ),
@@ -2847,7 +3061,13 @@ class FlowMatchingActionSource:
         return after
 
     def _invalidate_policy_chunks(self, *, reason: str) -> None:
-        _ = reason
+        # A motion-epoch/Init invalidation can also interrupt a candidate already
+        # published for recovery. It must not leave a consumed handshake flag
+        # preventing a new candidate or replaying row zero from another plan.
+        self._preview_recovery_candidate_published = False
+        self._preview_recovery_resume_row_pending = False
+        if reason != "preview_recovery":
+            self._preview_recovery_heartbeat = None
         sched = getattr(self, "_chunk_ensemble", None)
         if sched is not None:
             sched.reset()

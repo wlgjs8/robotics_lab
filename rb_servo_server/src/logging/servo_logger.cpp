@@ -107,7 +107,8 @@ void writePreviewDiagnosticsHeader(std::ostream& os, const char* side) {
             "result_initial_linear_velocity_max_m_s", "result_initial_linear_acceleration_max_m_s2",
             "result_initial_angular_velocity_norm_rad_s", "result_initial_angular_acceleration_norm_rad_s2",
             "pending_geometry_fold_valid", "pending_geometry_fold_time_ns",
-            "pending_geometry_fold_cause_mask", "fold_cause"})
+            "pending_geometry_fold_cause_mask", "fold_cause", "phase_window_used", "phase_window_sec",
+            "phase_window_used_count", "phase_window_fallback_count"})
         os << ',' << side << "_preview_execution_" << field;
     for (const char* reason : kPreviewWorkerStatusNames) os << ',' << side << "_preview_execution_worker_status_" << reason << "_count";
     for (const char* reason : kPreviewSolveStatusNames) os << ',' << side << "_preview_execution_solve_status_" << reason << "_count";
@@ -833,6 +834,14 @@ void ServoLogger::writeHeader() {
              ",left_pre_send_us,right_pre_send_us";
     writeForceHeader(file_, "left");
     writeForceHeader(file_, "right");
+    file_ << ",preview_recovery_enabled,preview_recovery_state,preview_recovery_reason"
+             ",preview_recovery_epoch,preview_recovery_min_observation_time_ns,preview_recovery_started_time_ns"
+             ",preview_recovery_state_started_time_ns,preview_recovery_attempts,preview_recovery_completed"
+             ",preview_recovery_rejected_frames,preview_recovery_abandoned_source_wire_seq"
+             ",preview_recovery_abandoned_source_recv_seq,preview_recovery_abandoned_backlog_sec"
+             ",preview_recovery_candidate_source_wire_seq,preview_recovery_candidate_source_recv_seq"
+             ",preview_recovery_abandoned_left_position_error_m,preview_recovery_abandoned_right_position_error_m"
+             ",preview_recovery_abandoned_left_rotation_error_rad,preview_recovery_abandoned_right_rotation_error_rad";
     file_ << '\n';
 }
 
@@ -1059,6 +1068,9 @@ std::optional<Pose6D> tcpActualStand(const RobotState& state) {
 }
 
 void writePreviewDiagnosticsColumns(std::ostream& os, const PreviewExecutionTelemetry& p) {
+    const auto stamp=[&](double seconds) {
+        const auto previous=os.precision();os << ',' << std::setprecision(17) << seconds;os.precision(previous);
+    };
     os << ',' << p.gate_revision;
     os << ',' << p.gauge_revision;
     os << ',' << p.parent_plan_id;
@@ -1078,11 +1090,8 @@ void writePreviewDiagnosticsColumns(std::ostream& os, const PreviewExecutionTele
     os << ',' << p.result_gauge_transported;
     os << ',' << p.staged_gauge_transported;
     os << ',' << p.gauge_transport_failed;
-    os << ',' << p.result_generated_at_sec;
-    os << ',' << p.result_splice_at_sec;
-    os << ',' << p.result_valid_until_sec;
-    os << ',' << p.result_completed_at_sec;
-    os << ',' << p.result_observed_at_sec;
+    stamp(p.result_generated_at_sec);stamp(p.result_splice_at_sec);stamp(p.result_valid_until_sec);
+    stamp(p.result_completed_at_sec);stamp(p.result_observed_at_sec);
     os << ',' << p.solve_iterations;
     os << ',' << p.solve_contact_constrained;
     os << ',' << p.solve_contact_decomposed;
@@ -1095,18 +1104,17 @@ void writePreviewDiagnosticsColumns(std::ostream& os, const PreviewExecutionTele
     os << ',' << p.staged_sample_rejected;
     os << ',' << p.staged_contact_rejected;
     os << ',' << csvEscape(p.last_staged_cancel_reason);
-    os << ',' << p.last_staged_cancel_time_sec;
+    stamp(p.last_staged_cancel_time_sec);
     os << ',' << p.last_staged_cancel_request_id;
-    os << ',' << p.last_admission_time_sec;
+    stamp(p.last_admission_time_sec);
     os << ',' << p.last_admission_gap_sec;
     os << ',' << p.last_admitted_request_id;
     os << ',' << p.last_admitted_parent_plan_id;
     os << ',' << csvEscape(p.last_brake_reason);
-    os << ',' << p.last_brake_start_time_sec;
-    os << ',' << p.last_brake_origin_sec;
+    stamp(p.last_brake_start_time_sec);stamp(p.last_brake_origin_sec);
     os << ',' << p.angular_continuations_started;
     os << ',' << p.angular_brakes_started;
-    os << ',' << p.last_contact_reject_time_sec;
+    stamp(p.last_contact_reject_time_sec);
     os << ',' << p.last_contact_reject_gate;
     os << ',' << p.last_contact_reject_closing_m_s;
     os << ',' << p.last_contact_reject_allowed_m_s;
@@ -1136,6 +1144,8 @@ void writePreviewDiagnosticsColumns(std::ostream& os, const PreviewExecutionTele
     os << ',' << p.pending_geometry_fold_time_ns;
     os << ',' << p.pending_geometry_fold_cause_mask;
     os << ',' << previewFoldCauseName(p.fold_cause);
+    os << ',' << p.phase_window_used << ',' << p.phase_window_sec
+       << ',' << p.phase_window_used_count << ',' << p.phase_window_fallback_count;
     for (uint64_t value : p.worker_status_counts) os << ',' << value;
     for (uint64_t value : p.solve_status_counts) os << ',' << value;
     for (uint64_t value : p.result_checks) os << ',' << value;
@@ -1801,6 +1811,15 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << right_pre_send_us;
     writeForceColumns(file_, sample.left_ft, sample.left_force_control, sample.left_safety_tracking);
     writeForceColumns(file_, sample.right_ft, sample.right_force_control, sample.right_safety_tracking);
+    const auto& r=sample.preview_recovery;
+    file_ << ',' << r.enabled << ',' << toString(r.state) << ',' << toString(r.cause)
+          << ',' << r.epoch << ',' << r.min_observation_time_ns << ',' << r.started_time_ns
+          << ',' << r.state_started_time_ns << ',' << r.attempts << ',' << r.completed
+          << ',' << r.rejected_frames << ',' << r.abandoned_source_wire_seq
+          << ',' << r.abandoned_source_recv_seq << ',' << r.abandoned_backlog_sec
+          << ',' << r.candidate_source_wire_seq << ',' << r.candidate_source_recv_seq;
+    for(double e:r.abandoned_position_error_m)file_ << ',' << e;
+    for(double e:r.abandoned_rotation_error_rad)file_ << ',' << e;
     file_ << '\n';
 }
 

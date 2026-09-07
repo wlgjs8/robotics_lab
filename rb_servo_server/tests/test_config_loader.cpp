@@ -145,13 +145,15 @@ bool testRepositoryConfigsParse() {
         {
             // The cell-structure band the env_* geometry (the riser) is enforced
             // against. Asserted on the TRACKED file because the numbers are the
-            // safety decision: at the self 40 mm floor the recorded 35.7 mm closest
-            // approach is a hard violation, and a_brake must stay INHERITED (-1) or
-            // the braking invariant fails at the 0.60 m/s ceiling (needs 0.085 with
-            // a_brake 3.0, 0.065 with the shared 4.5).
+            // safety decision: at the self floor the recorded 30.4 mm closest
+            // approach (2026-09-07) would be a hard violation, and a_brake must stay
+            // INHERITED (-1) or the braking invariant fails at the 0.60 m/s ceiling
+            // (needs 0.080 with a_brake 3.0, 0.060 with the shared 4.5).
+            // 2026-09-07: 25/67 -> 20/62 with the self set 40/90 -> 30/75, after the
+            // 2026-09-06 mount calibration (see the yaml).
             const auto& env = stack_real.safety.self_collision.mesh.environment;
-            RB_CHECK(env.d_hard_m == 0.025);
-            RB_CHECK(env.d_slow_m == 0.067);
+            RB_CHECK(env.d_hard_m == 0.020);
+            RB_CHECK(env.d_slow_m == 0.062);
             RB_CHECK(env.a_brake_m_s2 < 0.0);   // inherits the self ramp
             RB_CHECK(env.hyst_m < 0.0);         // inherits the self hysteresis
             RB_CHECK(env.recover_speed_m_s == 0.0);
@@ -1682,9 +1684,11 @@ bool testSpringlessLawRequiresTheFold() {
         RB_CHECK(cfg.force_control.gate_enable);
         RB_CHECK(cfg.force_control.hold_compliance);
         for (int i = 0; i < 3; ++i) {
-            // 2026-09-04: the stream law holds the configured force with a spring under the
-            // gate (CM 0028); the hold law stays a pure-damper hand-guide with the fold.
-            RB_CHECK(cfg.force_control.stream.translation[i].k == 400.0);
+            // 2026-09-07: both laws are pure dampers (no spring, no bounce-back); the
+            // deviation is folded into the plan every tick and the force gate, not a
+            // spring, is what bounds the contact force. (2026-09-04 had k = 400 under
+            // the gate; that spring is what the fold could never be legal with.)
+            RB_CHECK(cfg.force_control.stream.translation[i].k == 0.0);
             RB_CHECK(cfg.force_control.stream.rotation[i].k == 0.0);
             RB_CHECK(cfg.force_control.hold.translation[i].k == 0.0);
             RB_CHECK(cfg.force_control.hold.rotation[i].k == 0.0);
@@ -1727,15 +1731,23 @@ bool testSpringlessLawRequiresTheFold() {
         RB_CHECK(replaceOnce(&body, "  hold_compliance: true", "  hold_compliance: false"));
         // Strip the spring from the three stream translation rows whatever m/b and
         // comment they carry (the operator tunes m in the tracked file; the test
-        // must not pin that text).
+        // must not pin that text). Since 2026-09-07 the tracked rows are already
+        // spring-less (k = 0.0); a tracked spring is stripped, a tracked k = 0 is
+        // verified, so the fixture holds for either state of the file.
         {
             const std::size_t block = body.find("  stream:\n    translation:\n");
             RB_CHECK(block != std::string::npos);
             std::size_t at = block;
             for (int i = 0; i < 3; ++i) {
-                at = body.find("k: 400.0}", at);
-                RB_CHECK(at != std::string::npos);
-                body.replace(at, std::string("k: 400.0}").size(), "k: 0.0}");
+                const std::size_t spring = body.find("k: 400.0}", at);
+                const std::size_t damper = body.find("k: 0.0}", at);
+                RB_CHECK(spring != std::string::npos || damper != std::string::npos);
+                if (spring != std::string::npos && (damper == std::string::npos || spring < damper)) {
+                    body.replace(spring, std::string("k: 400.0}").size(), "k: 0.0}");
+                    at = spring + 1;
+                } else {
+                    at = damper + 1;
+                }
             }
         }
         const std::string path = writeTempConfig("fold-off-gate", body);

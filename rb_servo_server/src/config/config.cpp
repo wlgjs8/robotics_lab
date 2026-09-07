@@ -279,7 +279,7 @@ void parseFollowerOutputSmdConfig(
 
 void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path,
                                  PreviewExecutionConfig* out) {
-    validateAllowedKeys(node, {"enable", "tracker", "cursor", "replan_period_sec",
+    validateAllowedKeys(node, {"enable", "tracker", "cursor", "recovery", "replan_period_sec",
         "splice_lead_sec", "max_result_age_sec", "worker_poll_period_sec", "max_source_rows"}, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
     const auto require = [](const YAML::Node& section, const char* key, const std::string& at) {
@@ -334,7 +334,7 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
         const auto sec = node["cursor"];
         const auto at = path + ".cursor";
         validateAllowedKeys(sec, {"enable", "max_backlog_sec", "catchup_time_sec", "max_rate",
-            "translation_velocity_floor", "angular_velocity_floor"}, at);
+            "translation_velocity_floor", "angular_velocity_floor", "phase_lookahead_sec"}, at);
         if (out->enable) require(sec, "enable", at);
         if (has(sec, "enable")) out->cursor.enable = asBool(sec["enable"], at + ".enable");
         for (const auto& field : std::vector<std::pair<const char*, double*>>{
@@ -345,6 +345,30 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
             if (out->enable) require(sec, field.first, at);
             if (has(sec, field.first)) *field.second = asDouble(sec[field.first], at + "." + field.first);
         }
+        if (has(sec, "phase_lookahead_sec"))
+            out->cursor.phase_lookahead_sec = asDouble(sec["phase_lookahead_sec"], at + ".phase_lookahead_sec");
+    }
+    if (has(node, "recovery")) {
+        const auto sec = node["recovery"];
+        const auto at = path + ".recovery";
+        validateAllowedKeys(sec, {"enable", "fresh_plan_timeout_sec", "max_attempts", "attempts_reset_sec"}, at);
+        require(sec, "enable", at);
+        out->recovery.enable = asBool(sec["enable"], at + ".enable");
+        if (out->recovery.enable) {
+            require(sec, "fresh_plan_timeout_sec", at);
+            require(sec, "max_attempts", at);
+            require(node["cursor"], "phase_lookahead_sec", path + ".cursor");
+        }
+        if (has(sec, "fresh_plan_timeout_sec"))
+            out->recovery.fresh_plan_timeout_sec = asDouble(sec["fresh_plan_timeout_sec"], at + ".fresh_plan_timeout_sec");
+        if (has(sec, "max_attempts"))
+            out->recovery.max_attempts = asInt(sec["max_attempts"], at + ".max_attempts");
+        if (has(sec, "attempts_reset_sec"))
+            out->recovery.attempts_reset_sec = asDouble(sec["attempts_reset_sec"], at + ".attempts_reset_sec");
+        if (!(out->recovery.attempts_reset_sec >= 0.0) || !std::isfinite(out->recovery.attempts_reset_sec))
+            fail(at + ".attempts_reset_sec must be >= 0 (0 = lifetime budget)", sec);
+        if (out->recovery.enable && !out->enable)
+            fail(at + " requires preview_execution.enable=true", sec);
     }
 }
 
@@ -2529,10 +2553,12 @@ void validateConfig(const DualArmConfig& cfg) {
                         "force_control.force_gate.close_tau_s must be <= open_tau_s - a gate that "
                         "re-opens faster than it closes is a relay against the contact");
                 }
-                // THE STREAM CHANNEL. Judged on a sustained contact: a positive contact-band
-                // corner, an arm level with a dwell, a release level strictly below the arm
-                // level (a Schmitt trigger with no hysteresis is a relay on the noise).
-                validatePositiveFinite(fc.gate_stream_judge_lpf_hz, "force_control.force_gate.stream_judge_lpf_hz");
+                // THE STREAM CHANNEL. Judged on a sustained contact: a contact-band corner
+                // (0 = off, the judge reads the raw vector - same convention as
+                // wrench_filter_hz), an arm level with a dwell, a release level strictly
+                // below the arm level (a Schmitt trigger with no hysteresis is a relay on
+                // the noise).
+                validateNonNegativeFinite(fc.gate_stream_judge_lpf_hz, "force_control.force_gate.stream_judge_lpf_hz");
                 validatePositiveFinite(fc.gate_stream_arm_force_n, "force_control.force_gate.stream_arm_force_n");
                 validatePositiveFinite(fc.gate_stream_release_force_n, "force_control.force_gate.stream_release_force_n");
                 validateNonNegativeFinite(fc.gate_stream_arm_dwell_sec, "force_control.force_gate.stream_arm_dwell_sec");
@@ -2692,6 +2718,8 @@ void validateConfig(const DualArmConfig& cfg) {
         if (rf.smoothing_window < 1 || rf.smoothing_window % 2 == 0) {
             throw std::runtime_error(path + ".smoothing_window must be an odd integer >= 1");
         }
+        if (rf.preview_execution.recovery.enable && !rf.preview_execution.enable)
+            throw std::runtime_error(path + ".recovery requires preview_execution.enable=true");
         if (rf.preview_execution.enable) {
             const auto& p = rf.preview_execution;
             const auto& t = p.tracker;
@@ -2751,6 +2779,15 @@ void validateConfig(const DualArmConfig& cfg) {
             positive(c.max_rate, "cursor.max_rate");
             positive(c.translation_velocity_floor, "cursor.translation_velocity_floor");
             positive(c.angular_velocity_floor, "cursor.angular_velocity_floor");
+            nonnegative(c.phase_lookahead_sec, "cursor.phase_lookahead_sec");
+            if (c.phase_lookahead_sec > p.max_result_age_sec)
+                throw std::runtime_error(at + ".cursor.phase_lookahead_sec must fit original result validity");
+            if (p.recovery.enable) {
+                positive(p.recovery.fresh_plan_timeout_sec, "recovery.fresh_plan_timeout_sec");
+                if (p.recovery.fresh_plan_timeout_sec <= p.max_result_age_sec ||
+                    p.recovery.max_attempts < 1 || p.recovery.max_attempts > 100)
+                    throw std::runtime_error(at + ".recovery requires a finite fresh-plan wait and attempts in [1, 100]");
+            }
             // The fixed worker snapshot has 128 history slots, including both
             // endpoints and one spare tick. This is a storage bound, not a motion cap.
             if (c.max_rate < 1.0 || std::ceil(c.max_backlog_sec / servo_period) + 2.0 >

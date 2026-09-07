@@ -179,6 +179,11 @@ void parseChunkMetadata(const json& packet, ChunkFrameReceiver::Frame* out) {
     if (it == packet.end() || !it->is_object()) return;
     parseOptionalUint64(*it, "observation_step_seq", &out->observation_step_seq);
     parseOptionalUint64(*it, "activation_step_seq", &out->activation_step_seq);
+    parseOptionalUint64(*it, "preview_recovery_epoch", &out->preview_recovery_epoch);
+    parseOptionalUint64(*it, "observation_time_ns", &out->observation_time_ns);
+    out->recovery_metadata_present = it->contains("preview_recovery_epoch") &&
+        (*it)["preview_recovery_epoch"].is_number_unsigned() &&
+        it->contains("observation_time_ns") && (*it)["observation_time_ns"].is_number_unsigned();
     parseOptionalNonnegativeInt(*it, "source_start_index", &out->source_start_index);
     parseOptionalNonnegativeInt(*it, "original_horizon", &out->original_horizon);
     parseOptionalNonnegativeInt(*it, "selected_horizon", &out->selected_horizon);

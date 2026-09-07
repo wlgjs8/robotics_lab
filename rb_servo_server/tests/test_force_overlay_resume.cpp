@@ -4,6 +4,7 @@
 // receiver is started, no socket/device/model/controller is contacted.
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -22,6 +23,25 @@
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
 #include "rb_servo/math/se3.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
+
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+namespace rb_servo {
+// Inject only a planning event. The production force pipeline, finite brake,
+// observation fence, fresh-frame admission, FK/IK and dispatch remain intact.
+struct PreviewRecoveryTestAccess {
+    static void request(DualArmServoLoop& loop,PreviewRecoveryCause cause) {
+        loop.preview_recovery_request_=cause;
+    }
+    static control::PreviewMotionSample rightAccepted(const DualArmServoLoop& loop) {
+        if(!loop.preview_executor_[1])throw std::runtime_error("missing right preview executor");
+        return loop.preview_executor_[1]->acceptedSample();
+    }
+    static control::FollowerOutputKinematics rightRaw(const DualArmServoLoop& loop) {
+        return loop.right_chunk_follower_.outputKinematics();
+    }
+};
+}
+#endif
 
 namespace {
 using namespace rb_servo;
@@ -501,6 +521,127 @@ bool testCoveredSubmicronDeviationStillComposes() {
     return true;
 }
 
+// THE WALL ON THE HOLD FOLD SINK (2026-09-07). Hand-guide a compliant Hold into an
+// ROI face, keep pushing past it, then reverse the hand: the command must leave the
+// face on the reversal at the hand's own rate, not after the whole out-of-box
+// excursion has been unwound. MEASURED servo_log_20260907_021834.csv (right arm,
+// y_min): the fold banked ~130 mm of hand travel into the latched nominal while the
+// Tier-2 clamp held the command on the face; the operator then pushed back at
+// 17-35 N for 2.2 s (~108 mm) with the command frozen, and needed 25 mm more before
+// it moved. The sink is now clamped to the ROI/floor (foldForceDeviation).
+bool testHoldFoldSinkIsWalledAtTheRoi() {
+    Fixture f([](DualArmConfig& cfg) {
+        cfg.safety.init_motion_planner.enable = false;
+        cfg.safety.self_collision.enable = false;
+        cfg.force_torque.auto_tare_after_init_motion.enable = false;
+        auto& roi = cfg.safety.roi_box;
+        roi.enable = true;
+        roi.monitor_only = false;
+        roi.min_m = {-3.0, -3.0, -3.0};
+        roi.max_m = {3.0, 3.0, 3.0};
+        roi.runtime_min_m = {-4.0, -4.0, -4.0};
+        roi.runtime_max_m = {4.0, 4.0, 4.0};
+        roi.tcp_offset_points.clear();
+    }, JointArray{0.0, -45.0, 90.0, 0.0, 45.0, 0.0});   // mid-reach: the default fixture pose
+                                                        // sits 1.09 m out, on the reach envelope,
+                                                        // where a few mm of hand travel is IK-infeasible
+    auto stream = f.command(ControlMode::Hold, ControlMode::TcpPoseTarget);
+    f.warm(stream, 0.0);
+    auto hold = f.command(ControlMode::Hold, ControlMode::Hold);
+    for (int i = 0; i < 50; ++i) f.tick(hold);
+    const auto pos_of = [](const Pose6D& p) { return std::array<double, 3>{p.x, p.y, p.z}; };
+    const Pose6D start = f.rightSent();
+    // 8 N through the Hold law's pure damper (b = 1000 N s/m) walks the nominal at 8 mm/s.
+    Wrench6D push;
+    push.fz = 8.0;
+    f.right->setWrench(push);
+    for (int i = 0; i < 250; ++i) {
+        f.tick(hold);
+        require(f.latest.right_cartesian_solve.status == "ok" || i < 5,
+                "hold-wall fixture: IK failed during the free hand-guide push (" +
+                    f.latest.right_cartesian_solve.status + "/" + f.latest.right_cartesian_solve.reason + ")");
+    }
+    require(f.latest.right_force_control.hold_engaged, "hold-wall fixture: hand-guide did not engage");
+    const Pose6D moved = f.rightSent();
+    const std::array<double, 3> d{moved.x - start.x, moved.y - start.y, moved.z - start.z};
+    int axis = 0;
+    for (int k = 1; k < 3; ++k) {
+        if (std::fabs(d[k]) > std::fabs(d[axis])) axis = k;
+    }
+    require(std::fabs(d[axis]) > 0.001, "hold-wall fixture: hand-guide did not move the arm");
+    const double sign = d[axis] > 0.0 ? 1.0 : -1.0;
+    // Put the face 5 mm ahead on the axis the hand is moving along.
+    const double face = pos_of(moved)[axis] + sign * 0.005;
+    DualArmCommand set_roi = hold;
+    set_roi.right.mode = ControlMode::SetSafetyRoiBounds;
+    set_roi.has_roi_bounds = true;
+    set_roi.roi_min_m = {-3.0, -3.0, -3.0};
+    set_roi.roi_max_m = {3.0, 3.0, 3.0};
+    (sign > 0.0 ? set_roi.roi_max_m : set_roi.roi_min_m)[axis] = face;
+    f.tick(set_roi);
+    // Keep pushing for 3 s: 24 mm of hand travel past the face. The ROI rows hold
+    // the sent pose a hair inside the face (1.6 mm here, the 2 mm pose-track
+    // standoff on the real stack); "reached" means inside that band.
+    double deepest = -1.0;
+    int ticks_to_face = -1;
+    for (int i = 0; i < 1500; ++i) {
+        f.tick(hold);
+        const double over = sign * (pos_of(f.rightSent())[axis] - face);
+        deepest = std::max(deepest, over);
+        if (ticks_to_face < 0 && over > -0.0025) ticks_to_face = i + 1;
+        if (std::getenv("RB_HOLD_WALL_TRACE") && i % 50 == 0) {
+            const auto& cs = f.latest.right_cartesian_solve;
+            std::cout << "  push tick " << i << " over_mm=" << over * 1e3 << " verdict=" << static_cast<int>(f.latest.safety_verdict)
+                      << " ik=" << cs.status << "/" << cs.reason << " iters=" << cs.ik_iterations
+                      << " jl_idx=" << cs.ik_joint_limit_worst_index << " jl_margin=" << cs.ik_joint_limit_worst_margin_deg
+                      << " pinned=" << cs.ik_joint_limit_pinned << " branch=" << cs.ik_branch_jump_clamped
+                      << " pos_err_mm=" << cs.position_error_m * 1e3 << " ori_err_deg=" << cs.orientation_error_rad * 180.0 / M_PI;
+            if (cs.stage_tcp_target_stand) {
+                const Pose6D& t = *cs.stage_tcp_target_stand;
+                const Pose6D sent = f.rightSent();
+                std::cout << " stage_target=(" << t.x << "," << t.y << "," << t.z << " rpy " << t.rx << "," << t.ry << "," << t.rz
+                          << " q?" << t.quaternion_xyzw.has_value() << ") sent=(" << sent.x << "," << sent.y << "," << sent.z
+                          << " rpy " << sent.rx << "," << sent.ry << "," << sent.rz << ")";
+            }
+            std::cout << '\n';
+        }
+    }
+    require(ticks_to_face > 0, "hold-wall fixture: the command never reached the ROI face");
+    require(deepest < 0.0005, "the hand-guided command crossed the ROI face");
+    require(f.latest.right_force_control.fold_sink == "hold_nominal",
+            "hold-wall fixture: the Hold fold sink was not the one exercised");
+    const double at_face = pos_of(f.rightSent())[axis];
+    // Reverse the hand.
+    Wrench6D pull;
+    pull.fz = -8.0;
+    f.right->setWrench(pull);
+    int ticks_to_leave = -1;
+    for (int i = 0; i < 1500; ++i) {
+        f.tick(hold);
+        if (std::getenv("RB_HOLD_WALL_TRACE") && i % 25 == 0) {
+            const auto& fc = f.latest.right_force_control;
+            std::cout << "  pull tick " << i << " back_mm=" << sign * (at_face - pos_of(f.rightSent())[axis]) * 1e3
+                      << " fold_mm=" << norm3(fc.fold_m) * 1e3 << " dev_mm=" << fc.deviation_norm_m * 1e3
+                      << " vel=" << fc.velocity_m_s[axis] << " engaged=" << fc.hold_engaged
+                      << " verdict=" << static_cast<int>(f.latest.safety_verdict) << '\n';
+        }
+        if (sign * (at_face - pos_of(f.rightSent())[axis]) > 0.003) {
+            ticks_to_leave = i + 1;
+            break;
+        }
+    }
+    std::cout << "hold fold sink wall: axis " << axis << " sign " << sign << " reached the face in "
+              << ticks_to_face << " ticks, deepest " << deepest * 1e3 << " mm, left it "
+              << (ticks_to_leave > 0 ? std::to_string(ticks_to_leave) : std::string("never"))
+              << " ticks after the reversal\n";
+    // 3 mm at 8 mm/s is 188 ticks plus the damper's 12 ms ramp; the banked nominal
+    // used to need the full 24 mm (1500 ticks) first.
+    require(ticks_to_leave > 0 && ticks_to_leave <= 400,
+            "reversing the hand at the ROI face did not move the command promptly: "
+            "the fold banked the hand's travel past the face into the nominal");
+    return true;
+}
+
 // Use the real URDF bound, not a fabricated failed-solver response: this elbow
 // starts inside +165 deg and the first chunk asks it to cross the actual bound.
 // A second chunk returns toward the reachable side during the refusal debounce.
@@ -935,6 +1076,8 @@ bool testPreviewExecutionForceTareResume() {
     const auto publishZero=[&] {
         auto packet=nlohmann::json::parse(zeroDeltaChunk(ArmId::Right,f.rightSent()));
         packet["seq"]=++wire;packet["host_time_ns"]=nowSteadyNs();
+        packet["chunk_metadata"]["preview_recovery_epoch"]=f.latest.preview_recovery.epoch;
+        packet["chunk_metadata"]["observation_time_ns"]=nowSteadyNs();
         const auto body=packet.dump();
         require(f.receiver.acceptPacket(body.data(),body.size()),"preview fixture chunk rejected");
     };
@@ -951,6 +1094,163 @@ bool testPreviewExecutionForceTareResume() {
             "force-covered preview never accepted its first command");
     require(f.latest.right_force_control.covered&&f.latest.right_force_control.compose_applied,
             "preview bypassed the covered force overlay");
+
+    // A planning backlog retires the nominal chunk, not the force reference.
+    // Keep a steady nonzero external wrench throughout recovery so lost strip,
+    // double compose, a hold-law switch or a measured-pose restart is visible.
+    for(int i=0;i<30;++i)pacedTick(preview);
+    const auto recovery_bias=f.latest.right_ft.bias_generation;
+    const auto recovery_resets=f.latest.right_force_control.reference_reset_count;
+    const auto recovery_epoch=f.latest.preview_recovery.epoch;
+    const auto recovery_completed=f.latest.preview_recovery.completed;
+    const auto recovery_source=f.latest.right_cartesian_solve.preview_execution.source_wire_seq;
+    const auto nominal_before=PreviewRecoveryTestAccess::rightAccepted(*f.loop);
+    const double recovery_origin_sec=static_cast<double>(nowSteadyNs())*1e-9;
+    const auto& recovery_profile=*std::find_if(f.cfg.cartesian_control.tcp_pose_target_profiles.begin(),
+        f.cfg.cartesian_control.tcp_pose_target_profiles.end(),
+        [](const auto& p){return p.name=="flow_infer_preview";});
+    control::PreviewBrake expected_brake(recovery_profile.ruckig_follower.preview_execution.tracker,
+                                        1./f.cfg.servo.rate_hz);
+    require(expected_brake.start(nominal_before)==control::PreviewBrakeStatus::Ready,
+            "accepted covered state has no finite reference brake");
+    const double standing_deviation=f.latest.right_force_control.deviation_norm_m;
+    require(standing_deviation>.0005,"covered recovery lost its standing deviation before the event");
+    double maximum_nominal_drift=0.,maximum_composed_error=0.,maximum_raw_rotation=0.;
+    double maximum_stage_raw_rotation=0.;
+    double ik_position=f.cfg.kinematics.ik.position_tolerance_m;
+    double ik_rotation=f.cfg.kinematics.ik.orientation_tolerance_rad;
+    const auto include_best_effort=[&](double position,double rotation) {
+        if(position>0.&&rotation>0.) {
+            ik_position=std::max(ik_position,position);ik_rotation=std::max(ik_rotation,rotation);
+        }
+    };
+    include_best_effort(f.cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m,
+                        f.cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad);
+    include_best_effort(f.cfg.kinematics.ik.max_iterations_best_effort_position_tolerance_m,
+                        f.cfg.kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad);
+    const auto check_force_recovery=[&] {
+        const auto& force_state=f.latest.right_force_control;
+        const auto& solve=f.latest.right_cartesian_solve;
+        require(f.latest.right_ft.bias_valid&&f.latest.right_ft.bias_generation==recovery_bias&&
+                force_state.reference_reset_count==recovery_resets,
+                "planning recovery reset the covered force reference or tare generation");
+        require(force_state.reference_strip_enabled&&force_state.law=="stream",
+                "planning recovery lost force strip eligibility or switched to the hand-guide law");
+        require(norm3(force_state.reference_deviation_m)>.0005,
+                "planning recovery discarded the standing force deviation");
+        require(!force_state.bounded&&!force_state.folded,
+                "planning recovery hit a force fence or folded the spring-law reference");
+        require(!f.latest.left_cartesian_solve.preview_execution.active,
+                "single-arm recovery gave preview authority to the held peer");
+        if(!solve.stage_tcp_target_stand) {
+            require(f.latest.preview_recovery.state==PreviewRecoveryState::Starting&&
+                    !solve.preview_execution.active&&!force_state.covered,
+                    "force-covered recovery lost its nominal target outside first-plan waiting");
+            return;
+        }
+        require(force_state.covered&&force_state.compose_applied,
+                "finite recovery target bypassed its standing force overlay");
+        const auto nominal=PreviewRecoveryTestAccess::rightAccepted(*f.loop);
+        control::PreviewMotionSample expected_nominal;
+        require(expected_brake.sample(static_cast<double>(nowSteadyNs())*1e-9-recovery_origin_sec,
+                                      expected_nominal),"reference covered brake sample unavailable");
+        maximum_nominal_drift=std::max(maximum_nominal_drift,
+            math::positionDistance(nominal.pose,nominal_before.pose));
+        // A zero-delta source can still have small accepted angular p/v/a from
+        // its cold-start solve. Preserve its finite stopping trajectory first;
+        // only the dispatched terminal is the stationary fresh-plan seed.
+        const bool matches_brake=math::positionDistance(nominal.pose,expected_nominal.pose)<1e-10&&
+                math::orientationDistanceRad(nominal.pose,expected_nominal.pose)<1e-10&&
+                (nominal.linear_velocity-expected_nominal.linear_velocity).norm()<1e-10&&
+                (nominal.linear_acceleration-expected_nominal.linear_acceleration).norm()<1e-8&&
+                (nominal.angular_velocity_body-expected_nominal.angular_velocity_body).norm()<1e-10&&
+                (nominal.angular_acceleration_body-expected_nominal.angular_acceleration_body).norm()<1e-8;
+        const auto& limits=recovery_profile.ruckig_follower.preview_execution.tracker;
+        // After release the next QPs own derivatives. The canonical reference
+        // must still start at the exact dispatched terminal; output tracking is
+        // judged by the declared tracking envelope, not feasibility precision.
+        const bool tracking=f.latest.preview_recovery.state==PreviewRecoveryState::Tracking;
+        const auto raw_reference=PreviewRecoveryTestAccess::rightRaw(*f.loop);
+        const double raw_rotation=math::orientationDistanceRad(raw_reference.pose,expected_nominal.pose);
+        const double stage_raw_rotation=math::orientationDistanceRad(nominal.pose,raw_reference.pose);
+        if(tracking) {
+            maximum_raw_rotation=std::max(maximum_raw_rotation,raw_rotation);
+            maximum_stage_raw_rotation=std::max(maximum_stage_raw_rotation,stage_raw_rotation);
+            require(math::positionDistance(raw_reference.pose,expected_nominal.pose)<1e-10&&raw_rotation<1e-10,
+                    "fresh zero chunk reanchored to the composed/readback pose instead of the nominal terminal");
+        }
+        const bool correct_nominal=tracking ?
+            math::positionDistance(nominal.pose,raw_reference.pose)<=limits.linear_tracking_tolerance_m&&
+            stage_raw_rotation<=limits.angular_tracking_tolerance_rad&&
+            nominal.linear_velocity.cwiseAbs().maxCoeff()<=limits.max_linear_velocity_m_s&&
+            nominal.linear_acceleration.cwiseAbs().maxCoeff()<=limits.max_linear_acceleration_m_s2&&
+            nominal.angular_velocity_body.norm()<=limits.max_angular_velocity_rad_s&&
+            nominal.angular_acceleration_body.norm()<=limits.max_angular_acceleration_rad_s2 : matches_brake;
+        if(!correct_nominal)std::cerr<<"covered recovery nominal diagnostic time="<<nowSteadyNs()
+            <<" state="<<toString(f.latest.preview_recovery.state)
+            <<" preview="<<solve.preview_execution.status
+            <<" dp_m="<<math::positionDistance(nominal.pose,nominal_before.pose)
+            <<" dr_rad="<<math::orientationDistanceRad(nominal.pose,nominal_before.pose)
+            <<" before_v="<<nominal_before.linear_velocity.transpose()
+            <<" before_a="<<nominal_before.linear_acceleration.transpose()
+            <<" before_w="<<nominal_before.angular_velocity_body.transpose()
+            <<" before_alpha="<<nominal_before.angular_acceleration_body.transpose()
+            <<" now_v="<<nominal.linear_velocity.transpose()
+            <<" now_a="<<nominal.linear_acceleration.transpose()
+            <<" now_w="<<nominal.angular_velocity_body.transpose()
+            <<" now_alpha="<<nominal.angular_acceleration_body.transpose()
+            <<" expected_dr="<<math::orientationDistanceRad(nominal.pose,expected_nominal.pose)
+            <<" raw_dr="<<math::orientationDistanceRad(PreviewRecoveryTestAccess::rightRaw(*f.loop).pose,
+                                                       expected_nominal.pose)
+            <<" stage_raw_dr="<<math::orientationDistanceRad(nominal.pose,
+                                                            PreviewRecoveryTestAccess::rightRaw(*f.loop).pose)
+            <<" folds="<<solve.preview_execution.fold_count
+            <<" force_deviation="<<force_state.deviation_norm_m<<'\n';
+        require(correct_nominal,
+                "covered recovery departed from its accepted-state brake or dispatched terminal seed");
+        Pose6D composed=nominal.pose;
+        composed.x+=force_state.deviation_m[0];composed.y+=force_state.deviation_m[1];
+        composed.z+=force_state.deviation_m[2];
+        // Rotation is rigid in this fixture. Translation is the live overlay,
+        // including any residual settling; its offset is neither reset nor frozen by this assertion.
+        const double error=math::positionDistance(f.rightSent(),composed);
+        maximum_composed_error=std::max(maximum_composed_error,error);
+        require(error<=ik_position&&math::orientationDistanceRad(f.rightSent(),composed)<=ik_rotation,
+                "accepted recovery command did not compose its current force deviation exactly once");
+    };
+    PreviewRecoveryTestAccess::request(*f.loop,PreviewRecoveryCause::Backlog);
+    pacedTick(preview);
+    require(f.latest.preview_recovery.state==PreviewRecoveryState::Braking&&
+            f.latest.preview_recovery.epoch>recovery_epoch,
+            "covered backlog event did not enter a new finite recovery epoch");
+    check_force_recovery();
+    for(int i=0;i<200&&f.latest.preview_recovery.state==PreviewRecoveryState::Braking;++i) {
+        pacedTick(preview);check_force_recovery();
+    }
+    require(f.latest.preview_recovery.state==PreviewRecoveryState::WaitingFresh,
+            "covered nominal stop never reached the fresh-observation barrier");
+    const auto observation_fence=f.latest.preview_recovery.min_observation_time_ns;
+    require(observation_fence>0,"covered recovery did not publish an observation fence");
+    for(int i=0;i<6;++i) {pacedTick(preview);check_force_recovery();}
+    require(nowSteadyNs()>observation_fence,"fresh covered observation is not after the stop barrier");
+    publishZero();pacedTick(preview);check_force_recovery();
+    require(f.latest.preview_recovery.state==PreviewRecoveryState::Starting&&
+            f.latest.preview_recovery.candidate_source_wire_seq>recovery_source,
+            "covered recovery failed to select the new post-stop chunk");
+    for(int i=0;i<80&&f.latest.preview_recovery.state==PreviewRecoveryState::Starting;++i) {
+        pacedTick(preview);check_force_recovery();
+    }
+    require(f.latest.preview_recovery.state==PreviewRecoveryState::Tracking&&
+            f.latest.preview_recovery.completed==recovery_completed+1&&
+            f.latest.right_cartesian_solve.preview_execution.active,
+            "covered recovery never resumed the fresh nominal chunk");
+    for(int i=0;i<20;++i) {pacedTick(preview);check_force_recovery();}
+    std::cout<<"preview force backlog recovery: nominal drift um="<<maximum_nominal_drift*1e6
+             <<" composed FK error um="<<maximum_composed_error*1e6
+             <<" raw-terminal rotation rad="<<maximum_raw_rotation
+             <<" stage-raw rotation rad="<<maximum_stage_raw_rotation
+             <<" retained deviation mm="<<f.latest.right_force_control.deviation_norm_m*1e3<<'\n';
+
     const auto prior=f.latest.right_force_control.wrench_filtered_stand;
     Wrench6D force;force.fz=1.792;f.right->setWrench(force);pacedTick(preview);
     const auto& fc=f.latest.right_force_control;
@@ -1080,6 +1380,10 @@ int main(int argc, char** argv) {
             testFreshChunkResumesAfterActualJointLimitRefusal();
             return 0;
         }
+        if (argc == 2 && std::string(argv[1]) == "--hold-roi-wall-only") {
+            testHoldFoldSinkIsWalledAtTheRoi();
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--ik-refusal-no-profile-ff") {
             testFreshChunkResumesAfterActualJointLimitRefusal(true, false);
             return 0;
@@ -1097,6 +1401,7 @@ int main(int argc, char** argv) {
         testInitWithoutAutoTareResetsOnlySelectedArmAndDeduplicates();
         testCoverageLossPreservesFrozenDeviationWithoutPendingChunkDrift();
         testCoveredSubmicronDeviationStillComposes();
+        testHoldFoldSinkIsWalledAtTheRoi();
         testFreshChunkResumesAfterActualJointLimitRefusal();
         testFreshChunkResumesAfterActualJointLimitRefusal(true, false);
         testLinearConditionerCandidates();

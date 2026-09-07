@@ -47,6 +47,56 @@ void rotationAndTransactionalFailure() {
   r.velocity.x=std::numeric_limits<double>::max();s=limited.step(20.01,r,state(0.).pose);
   check(!s.valid,"overflowing direction norm was accepted");
 }
+void finiteWindowPhaseAndReversal() {
+  auto cfg=config();cfg.phase_lookahead_sec=.04;
+  PreviewExecutionCursor old(config(),leash()),windowed(cfg,leash());old.reset(1.);windowed.reset(1.);
+  PreviewExecutionPhaseWindow window;window.count=5;
+  for(std::size_t k=0;k<window.count;++k) {
+    const double t=.01*k;window.relative_time_sec[k]=t;
+    auto& r=window.reference[k];auto& y=window.output[k];
+    // Known future reference makes a brief reversal. The accepted output is a
+    // separate smooth curve; all p/v/a samples are mutually consistent here.
+    r.pose=math::poseFromSe3(pinocchio::SE3(math::exp3({0,0,.06+.2*t-10*t*t}),Eigen::Vector3d::Zero()));
+    r.velocity.rz=.2-20*t;r.acceleration.rz=-20.;
+    y.pose=math::poseFromSe3(pinocchio::SE3(math::exp3({0,0,-.1*t}),Eigen::Vector3d::Zero()));
+    y.velocity.rz=-.1;
+  }
+  const auto instantaneous=old.step(1.002,window.reference[0],window.output[0].pose);
+  const auto result=windowed.step(1.002,window);
+  check(instantaneous.valid&&instantaneous.gate<.7,"reversal fixture did not exercise old projection");
+  check(result.valid&&result.phase_window_used&&result.phase_window_sec==.04&&result.gate==1.,
+        "known short reversal still slowed the phase clock");
+  // A real delayed ramp must NOT disappear in the phase integral: both curves
+  // have the same derivatives and constant separation at every future sample.
+  for(std::size_t k=0;k<window.count;++k) {
+    const double t=window.relative_time_sec[k];auto& r=window.reference[k];auto& y=window.output[k];
+    r={};y={};r.pose.x=.04+.1*t;y.pose.x=.1*t;r.velocity.x=y.velocity.x=.1;
+    r.pose=math::poseFromSe3(pinocchio::SE3(math::exp3({0,0,.06+.5*t}),Eigen::Vector3d(r.pose.x,0,0)));
+    y.pose=math::poseFromSe3(pinocchio::SE3(math::exp3({0,0,.5*t}),Eigen::Vector3d(y.pose.x,0,0)));
+    r.velocity.rz=y.velocity.rz=.5;
+  }
+  const auto lag=windowed.step(1.004,window);
+  check(lag.valid&&std::abs(lag.positive_lag_m-.04)<1e-12&&
+        std::abs(lag.positive_lag_rad-.06)<1e-12&&lag.gate<1.,"true delayed ramp was hidden");
+  // A stationary output behind a moving target needs at least as much pacing.
+  for(auto& y:window.output) {y={};}
+  const auto stationary=windowed.step(1.006,window);
+  check(stationary.valid&&stationary.positive_lag_m>.04&&stationary.positive_lag_rad>.06,
+        "stationary output lag was masked");
+  // No arbitrary direction is invented at zero speed. Absolute separation is
+  // still owned by QP tracking acceptance and the independent final safety gate.
+  for(auto& r:window.reference) {r.velocity={};r.acceleration={};}
+  const auto still=windowed.step(1.008,window);
+  check(still.valid&&still.gate==1.&&still.positive_lag_rad==0.,"zero-speed window invented phase lag");
+  const double time=windowed.timeSec();window.relative_time_sec[4]=.041;
+  const auto invalid=windowed.step(1.01,window);
+  check(!invalid.valid&&windowed.timeSec()==time,"window exceeded explicit lookahead or changed failed state");
+  window.relative_time_sec[4]=.04;window.output[2].velocity.x=std::numeric_limits<double>::quiet_NaN();
+  check(!windowed.step(1.01,window).valid&&windowed.timeSec()==time,"nonfinite future output accepted");
+  auto badcfg=cfg;badcfg.phase_lookahead_sec=.101;bool rejected=false;
+  try {PreviewExecutionCursor bad(badcfg,leash());}catch(const std::invalid_argument&){rejected=true;}
+  check(rejected,"lookahead beyond bounded cursor history accepted");
+}
 void historyAndCausalFuture() {
   CanonicalReferenceHistory h(3);const double epoch=1589440.296027291;
   for(int i=0;i<4;++i)h.append(epoch+.01*i,state(.01*i));
@@ -69,7 +119,7 @@ void historyAndCausalFuture() {
 }
 }
 int main() {
-  try {oneSidedLagAndRecovery();rotationAndTransactionalFailure();historyAndCausalFuture();
+  try {oneSidedLagAndRecovery();rotationAndTransactionalFailure();finiteWindowPhaseAndReversal();historyAndCausalFuture();
     std::cout<<"preview execution cursor tests passed\n";return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

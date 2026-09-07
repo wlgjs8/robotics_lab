@@ -26,7 +26,7 @@ PlanLeashParams leash(const RuckigFollowerConfig& c) {
 }
 PreviewExecutionCursorConfig cursorConfig(const PreviewExecutionConfig& c) {
   return {c.cursor.max_backlog_sec,c.cursor.catchup_time_sec,c.cursor.max_rate,
-          c.cursor.translation_velocity_floor,c.cursor.angular_velocity_floor};
+          c.cursor.translation_velocity_floor,c.cursor.angular_velocity_floor,c.cursor.phase_lookahead_sec};
 }
 }
 
@@ -51,12 +51,16 @@ void LivePreviewExecution::reset(const char* reason) {
   initialized_=false;faulted_=false;accepted_epoch_=false;
   active_.status=PreviewExecutionWorkerStatus::InvalidRequest;
   active_.trajectory.valid=false;
+  phase_reference_result_.phase_reference.count=0;
   brake_calculator_.reset();brake_trajectory_.valid=false;brake_plan_id_=0;angular_continuation_.clear();
   stop_fault_reason_=nullptr;accepted_sample_time_sec_=0;accepted_plan_id_=0;
+  recovery_cause_=PreviewRecoveryCause::None;recovery_seed_valid_=false;
+  planning_starved_since_sec_=0;
   fold_translation_.setZero();fold_rotation_.setIdentity();gauge_revision_=0;
   cursor_.clear();history_count_=history_begin_=0;
   telemetry_.active=false;telemetry_.status=reason;telemetry_.epoch=epoch_;telemetry_.plan_id=0;
   telemetry_.backlog_sec=0;telemetry_.rate=1;telemetry_.plan_age_sec=0;
+  telemetry_.phase_window_used=false;telemetry_.phase_window_sec=0;
 }
 void LivePreviewExecution::fail(const char* reason) {
   reset(reason);faulted_=true;
@@ -64,6 +68,56 @@ void LivePreviewExecution::fail(const char* reason) {
 bool LivePreviewExecution::contactGuardStopped() {
   ++telemetry_.contact_guard_count;
   return beginBrake("braking_contact",true);
+}
+bool LivePreviewExecution::requestRecovery(PreviewRecoveryCause cause) {
+  if (!config_.preview_execution.recovery.enable || cause==PreviewRecoveryCause::None ||
+      faulted_ || !initialized_) return false;
+  if (recovering()) return true; // Never renew the original stopping clock.
+  recovery_cause_=cause;
+  ++gate_revision_;cancelStaged(Reset,last_time_);
+  stop_fault_reason_=nullptr;
+  if (!beginBrake("recovery_braking")) return false;
+  telemetry_.active=false;telemetry_.status="recovery_braking";
+  return true;
+}
+bool LivePreviewExecution::seedStationaryRecovery(double now,const Pose6D& nominal,
+                                                 bool stationary,PreviewRecoveryCause cause) {
+  if(!config_.preview_execution.recovery.enable || cause==PreviewRecoveryCause::None ||
+     initialized_ || faulted_ || !stationary || !finitePreviewPose(nominal) ||
+     !std::isfinite(now) || now<=0 || now>=static_cast<double>(UINT64_MAX)/1e9) return false;
+  initialized_=true;initialized_at_=last_time_=now;
+  cold_={};cold_.pose=nominal;sample_={};sample_.pose=nominal;
+  cursor_.reset(now);
+  return requestRecovery(cause);
+}
+bool LivePreviewExecution::recoveryStopped() const {
+  return recovering() && brake_trajectory_.valid && accepted_epoch_ &&
+      accepted_plan_id_==brake_plan_id_ &&
+      angular_continuation_.terminalHoldAvailableAt(accepted_sample_time_sec_) &&
+      accepted_sample_time_sec_-brake_origin_sec_>=brake_trajectory_.durationSec();
+}
+LivePreviewOutput LivePreviewExecution::recoveryOutput(double now) {
+  LivePreviewOutput out;out.pose=sample_.pose;
+  if (!recovering() || faulted_ || !std::isfinite(now) || now<=0 ||
+      now>=static_cast<double>(UINT64_MAX)/1e9 || now<last_time_ ||
+      now-last_time_>=config_.preview_execution.max_result_age_sec) {
+    fail("invalid_recovery_state");out.fault=true;out.reason=telemetry_.status;return out;
+  }
+  last_time_=now;telemetry_.sample_time_ns=static_cast<std::uint64_t>(now*1e9);
+  if (!sampleBrake()) {out.fault=true;out.reason=telemetry_.status;return out;}
+  out.pose=sample_.pose;out.active=true;
+  telemetry_.active=false;
+  telemetry_.status=recoveryStopped()?"recovery_hold":"recovery_braking";
+  telemetry_.plan_age_sec=now-brake_origin_sec_;out.reason=telemetry_.status;
+  return out;
+}
+bool LivePreviewExecution::restartRecovery() {
+  if (!recoveryStopped()) return false;
+  const auto seed=accepted_sample_;
+  // This is the actually dispatched terminal state, not a measured-pose snap
+  // or an unaccepted proposal. The old nominal path is abandoned explicitly.
+  reset("recovery_restart");recovery_seed_=seed;recovery_seed_valid_=true;
+  return true;
 }
 bool LivePreviewExecution::calculateBrake(const PreviewMotionState& initial,PreviewBrakeTrajectory& output) {
   const auto status=brake_calculator_.start(initial);
@@ -204,17 +258,32 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
   telemetry_.active=false;
   LivePreviewOutput out;out.pose=accepted_nominal;
   if(faulted_) {out.fault=true;out.reason=telemetry_.status;return out;}
+  if(recovering()) return recoveryOutput(now);
   if(!std::isfinite(now)||now<=0||now>=static_cast<double>(UINT64_MAX)/1e9||!finitePreviewPose(accepted_nominal)||
      !std::isfinite(contact_gate)||contact_gate<0||contact_gate>1||!contact_normal.allFinite()||
      (!contact_normal.isZero(0)&&std::abs(contact_normal.norm()-1)>config_.preview_execution.tracker.feasibility_tolerance)) {
     fail("invalid_input");out.fault=true;out.reason=telemetry_.status;return out;
   }
   telemetry_.sample_time_ns=static_cast<std::uint64_t>(now*1e9);
-  if(!raw.active()||raw.holdPaused()) {reset("inactive");return out;}
+  if(!raw.active()||raw.holdPaused()) {
+    if(recovery_seed_valid_) {
+      // A frame may not be ready on the first call after the fresh-frame
+      // transaction. Preserve its accepted stationary seed; explicit lifecycle
+      // resets still cancel it through reset(). No output is authorized here.
+      out.pose=recovery_seed_.pose;telemetry_.status="waiting";return out;
+    }
+    reset("inactive");return out;
+  }
   if(!initialized_) {
-    if(!stationary) {telemetry_.status="braking";return out;}
+    if(!stationary) {
+      if(recovery_seed_valid_)out.pose=recovery_seed_.pose;
+      telemetry_.status="braking";return out;
+    }
     initialized_=true;initialized_at_=last_time_=now;next_request_at_=now;
     cold_={};cold_.pose=accepted_nominal;sample_={};sample_.pose=accepted_nominal;
+    if(recovery_seed_valid_) {
+      cold_=recovery_seed_;sample_=recovery_seed_;recovery_seed_valid_=false;
+    }
     cursor_.reset(now);
   } else if(now<=last_time_ || now-last_time_>=config_.preview_execution.max_result_age_sec) {
     fail("tick_gap");out.fault=true;out.reason=telemetry_.status;return out;
@@ -231,6 +300,10 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
   for(int n=0;n<3 && worker_.tryTake(received_);++n) {
     const double observed=PreviewExecutionWorker::monotonicNowSec();
     const auto check=validatePreviewExecutionResult(received_,observed,identity(raw));
+    FollowerOutputKinematics phase_probe;
+    if(samplePreviewExecutionPhaseReference(received_,received_.generated_at_sec,now,
+        identity(raw),gauge(),config_.preview_execution.tracker.feasibility_tolerance,phase_probe))
+      phase_reference_result_=received_;
     recordResult(check,observed);
     if(check==PreviewExecutionAcceptance::Ready && !staged_valid_ && !stop_fault_reason_) {
       staged_=received_;
@@ -283,6 +356,7 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     }
     else {
       active_=staged_;staged_valid_=false;++telemetry_.accepted;
+      planning_starved_since_sec_=0;
       telemetry_.last_admission_gap_sec=telemetry_.last_admission_time_sec>0?now-telemetry_.last_admission_time_sec:0;
       telemetry_.last_admission_time_sec=now;
       telemetry_.last_admitted_request_id=active_.identity.request_id;
@@ -295,6 +369,7 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     if(now>=active_.valid_until_sec ||
        !active_.trajectory.sample(now-active_.splice_at_sec,sample_)) {
       ++telemetry_.expired;
+      if(planning_starved_since_sec_==0)planning_starved_since_sec_=now;
       if(!beginBrake("braking_expired")){out.fault=true;out.reason=telemetry_.status;return out;}
     } else if(!contactAllows(sample_,raw_sample,contact_gate,contact_normal)) {
       if(!contactGuardStopped()){out.fault=true;out.reason=telemetry_.status;return out;}
@@ -323,18 +398,75 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
   } else {
     out.pose=cold_.pose;telemetry_.status="waiting";
     if(now-initialized_at_>=config_.preview_execution.max_result_age_sec) {
+      if(config_.preview_execution.recovery.enable) {
+        ++telemetry_.expired;
+        if(requestRecovery(PreviewRecoveryCause::FirstPlanTimeout))return recoveryOutput(now);
+        out.fault=true;out.reason=telemetry_.status;return out;
+      }
       ++telemetry_.expired;fail("first_plan_timeout");out.fault=true;out.reason=telemetry_.status;return out;
     }
   }
+  // A stationary raw target has no phase backlog. Nevertheless persistent
+  // failure to replace an expired plan must not strand the policy indefinitely.
+  // Contact-only brakes retain their separate contact/release authority.
+  if(config_.preview_execution.recovery.enable && planning_starved_since_sec_>0 &&
+     now-planning_starved_since_sec_>=config_.preview_execution.max_result_age_sec) {
+    if(requestRecovery(PreviewRecoveryCause::PlanExpired))return recoveryOutput(now);
+    out.fault=true;out.reason=telemetry_.status;return out;
+  }
   FollowerOutputKinematics phase_reference;
   if(!historySample(cursor_.timeSec(),phase_reference)) {
+    if(config_.preview_execution.recovery.enable) {
+      if(requestRecovery(PreviewRecoveryCause::History))return recoveryOutput(now);
+      out.fault=true;out.reason=telemetry_.status;return out;
+    }
     stop_fault_reason_="history_unavailable";
     if(!beginBrake("braking_history")){out.fault=true;out.active=false;}
     else {out.pose=sample_.pose;out.active=true;}
     out.reason=telemetry_.status;return out;
   }
-  const auto phase=cursor_.step(now,phase_reference,out.pose);
+  PreviewExecutionPhaseWindow phase_window;
+  const double lookahead=config_.preview_execution.cursor.phase_lookahead_sec;
+  const auto motion_state=[](const PreviewMotionSample& motion) {
+    FollowerOutputKinematics state;state.pose=motion.pose;
+    state.velocity={motion.linear_velocity.x(),motion.linear_velocity.y(),motion.linear_velocity.z(),
+        motion.angular_velocity_body.x(),motion.angular_velocity_body.y(),motion.angular_velocity_body.z()};
+    state.acceleration={motion.linear_acceleration.x(),motion.linear_acceleration.y(),motion.linear_acceleration.z(),
+        motion.angular_acceleration_body.x(),motion.angular_acceleration_body.y(),motion.angular_acceleration_body.z()};
+    return state;
+  };
+  if(lookahead>0) for(std::size_t i=0;i<PreviewExecutionPhaseWindow::kCapacity;++i) {
+    const double offset=lookahead*static_cast<double>(i)/(PreviewExecutionPhaseWindow::kCapacity-1);
+    FollowerOutputKinematics ref;
+    if(!historySample(cursor_.timeSec()+offset,ref) &&
+       !samplePreviewExecutionPhaseReference(phase_reference_result_,cursor_.timeSec()+offset,now,
+          identity(raw),gauge(),config_.preview_execution.tracker.feasibility_tolerance,ref))break;
+    PreviewMotionSample predicted;
+    if(i==0) predicted=sample_;
+    else if(brake_trajectory_.valid) {
+      if(!brake_trajectory_.sample(now+offset-brake_origin_sec_,predicted) ||
+         !angular_continuation_.sample(now+offset,predicted))break;
+    } else if(staged_valid_ && stagedCurrent(raw) &&
+              staged_.gauge.revision==gauge_revision_ && now+offset>=staged_.splice_at_sec) {
+      if(now+offset>=staged_.valid_until_sec ||
+         !staged_.trajectory.sample(now+offset-staged_.splice_at_sec,predicted))break;
+    } else if(!active_.accepted() || now+offset>=active_.valid_until_sec ||
+              !active_.trajectory.sample(now+offset-active_.splice_at_sec,predicted))break;
+    phase_window.relative_time_sec[i]=offset;phase_window.reference[i]=ref;
+    phase_window.output[i]=motion_state(predicted);++phase_window.count;
+  }
+  const auto phase=phase_window.count>=2?cursor_.step(now,phase_window):cursor_.step(now,phase_reference,out.pose);
+  telemetry_.phase_window_used=phase.phase_window_used;telemetry_.phase_window_sec=phase.phase_window_sec;
+  if(phase.phase_window_used)++telemetry_.phase_window_used_count;
+  else if(lookahead>0)++telemetry_.phase_window_fallback_count;
   if(!phase.valid) {
+    if(phase.status!=PreviewExecutionCursorStatus::BacklogExceeded) {
+      fail("invalid_cursor_state");out.fault=true;out.active=false;out.reason=telemetry_.status;return out;
+    }
+    if(config_.preview_execution.recovery.enable) {
+      if(requestRecovery(PreviewRecoveryCause::Backlog))return recoveryOutput(now);
+      out.fault=true;out.reason=telemetry_.status;return out;
+    }
     stop_fault_reason_="backlog_exceeded";
     if(!beginBrake("braking_backlog")){out.fault=true;out.active=false;}
     else {out.pose=sample_.pose;out.active=true;}
@@ -362,14 +494,23 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
 
 void LivePreviewExecution::shiftCommonFrame(const Eigen::Vector3d& dp,const Eigen::Quaterniond& dR,
     PreviewFoldCause cause,std::uint64_t booked_ns,std::uint64_t applied_ns,std::uint32_t geometry_mask) {
-  if(!initialized_)return;
+  if(!initialized_ && !recovery_seed_valid_)return;
   if(!dp.allFinite()||!dR.coeffs().allFinite()||!std::isfinite(dR.norm())||dR.norm()==0 ||
      !(fold_translation_+dp).allFinite()) {fail("invalid_fold");return;}
   const auto q=dR.normalized();
   const double at=applied_ns?static_cast<double>(applied_ns)*1e-9:last_time_;
-  const bool transport=cause==PreviewFoldCause::GeometryHold;
-  // Only the explicitly tagged geometry correction is a proven common gauge.
-  // Force/ROI/unknown corrections retain the prior authority invalidation.
+  // EVERY TAGGED FOLD IS A COMMON-GAUGE TRANSPORT (2026-09-07). A fold is the
+  // loop telling the plan "this is where the arm was actually sent": the chunk
+  // follower, the output SMD and this executor move by the same rigid (dp, dR),
+  // so an in-flight or staged result stays valid once transported. Treating the
+  // force fold as an authority break (gate bump + staged cancel) was measured
+  // 2026-09-07 (servo_log_20260907_024935.csv): with the stream law a pure damper
+  // every sub-micrometre deviation fold cancelled the staged plan, the active one
+  // expired inside max_result_age_sec and the arm braked for 10+ s each time (8
+  // braking_expired left, 14 right, then the recovery budget ran out and the run
+  // latched). Only an UNTAGGED correction still invalidates authority, because
+  // nothing proves it is rigid.
+  const bool transport=cause!=PreviewFoldCause::Unknown;
   if(!transport) {++gate_revision_;cancelStaged(Fold,at);}
   fold_translation_+=dp;fold_rotation_=(q*fold_rotation_).normalized();++gauge_revision_;
   if(active_.accepted() && !transportPreviewExecutionResult(active_,gauge(),
@@ -379,6 +520,7 @@ void LivePreviewExecution::shiftCommonFrame(const Eigen::Vector3d& dp,const Eige
   if(brake_trajectory_.valid)brake_trajectory_.shiftCommonFrame(dp,q);
   angular_continuation_.shiftCommonFrame(dp,q);
   shiftPose(cold_.pose,dp,q);shiftSample(sample_,dp,q);
+  if(recovery_seed_valid_)shiftPose(recovery_seed_.pose,dp,q);
   if(accepted_epoch_)shiftSample(accepted_sample_,dp,q);
   for(std::size_t i=0;i<history_count_;++i)shiftPose(history_[(history_begin_+i)%history_.size()].state.pose,dp,q);
   telemetry_.fold_cause=cause;telemetry_.fold_booked_time_ns=booked_ns;

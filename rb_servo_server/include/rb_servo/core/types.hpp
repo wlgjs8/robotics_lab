@@ -376,6 +376,45 @@ inline constexpr const char* previewFoldCauseName(PreviewFoldCause cause) {
 
 // Current coordinator preview execution, independent of the raw follower and
 // backend ACK. Status strings below are static literals, not RT allocations.
+enum class PreviewRecoveryState { Tracking, Braking, WaitingFresh, Starting, Paused };
+enum class PreviewRecoveryCause { None, Backlog, History, FirstPlanTimeout, PlanExpired, Peer, RetryTimeout };
+inline const char* toString(PreviewRecoveryState state) {
+    switch (state) {
+        case PreviewRecoveryState::Tracking: return "tracking";
+        case PreviewRecoveryState::Braking: return "braking";
+        case PreviewRecoveryState::WaitingFresh: return "waiting_fresh";
+        case PreviewRecoveryState::Starting: return "starting";
+        case PreviewRecoveryState::Paused: return "paused";
+    }
+    return "invalid";
+}
+inline const char* toString(PreviewRecoveryCause cause) {
+    switch (cause) {
+        case PreviewRecoveryCause::None: return "none";
+        case PreviewRecoveryCause::Backlog: return "backlog_exceeded";
+        case PreviewRecoveryCause::History: return "history_unavailable";
+        case PreviewRecoveryCause::FirstPlanTimeout: return "first_plan_timeout";
+        case PreviewRecoveryCause::PlanExpired: return "plan_expired";
+        case PreviewRecoveryCause::Peer: return "peer_recovery";
+        case PreviewRecoveryCause::RetryTimeout: return "recovery_timeout";
+    }
+    return "invalid";
+}
+// Shared policy execution lifecycle. It is independent of the hardware fault
+// latch; every motion sample still passes the ordinary safety/dispatch gates.
+struct PreviewRecoveryTelemetry {
+    bool enabled = false;
+    PreviewRecoveryState state = PreviewRecoveryState::Tracking;
+    PreviewRecoveryCause cause = PreviewRecoveryCause::None;
+    uint64_t sample_time_ns = 0, epoch = 0, min_observation_time_ns = 0;
+    uint64_t started_time_ns = 0, state_started_time_ns = 0;
+    uint64_t attempts = 0, completed = 0, rejected_frames = 0;
+    uint64_t abandoned_source_wire_seq = 0, abandoned_source_recv_seq = 0;
+    uint64_t candidate_source_wire_seq = 0, candidate_source_recv_seq = 0;
+    double abandoned_backlog_sec = 0.0;
+    std::array<double, 2> abandoned_position_error_m{}, abandoned_rotation_error_rad{};
+};
+
 struct PreviewExecutionTelemetry {
     bool enabled = false;
     bool active = false;
@@ -387,6 +426,9 @@ struct PreviewExecutionTelemetry {
     uint64_t source_recv_seq = 0;
     double backlog_sec = 0.0;
     double rate = 1.0;
+    bool phase_window_used = false;
+    double phase_window_sec = 0.0;
+    uint64_t phase_window_used_count = 0, phase_window_fallback_count = 0;
     double plan_age_sec = 0.0;
     double accepted_position_error_m = 0.0;
     double accepted_rotation_error_rad = 0.0;
@@ -1530,6 +1572,7 @@ struct ServoSample {
     DualArmCommand command;
     CommandBufferReadTelemetry command_buffer_read;
     ChunkFrameTelemetry chunk_frame;
+    PreviewRecoveryTelemetry preview_recovery;
 
     JointArray left_sent_q_deg{};
     JointArray right_sent_q_deg{};
@@ -1699,6 +1742,7 @@ struct ServoSnapshot {
     RobotState left_state;
     RobotState right_state;
     uint64_t motion_epoch = 0;
+    PreviewRecoveryTelemetry preview_recovery;
 
     DualArmCommand command;
 

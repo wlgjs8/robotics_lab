@@ -121,6 +121,7 @@ struct AutoTareTickResult {
 AutoTareTickResult stepAutoTareDecision(const AutoTareTickInput& in);
 
 class DualArmServoLoop {
+    friend struct PreviewRecoveryTestAccess;
 public:
     DualArmServoLoop(
         std::unique_ptr<IRobotBackend> left_robot,
@@ -230,6 +231,12 @@ private:
                                uint64_t booked_time_ns, uint32_t geometry_cause_mask = 0);
     void applyPreviewExecution(ArmId arm, ArmCommand& command,
                                const TcpPoseTargetProfileConfig& profile);
+    void updatePreviewRecoveryInput(const DualArmCommand& command,
+                                    const TcpPoseTargetProfileConfig& profile);
+    void coordinatePreviewRecovery(ArmCommand (&commands)[2],
+                                   const TcpPoseTargetProfileConfig& profile);
+    bool previewRecoveryFreezesRaw() const;
+    void resetPreviewRecoveryLifecycle();
     void recordPreviewCompose(ArmId arm, const Pose6D& composed);
     void prepareForceOverlayInput(ArmId arm);
     std::array<std::uint64_t,2> prepared_force_tick_{};
@@ -832,6 +839,13 @@ private:
     uint64_t right_roi_fold_started_ns_ = 0;
     uint64_t left_roi_fold_last_log_ns_ = 0;
     uint64_t right_roi_fold_last_log_ns_ = 0;
+    // The Hold force-fold sink's wall (foldForceDeviation): what the ROI/floor clamp
+    // refused to bank into the latched nominal, for the throttled log. Reset to 0 on
+    // the first tick nothing is refused.
+    double left_hold_fold_refused_total_m_ = 0.0;
+    double right_hold_fold_refused_total_m_ = 0.0;
+    uint64_t left_hold_fold_refused_log_ns_ = 0;
+    uint64_t right_hold_fold_refused_log_ns_ = 0;
     // THE COLLISION YIELD FOLD (2026-09-04): whatever the self-collision rows took
     // out of an arm's step this tick (the blocked mover's approach, or the idle
     // arm's yield) is booked into that arm's chunk-follower plan on the NEXT tick
@@ -844,10 +858,26 @@ private:
         Eigen::Quaterniond dR = Eigen::Quaterniond::Identity();
         uint64_t booked_time_ns = 0;
         // Participation flags, not individual row contributions: collision=1,
-        // ROI/floor/reach row hold=2, IK throttle=4, legacy collision fold=8.
+        // ROI/floor/reach row hold=2, IK throttle=4, legacy collision fold=8,
+        // force deviation (foldForceDeviation, chunk-follower sink)=16.
         uint32_t geometry_cause_mask = 0;
         bool valid = false;
     };
+    static constexpr uint32_t kPlanFoldGeometryBits = 0xFu;
+    static constexpr uint32_t kPlanFoldForceBit = 16u;
+    // THE PLAN FOLD, force half (2026-09-07). foldForceDeviation books the overlay
+    // deviation here when its sink is the chunk follower; applySafety merges it
+    // into pending_collision_fold_ the same tick (with the geometry shortfall when
+    // a row/collision/IK throttle held the plan, alone otherwise), and the next
+    // tick applies ONE rigid transport to the follower, the output SMD and the
+    // preview executor. See the notes at foldForceDeviation.
+    struct PendingForceFold {
+        Eigen::Vector3d dp = Eigen::Vector3d::Zero();
+        Eigen::Quaterniond dR = Eigen::Quaterniond::Identity();
+        bool valid = false;
+    };
+    std::array<PendingForceFold, 2> pending_force_fold_{};
+    std::array<uint64_t, 2> plan_fold_declined_log_ns_{};
     std::array<PendingCollisionFold, 2> pending_collision_fold_{};
     // THE HOLD FOLD (2026-09-05): the plan pose each arm's follower stage emitted
     // this tick (pre force-compose), for applySafety to measure the shortfall
@@ -952,6 +982,13 @@ private:
     // The default absolute-waypoint follower still prewarms Ruckig off the RT
     // path; delta_twist consumes local action deltas through a separate state.
     control::CartesianChunkFollower left_chunk_follower_{control::CartesianChunkFollowerConfig{}};
+    PreviewRecoveryTelemetry preview_recovery_{};
+    CommandSourceMetadata preview_recovery_owner_{};
+    bool preview_recovery_owner_bound_{false}, preview_recovery_regime_{false};
+    bool preview_recovery_exhausted_{false};
+    unsigned preview_recovery_arm_mask_{0};
+    PreviewRecoveryCause preview_recovery_request_{PreviewRecoveryCause::None};
+    uint64_t preview_recovery_checked_frame_{0};
 #ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
     // Prebuilt per profile, never construct a worker/QP on the servo thread.
     struct PreviewProfileExecutors {

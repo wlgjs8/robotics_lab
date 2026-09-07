@@ -93,6 +93,12 @@ public:
         bool proprio_valid = false;
         std::uint64_t observation_step_seq = 0;
         std::uint64_t activation_step_seq = 0;
+        // Recovery identity is mandatory only for the enabled recovery profile.
+        // Observation is the oldest selected frame's host-arrival CLOCK_MONOTONIC
+        // timestamp, not packet receipt and not hardware exposure time.
+        bool recovery_metadata_present = false;
+        std::uint64_t preview_recovery_epoch = 0;
+        std::uint64_t observation_time_ns = 0;
         int source_start_index = 0;
         int original_horizon = 0;
         int selected_horizon = 0;

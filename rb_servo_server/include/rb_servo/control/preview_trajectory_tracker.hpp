@@ -167,10 +167,13 @@ class PreviewTrajectoryTracker {
   // This does not authorize replaying an old trajectory after an epoch change.
   PreviewSolveResult plan(const PreviewReference& reference,
                           const PreviewMotionState& initial);
+  // A finite per-request budget can only shorten the configured solve budget.
+  // It never modifies config, validity or the previously accepted trajectory.
   PreviewSolveResult plan(const PreviewReference& reference,
                          const PreviewMotionState& initial,
                          const PreviewContactConstraint& contact,
-                         PreviewContactSolveMode mode = PreviewContactSolveMode::Automatic);
+                         PreviewContactSolveMode mode = PreviewContactSolveMode::Automatic,
+                         double request_solve_budget_sec = std::numeric_limits<double>::infinity());
   // Absolute evaluation of the accepted piecewise-cubic trajectory: no dt
   // integration drift, no allocation, p/v/a continuous between 10ms intervals.
   // Returns false outside [0,duration]; it never extrapolates an expired plan.

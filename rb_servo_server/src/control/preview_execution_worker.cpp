@@ -76,6 +76,38 @@ double PreviewExecutionWorker::monotonicNowSec() {
   return static_cast<double>(nowSteadyNs()) * 1e-9;
 }
 
+bool samplePreviewExecutionPhaseReference(const PreviewExecutionResult& r,
+    double reference_time,double now,const PreviewExecutionIdentity& current,
+    const PreviewExecutionGauge& gauge,double tolerance,FollowerOutputKinematics& out) {
+  const auto& forecast=r.phase_reference;
+  if(!positive(tolerance)||!validGauge(gauge,tolerance)||!validGauge(r.gauge,tolerance)||
+     gauge.revision!=r.gauge.revision||(gauge.translation-r.gauge.translation).norm()>tolerance||
+     math::log3(gauge.rotation.toRotationMatrix().transpose()*r.gauge.rotation.toRotationMatrix()).norm()>tolerance||
+     forecast.count<2||forecast.count>forecast.kCapacity||
+     forecast.samples[0].relative_time_sec!=0.||
+     !positive(forecast.samples[forecast.count-1].relative_time_sec)||
+     r.identity.epoch!=current.epoch||r.identity.gate_revision!=current.gate_revision||
+     r.identity.source_wire_seq!=current.source_wire_seq||r.identity.source_recv_seq!=current.source_recv_seq||
+     !std::isfinite(now)||!std::isfinite(reference_time)||!std::isfinite(r.generated_at_sec)||
+     !std::isfinite(r.completed_at_sec)||!std::isfinite(r.valid_until_sec)||
+     now<r.generated_at_sec||now<r.completed_at_sec||now>=r.valid_until_sec||
+     reference_time<r.generated_at_sec||reference_time>r.valid_until_sec||
+     reference_time>r.generated_at_sec+forecast.samples[forecast.count-1].relative_time_sec)return false;
+  const double time=std::clamp(reference_time-r.generated_at_sec,0.,
+      forecast.samples[forecast.count-1].relative_time_sec);
+  const auto end=forecast.samples.begin()+forecast.count;
+  auto upper=std::lower_bound(forecast.samples.begin(),end,time,
+      [](const FollowerPreviewReferenceSample& s,double t){return s.relative_time_sec<t;});
+  if(upper==end)return false;
+  if(upper==forecast.samples.begin()||upper->relative_time_sec==time)out=upper->kinematics;
+  else {
+    const auto lower=upper-1;
+    out=interpolatePreviewKinematics(lower->kinematics,upper->kinematics,
+        (time-lower->relative_time_sec)/(upper->relative_time_sec-lower->relative_time_sec));
+  }
+  return finitePreviewState(out);
+}
+
 PreviewExecutionAcceptance validatePreviewExecutionResult(
     const PreviewExecutionResult& r, double now, const PreviewExecutionIdentity& current) {
   if (!r.accepted() || !r.trajectory.valid) return PreviewExecutionAcceptance::WorkerRejected;
@@ -116,10 +148,21 @@ bool transportPreviewExecutionResult(PreviewExecutionResult& result,
   if(!initial.translation().allFinite() || !initial.rotation().allFinite()) return false;
   for(std::size_t i=0;i<=result.trajectory.count;++i)
     if(!(result.trajectory.p.row(i).head<3>().transpose()+dp).allFinite()) return false;
+  if(result.phase_reference.count>result.phase_reference.samples.size())return false;
+  for(std::size_t i=0;i<result.phase_reference.count;++i) {
+    const auto& state=result.phase_reference.samples[i].kinematics;
+    if(!finitePreviewState(state)||
+       !(Eigen::Vector3d(state.pose.x,state.pose.y,state.pose.z)+dp).allFinite())return false;
+  }
   result.initial.pose=math::poseFromSe3(initial);
   for(std::size_t i=0;i<=result.trajectory.count;++i)
     result.trajectory.p.row(i).head<3>()+=dp.transpose();
   result.trajectory.rotation0=dR*result.trajectory.rotation0;
+  for(std::size_t i=0;i<result.phase_reference.count;++i) {
+    auto& state=result.phase_reference.samples[i].kinematics;
+    auto pose=math::se3FromPose(state.pose);pose.translation()+=dp;pose.rotation()=dR*pose.rotation();
+    state.pose=math::poseFromSe3(pose);
+  }
   result.gauge=current;
   return true;
 }
@@ -252,6 +295,11 @@ struct PreviewExecutionWorker::Impl {
     if (future.status != FollowerPreviewReferenceStatus::Ready)
       return finish(PreviewExecutionWorkerStatus::PreviewUnavailable);
 
+    if(future.samples.size()>out.phase_reference.samples.size())
+      return finish(PreviewExecutionWorkerStatus::InvalidRequest);
+    out.phase_reference.count=future.samples.size();
+    std::copy(future.samples.begin(),future.samples.end(),out.phase_reference.samples.begin());
+
     PreviewReference reference;
     reference.count = tracker.config().horizon_steps + 1;
     for (std::size_t k = 0; k < reference.count; ++k) {
@@ -302,8 +350,15 @@ struct PreviewExecutionWorker::Impl {
     }
     // Solver state is strictly worker-owned. Never publish its previous result
     // when this request fails; the servo owns the predecessor's finite lifetime.
+    // Leave one configured servo period for mailbox delivery and admission.
+    // Spending the looser offline QP budget after this request's splice would
+    // only starve fresher requests; the deadline and predecessor stay immutable.
+    const double solve_budget=std::min(r.splice_at_sec,r.valid_until_sec)-
+        PreviewExecutionWorker::monotonicNowSec()-cfg.servo_period_sec;
+    if(solve_budget<=0.0)return finish(PreviewExecutionWorkerStatus::Late);
     out.solve_attempted = true;
-    const auto solved = tracker.plan(reference, out.initial,contact);
+    const auto solved = tracker.plan(reference,out.initial,contact,
+        PreviewContactSolveMode::Automatic,solve_budget);
     out.diagnostics = solved.diagnostics;
     if (!solved.accepted()) return finish(PreviewExecutionWorkerStatus::SolveRejected);
     if (!tracker.exportTrajectory(out.trajectory))

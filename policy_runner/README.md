@@ -174,7 +174,8 @@ operator stack uses GUI-enabled `opencv-python`; do not install
 The arm-init override assigns a per-arm `init_motion_request_id` for every new
 start/retry and reuses it while streaming that request. A matching Done latches
 motion completion and changes the override to Hold until the enabled F/T
-sensor is connected, its bias is valid, and auto-tare/sample settling is over.
+sensor is connected, its bias is valid, `tare_state` is `accepted`, and
+auto-tare/sample settling is over.
 Missing telemetry remains pending once enabled F/T was observed. A positive
 `arm_init_override.ft_tare_wait_sec` is now a warning deadline: expiry displays
 `init tare blocked` and continues Hold; a subsequently accepted tare releases
@@ -182,17 +183,27 @@ the latch. It does **not** time out into uncovered policy motion.
 
 Explicit `ft_tare_wait_sec: 0` preserves the wait opt-out; disabled F/T and legacy
 states that never report F/T have no tare prerequisite in this client. Manual
-cancel, configured resume-on-failure, and InitMotion sent directly to the server
-outside this override retain their existing semantics. These paths do not
+cancel and configured resume-on-failure retain their existing semantics. These paths do not
 create a bias; the server still refuses force coverage without a valid bias.
 
 Separately, the current Flow action source checks every intent for enabled
 force control. Each enabled arm must report `force_torque.bias_valid: true` and
-`tare_state: accepted`; otherwise it exits before inference/publication. The
-override's wait opt-out does not bypass this requirement. Complete both-arm
-InitMotion/tare before a rollout. If a running policy observes tare invalidation
-during InitMotion, restart the policy after accepted tare returns; the server's
-native reset/resume behavior does not imply automatic Python-policy resumption.
+`tare_state: accepted`; otherwise it exits before inference/publication. A
+runner-owned InitMotion suspension exempts only the arm whose policy mask is
+also zero: the runner continues that arm's InitMotion/Hold through tare instead
+of terminating on the intentional bias invalidation. A mask alone or a server
+`arm_init` payload does not grant this exemption. Peer policy still needs its
+own accepted tare. With both arms suspended, no new inference, chunk, recovery
+heartbeat or gripper command is issued. Completion invalidates old/in-flight
+chunks and re-anchors before fresh inference. The override's wait opt-out does
+not bypass the accepted-tare requirement on resumed policy motion.
+
+An InitMotion observed directly on the server is tracked passively through
+completion and tare. Both policy arms pause, and the runner emits no packet
+that could cancel the externally committed move; the server retains motion
+ownership. It then re-anchors and requests fresh policy data. Console
+`external_start` and state `external_init_active` identify this path. Initial
+rollout startup without an observed init still requires accepted tare.
 `[arm_init_event]` console JSON records request IDs, start/status changes,
 tare wait/timeout/ready, resume, cancel and failure. The `arm_init` state block
 also exposes each request ID, elapsed tare wait, and timeout flag.
@@ -390,6 +401,48 @@ removes that arm's gripper target from repeated motion packets. TCP/chunk
 publication continues while the first plan is pending. An already accepted
 gripper move may still finish; this guard prevents new commands and does not
 retime model gripper rows to the server's independent execution cursor.
+
+When that profile advertises `preview_recovery: true`, the runner additionally
+requires fresh server-owned `preview_recovery` telemetry on every tick. Its
+shared states are `tracking`, `braking`, `waiting_fresh`, `starting`, and `paused`.
+An epoch change invalidates both arms' active, queued, and in-flight chunks,
+conditioning/RTC history, and cached gripper targets. `braking` and `paused`
+do not run inference or advance policy rows. The runner repeats only its previous
+gripper-free `TcpPoseTarget` heartbeat so the existing source/lease contract
+remains intact; the server owns the finite stop and ignores that old pose as a
+new plan. With no prior TCP intent, the runner does not invent one.
+An explicitly restarted policy session can instead introduce itself using both
+arms' validated `tcp_command_stand` FK from a fresh server loop sample. This
+reference contains no new gripper target or model delta; missing/invalid command
+FK never falls back to measured pose or zero. The native paused state intercepts
+this heartbeat and owns the new source/session's stop-and-fresh-observation
+transaction. Command FK describes the coordinator target, not a backend ACK.
+
+In `waiting_fresh`, one new candidate is published without committing row 0 or
+either gripper. Its `chunk_metadata.preview_recovery_epoch` must match the
+server epoch, and `chunk_metadata.observation_time_ns` must be strictly newer
+than `min_observation_time_ns`, the server's completed-stop observation barrier.
+`starting` keeps policy rows frozen. Only shared `tracking` resumes the first
+candidate row, and both arms must also have fresh active execution telemetry
+before either gripper can receive a new command. A failed candidate requires a
+new server recovery epoch before another can be published. Missing or malformed
+shared telemetry fails closed once the recovery contract is enabled.
+Camera-guard early returns also suppress both grippers during shared recovery.
+An explicit Init/motion-epoch invalidation retires any candidate handshake and
+cached recovery heartbeat together with its chunk; a previous pose is not reused
+across that lifecycle change.
+
+The observation stamp is the earliest `host_arrival_time_ns` among all required
+RGB/depth frames selected by OpenPI, mapped from the same-host camera service's
+`CLOCK_MONOTONIC_RAW` to the servo's monotonic clock. It denotes frame arrival,
+not hardware exposure time. Bundle publication or Python UDP receipt time is
+never substituted for recovery freshness. A missing frame timestamp prevents
+recovery inference; legacy/fake-image sources without this evidence cannot
+automatically recover. Ordinary chunk metadata carries the server epoch when
+available (otherwise 0), and timestamp 0 when observation timing is unavailable.
+Camera, force-tare, stale-state, fault, source lease and native safety checks
+remain in force. An existing gripper movement may finish; this handshake
+prevents subsequent commands, not physical actuator completion.
 
 Hardware-free scheduling tests and a measured-latency replay use the real
 dispatcher with in-memory inference completion and I/O. Run with an interpreter

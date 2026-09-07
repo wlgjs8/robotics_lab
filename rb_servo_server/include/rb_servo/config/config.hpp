@@ -1772,6 +1772,8 @@ struct ForceControlConfig {
     // direction from the filtered vector), an arm level held for a dwell, a release
     // level below it. The chunk follower keeps the tick-judged gate. See
     // ForceGate::updateStream for the measurement that forced the split.
+    // 0 = off: the judge reads the raw force vector (updateStream already treats
+    // hz <= 0 as pass-through; the loader accepts it since 2026-09-07).
     double gate_stream_judge_lpf_hz = 2.0;
     double gate_stream_arm_force_n = 5.0;
     double gate_stream_release_force_n = 2.0;
@@ -1817,6 +1819,14 @@ struct ForceControlConfig {
     // The loader ties this to the gate rule: `force_gate.enable` with every stream
     // k = 0 is legal ONLY with the fold on, and a compliant Hold with every hold k = 0
     // (a hand-guide, the arm stays where it is pushed) likewise.
+    //
+    // HOW THE CHUNK-FOLLOWER SINK TAKES IT (2026-09-07): the deviation is BOOKED
+    // into the one pending plan fold applySafety keeps per arm (with the geometry
+    // shortfall when a row/collision/IK throttle held the plan, alone otherwise)
+    // and applied next tick as one rigid transport of the follower, the output SMD
+    // and the preview executor. It is never an authority break: with the plan
+    // following what was sent, force control cannot produce a tracking error,
+    // only a plan-frame drift bounded by the gate and the rate caps.
     bool fold_deviation = false;
 
     // ---- coverage ----------------------------------------------------------
@@ -2077,7 +2087,18 @@ struct PreviewExecutionConfig {
         double max_rate = 0.0;
         double translation_velocity_floor = 0.0;
         double angular_velocity_floor = 0.0;
+        double phase_lookahead_sec = 0.0;
     } cursor;
+    struct RecoveryConfig {
+        bool enable = false;
+        double fresh_plan_timeout_sec = 0.0;
+        int max_attempts = 0;
+        // The retry budget is a RATE (2026-09-07): after this long without a new
+        // recovery the attempt counter is whole again, and a Paused regime that has
+        // sat this long re-arms WaitingFresh for the next fresh frame. 0 = the
+        // budget is a lifetime total and Paused waits for a new session.
+        double attempts_reset_sec = 0.0;
+    } recovery;
     double replan_period_sec = 0.0;
     double splice_lead_sec = 0.0;
     double max_result_age_sec = 0.0;

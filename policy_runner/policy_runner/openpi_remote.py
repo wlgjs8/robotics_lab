@@ -1122,8 +1122,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self._last_obs_camera_bundle = None
         self._last_obs_camera_time_sec = None
         self._last_obs_camera_seq = None
+        self._last_obs_camera_observation_time_ns = None
 
-    def _camera_bundle_time_monotonic(self, bundle: Any) -> float | None:
+    def _camera_bundle_time_monotonic(
+        self, bundle: Any, *, allow_receipt_fallback: bool = True,
+        timestamp_ns: int | None = None,
+    ) -> float | None:
         """Map a camera bundle timestamp into Python's monotonic domain.
 
         ``bundle_time_ns`` is stamped by camera_server's CLOCK_MONOTONIC_RAW clock,
@@ -1135,10 +1139,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         """
         clock = getattr(self, "_external_clock", None)
         if clock is not None:
-            return float(bundle.bundle_time_ns) * 1e-9
+            stamp = bundle.bundle_time_ns if timestamp_ns is None else timestamp_ns
+            return float(stamp) * 1e-9 if stamp > 0 else None
         mono_now_sec = time.monotonic()
 
         def fallback_received() -> float | None:
+            if not allow_receipt_fallback:
+                return None
             try:
                 received = float(getattr(bundle, "received_monotonic"))
             except Exception:  # noqa: BLE001
@@ -1146,7 +1153,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             return received if np.isfinite(received) else None
 
         try:
-            bundle_time_ns = int(getattr(bundle, "bundle_time_ns", 0) or 0)
+            bundle_time_ns = int(getattr(bundle, "bundle_time_ns", 0) or 0) if timestamp_ns is None else timestamp_ns
         except Exception:  # noqa: BLE001
             bundle_time_ns = 0
         if bundle_time_ns <= 0:
@@ -1166,13 +1173,48 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             return fallback_received()
         return float(t_img_mono)
 
+    def _camera_recovery_observation_time_ns(self, bundle: Any) -> int | None:
+        """Earliest required frame's host-arrival stamp on the servo clock.
+
+        The live camera service stamps frames with CLOCK_MONOTONIC_RAW. All
+        selected RGB/depth frames must have a valid stamp; Python UDP receipt
+        time and bundle publication time cannot prove both frames are new.
+        This identifies host arrival, not hardware exposure time.
+        """
+        names = list(self.camera_names)
+        if getattr(self, "include_depth", False) and not getattr(self, "blank_depth", False):
+            names.extend(self.depth_camera_names)
+        frames = getattr(bundle, "frames", {})
+        stamps = []
+        for name in names:
+            frame = resolve_frame(frames, name)
+            stamp = getattr(frame, "host_arrival_time_ns", None)
+            if type(stamp) is not int or stamp <= 0:
+                return None
+            stamps.append(stamp)
+        if not stamps:
+            return None
+        mapped = self._camera_bundle_time_monotonic(
+            bundle, allow_receipt_fallback=False, timestamp_ns=min(stamps))
+        latest = self._camera_bundle_time_monotonic(
+            bundle, allow_receipt_fallback=False, timestamp_ns=max(stamps))
+        clock = getattr(self, "_external_clock", None)
+        now_ns = int(clock.now_ns()) if clock is not None else round(time.monotonic() * 1e9)
+        if mapped is None or latest is None or round(latest * 1e9) > now_ns:
+            return None
+        return round(mapped * 1e9)
+
     def next_intent(self, snapshot, now_monotonic):  # type: ignore[override]
         self._require_chunk_execution_profile(getattr(snapshot, "payload", None))
+        self._require_force_control_tare(getattr(snapshot, "payload", None))
+        if all(self._arm_suspended_for_init(arm) for arm in ("left", "right")):
+            return None
+        self._update_preview_recovery(snapshot, now_monotonic)
         self._last_now_monotonic = now_monotonic
         self._handle_server_motion_epoch(snapshot)
         blocked, guard_intent = self._camera_runtime_gate(float(now_monotonic))
         if blocked:
-            return guard_intent
+            return self._guard_preview_gripper_intent(guard_intent)
         replay_completion = self._training_episode_completion_reason()
         if (
             replay_completion is not None
@@ -2034,6 +2076,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         if bundle is not None:
             self._last_obs_camera_bundle = bundle
             self._last_obs_camera_time_sec = self._camera_bundle_time_monotonic(bundle)
+            self._last_obs_camera_observation_time_ns = self._camera_recovery_observation_time_ns(bundle)
             try:
                 self._last_obs_camera_seq = int(getattr(bundle, "bundle_seq", 0) or 0)
             except Exception:  # noqa: BLE001
@@ -2156,6 +2199,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             images, decode_count, missing_count = self._raw_camera_images()
             if images is None:
                 return None  # fail-closed without frames, same as the in-house sources
+            recovery = payload.get("preview_recovery")
+            if isinstance(recovery, dict) and recovery.get("enabled") is True:
+                minimum = recovery.get("min_observation_time_ns", 0)
+                stamp = getattr(self, "_last_obs_camera_observation_time_ns", None)
+                if (minimum > 0 and (type(stamp) is not int or stamp <= minimum)):
+                    self._last_inference_camera_diagnostics["outcome"] = "preview_recovery_observation_before_stop"
+                    return None
             obs = {
                 "observation/left_wrist_0_rgb": images["left"],
                 "observation/right_wrist_0_rgb": images["right"],

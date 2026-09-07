@@ -3,6 +3,7 @@
 #include "rb_servo/control/cartesian_chunk_follower.hpp"
 #include "rb_servo/control/preview_trajectory_tracker.hpp"
 #include "rb_servo/control/preview_brake.hpp"
+#include "rb_servo/control/follower_preview_reference.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -87,6 +88,12 @@ enum class PreviewExecutionWorkerStatus {
   WorkerException,
 };
 
+struct PreviewExecutionPhaseReference {
+  static constexpr std::size_t kCapacity=256;
+  std::array<FollowerPreviewReferenceSample,kCapacity> samples{};
+  std::size_t count{0};
+};
+
 struct PreviewExecutionResult {
   PreviewExecutionIdentity identity{};
   PreviewExecutionGauge gauge{};
@@ -101,8 +108,17 @@ struct PreviewExecutionResult {
   PreviewSolveDiagnostics diagnostics{};
   PreviewMotionState initial{};
   PreviewPolynomialTrajectory trajectory{};
+  // Canonical forecast data only, never executable motion authority. Even a
+  // rejected QP may expose this snapshot, under its original source/epoch/expiry.
+  PreviewExecutionPhaseReference phase_reference{};
   bool accepted() const { return status == PreviewExecutionWorkerStatus::Solved; }
 };
+
+// Samples only the overlap with the snapshot's original validity. Parent plan
+// identity is not canonical reference authority; epoch/gate/source still are.
+bool samplePreviewExecutionPhaseReference(const PreviewExecutionResult& result,
+    double reference_time_sec,double now_sec,const PreviewExecutionIdentity& current,
+    const PreviewExecutionGauge& gauge,double tolerance,FollowerOutputKinematics& state);
 
 enum class PreviewExecutionAcceptance {
   Ready,

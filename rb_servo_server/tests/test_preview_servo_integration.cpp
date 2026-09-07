@@ -12,6 +12,31 @@
 #include <thread>
 
 using namespace rb_servo;
+namespace rb_servo {
+// Deterministically inject a planning event, not a hardware/safety verdict.
+// The production coordinator, accepted-state brake, FK, dispatch, source and
+// fresh-frame handshake all execute unchanged below.
+struct PreviewRecoveryTestAccess {
+  static void receiveWithinTick(DualArmServoLoop& loop,const DualArmCommand& command) {
+    const auto original_start=loop.last_loop_start_ns_;
+    loop.last_loop_start_ns_=original_start-1'000'000;
+    loop.pollChunkFrames();
+    for(const auto& profile:loop.config_.cartesian_control.tcp_pose_target_profiles)
+      if(profile.name=="flow_infer_preview")loop.updatePreviewRecoveryInput(command,profile);
+    loop.last_loop_start_ns_=original_start;
+  }
+  static void request(DualArmServoLoop& loop,PreviewRecoveryCause cause) {
+    loop.preview_recovery_request_=cause;
+  }
+  static void waitBudget(DualArmServoLoop& loop,double seconds,int attempts) {
+    for(auto& p:loop.config_.cartesian_control.tcp_pose_target_profiles)
+      if(p.name=="flow_infer_preview") {
+        p.ruckig_follower.preview_execution.recovery.fresh_plan_timeout_sec=seconds;
+        p.ruckig_follower.preview_execution.recovery.max_attempts=attempts;
+      }
+  }
+};
+}
 namespace {
 void require(bool good,const std::string& why) {if(!good)throw std::runtime_error(why);}
 class MemoryBackend final:public IRobotBackend {
@@ -103,17 +128,21 @@ struct Fixture {
   ~Fixture(){loop->stop();setExternalSteadyNs(0);}
   DualArmCommand command(ControlMode mode){
     DualArmCommand cmd;cmd.tcp_target_profile="flow_infer_preview";cmd.tcp_target_profile_provided=true;
+    cmd.source.source_id="preview_fixture";cmd.source.session_id="session-a";cmd.source.lease_token="token-a";
     cmd.left.arm_id=ArmId::Left;cmd.right.arm_id=ArmId::Right;
     for(int i=0;i<2;++i){auto& arm=i==0?cmd.left:cmd.right;arm.mode=mode;arm.timeout_sec=1;
       arm.has_tcp_target=mode==ControlMode::TcpPoseTarget;
       arm.tcp_target_stand=kin->computeTcpStand(i==0?ArmId::Left:ArmId::Right,q,i==0?cfg.left_mount:cfg.right_mount);}
     return cmd;
   }
-  void frame(double step=.00005,bool stand_down=false){
+  void frame(double step=.00005,bool stand_down=false,
+             uint64_t recovery_epoch=UINT64_MAX,uint64_t observation=UINT64_MAX){
     nlohmann::json packet={{"schema_version","robotics_lab.chunk_overlay.v3"},
       {"host_time_ns",nowSteadyNs()},{"seq",++wire},{"policy_dt_sec",.0334},{"horizon",24},
       {"chunk_metadata",{{"observation_step_seq",0},{"activation_step_seq",0},{"source_start_index",0},
         {"original_horizon",24},{"selected_horizon",24},{"proprio",{{"valid",true}}}}}};
+    packet["chunk_metadata"]["preview_recovery_epoch"]=recovery_epoch==UINT64_MAX?snapshot.preview_recovery.epoch:recovery_epoch;
+    packet["chunk_metadata"]["observation_time_ns"]=observation==UINT64_MAX?time:observation;
     for(int i=0;i<2;++i){const char* side=i==0?"left":"right";
       const auto p=kin->computeTcpStand(i==0?ArmId::Left:ArmId::Right,q,i==0?cfg.left_mount:cfg.right_mount);
       const Eigen::Quaterniond rot(math::rotationFromPose(p));
@@ -276,6 +305,128 @@ void productionGeometryFoldMetadata(bool top){
           "new-source preview did not resume after emergency reset");
 }
 
+void bimanualRecovery(bool top) {
+  Fixture f(top);f.move(80);auto cmd=f.command(ControlMode::TcpPoseTarget);
+  require(f.snapshot.left_cartesian_solve.preview_execution.active &&
+          f.snapshot.right_cartesian_solve.preview_execution.active,"recovery fixture did not engage");
+  const auto old_epoch=f.snapshot.preview_recovery.epoch;
+  const auto old_source=f.snapshot.left_cartesian_solve.preview_execution.source_wire_seq;
+  PreviewRecoveryTestAccess::request(*f.loop,PreviewRecoveryCause::Backlog);
+  f.tick(cmd);
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Braking,"planning event did not brake shared group");
+  require(f.snapshot.preview_recovery.epoch>old_epoch,"no shared recovery epoch");
+  for(const auto* p:{&f.snapshot.left_cartesian_solve.preview_execution,&f.snapshot.right_cartesian_solve.preview_execution})
+    require(!p->active && std::string(p->status).find("recovery_")==0,"peer consumed ordinary plan on recovery tick");
+  for(int k=0;k<200 && f.snapshot.preview_recovery.state==PreviewRecoveryState::Braking;++k)f.tick(cmd);
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::WaitingFresh,"finite accepted-state stop did not finish");
+  const auto barrier=f.snapshot.preview_recovery.min_observation_time_ns;
+  const auto epoch=f.snapshot.preview_recovery.epoch;
+  require(barrier>0 && barrier<=f.time,"fresh observation fence absent");
+  const auto held_left_target=f.snapshot.left_cartesian_solve.stage_tcp_target_stand;
+  const auto held_right_target=f.snapshot.right_cartesian_solve.stage_tcp_target_stand;
+  require(held_left_target && held_right_target,"recovery terminal target missing");
+  const auto stationary_targets=[&] {
+    for(int i=0;i<2;++i) {
+      const auto& solve=i==0?f.snapshot.left_cartesian_solve:f.snapshot.right_cartesian_solve;
+      const auto& held=i==0?*held_left_target:*held_right_target;
+      const auto& q=i==0?f.snapshot.left_sent_q_deg:f.snapshot.right_sent_q_deg;
+      const auto sent=f.kin->computeTcpStand(i==0?ArmId::Left:ArmId::Right,q,i==0?f.cfg.left_mount:f.cfg.right_mount);
+      if(solve.stage_tcp_target_stand) {
+        require(math::positionDistance(*solve.stage_tcp_target_stand,held)<1e-12 &&
+                math::orientationDistanceRad(*solve.stage_tcp_target_stand,held)<1e-12,
+                "waiting/restart advanced a stationary nominal target");
+      } else {
+        require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Starting &&
+                !solve.preview_execution.active && std::string(solve.preview_execution.status)=="waiting",
+                "restart lost its stationary waiting authority");
+      }
+      // IK may refine a previous accepted joint solution within its declared
+      // tolerance. Test the unchanged TCP authority and that same envelope,
+      // rather than imposing bitwise identity on an iterative joint solver.
+      require(math::positionDistance(sent,held)<=f.cfg.kinematics.ik.position_tolerance_m &&
+              math::orientationDistanceRad(sent,held)<=f.cfg.kinematics.ik.orientation_tolerance_rad,
+              "stationary target escaped existing IK acceptance");
+    }
+  };
+  f.frame(.0001,false,old_epoch,f.time);f.tick(cmd);
+  f.frame(.0001,false,epoch,barrier);f.tick(cmd);
+  f.frame(.0001,false,epoch,f.time+1000000000);f.tick(cmd);
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::WaitingFresh &&
+          f.snapshot.preview_recovery.rejected_frames>=3,"old epoch/equal fence/future frame was accepted");
+  stationary_targets();
+  f.frame();
+  // Emulate a single candidate arriving after this tick's start but before its
+  // ingest phase. It must not be permanently consumed as future-dated.
+  PreviewRecoveryTestAccess::receiveWithinTick(*f.loop,cmd);
+  f.tick(cmd);
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Starting,"fresh paired frame not selected");
+  const auto candidate=f.snapshot.preview_recovery.candidate_source_wire_seq;
+  require(candidate>old_source,"recovery replayed abandoned source");
+  for(int k=0;k<80 && f.snapshot.preview_recovery.state==PreviewRecoveryState::Starting;++k) {
+    f.tick(cmd);
+    // Both raw clocks are held while asynchronous first plans engage. One fast
+    // worker is not permission for its arm to run the next task phase alone.
+    if(f.snapshot.preview_recovery.state==PreviewRecoveryState::Starting) {
+      stationary_targets();
+    }
+  }
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Tracking &&
+          f.snapshot.preview_recovery.completed==1,"paired recovery never resumed");
+  f.move(40);require(!f.snapshot.fault_latched,"recovered policy latched");
+  // An authority token renewal is not an operator retry/new session.
+  const auto e=f.snapshot.preview_recovery.epoch;cmd.source.lease_token="renewed";f.tick(cmd);
+  require(f.snapshot.preview_recovery.epoch==e,"lease renewal created recovery");
+  cmd.source.session_id="session-b";f.tick(cmd);
+  require(f.snapshot.preview_recovery.epoch>e &&
+          f.snapshot.preview_recovery.state==PreviewRecoveryState::Braking,"new session crossed old plan authority");
+  for(int k=0;k<200 && f.snapshot.preview_recovery.state==PreviewRecoveryState::Braking;++k)f.tick(cmd);
+  PreviewRecoveryTestAccess::waitBudget(*f.loop,.052,1);
+  for(int k=0;k<30;++k)f.tick(cmd);
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Paused && !f.snapshot.fault_latched,
+          "missing fresh plan did not produce local policy pause");
+  const auto paused_epoch=f.snapshot.preview_recovery.epoch;
+  cmd.source.lease_token="renewed-again";for(int k=0;k<5;++k)f.tick(cmd);
+  require(f.snapshot.preview_recovery.epoch==paused_epoch &&
+          f.snapshot.preview_recovery.state==PreviewRecoveryState::Paused,"lease renewal escaped bounded pause");
+  f.tick(f.command(ControlMode::ResetFault));
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Tracking &&
+          f.snapshot.preview_recovery.epoch>paused_epoch,"explicit reset did not reset policy lifecycle");
 }
-int main(){try{exercise(false);exercise(true);oneArmAndRejectedTopDispatch();productionGeometryFoldMetadata(false);productionGeometryFoldMetadata(true);std::cout<<"preview servo integration PASS\n";return 0;}
+
+void boundedRecoveryRetries(bool top) {
+  Fixture f(top);f.move(80);auto cmd=f.command(ControlMode::TcpPoseTarget);
+  PreviewRecoveryTestAccess::waitBudget(*f.loop,2.,2);
+  PreviewRecoveryTestAccess::request(*f.loop,PreviewRecoveryCause::Backlog);f.tick(cmd);
+  const auto stop=[&] {
+    for(int k=0;k<200 && f.snapshot.preview_recovery.state==PreviewRecoveryState::Braking;++k)f.tick(cmd);
+  };
+  stop();
+  for(int attempt=0;attempt<2;++attempt) {
+    require(f.snapshot.preview_recovery.state==PreviewRecoveryState::WaitingFresh,"retry did not wait for fresh observation");
+    f.tick(cmd); // Camera arrival must be strictly later than the stop barrier.
+    f.frame();f.tick(cmd);require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Starting,"retry candidate missing");
+    // Inject a failed first-plan attempt before either arm can advance its raw
+    // clock. Real worker starvation/expiry causes are exercised by live unit
+    // tests; here the real coordinator must bound the number of transactions.
+    PreviewRecoveryTestAccess::request(*f.loop,PreviewRecoveryCause::RetryTimeout);f.tick(cmd);stop();
+  }
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Paused &&
+          f.snapshot.preview_recovery.attempts==2 && !f.snapshot.fault_latched,
+          "planning retry exhaustion did not settle into bounded local pause");
+  const auto epoch=f.snapshot.preview_recovery.epoch;
+  for(int k=0;k<8;++k)f.tick(f.command(ControlMode::Hold));
+  for(int k=0;k<8;++k){f.frame();f.tick(cmd);}
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::Paused &&
+          f.snapshot.preview_recovery.epoch==epoch &&
+          !f.snapshot.left_cartesian_solve.preview_execution.active &&
+          !f.snapshot.right_cartesian_solve.preview_execution.active,
+          "old policy heartbeat escaped pause after explicit Hold");
+  cmd.source.session_id="operator-retry";f.tick(cmd);stop();
+  require(f.snapshot.preview_recovery.state==PreviewRecoveryState::WaitingFresh &&
+          f.snapshot.preview_recovery.epoch>epoch && f.snapshot.preview_recovery.attempts==1,
+          "new policy session did not receive a fresh bounded recovery transaction");
+}
+
+}
+int main(){try{exercise(false);exercise(true);oneArmAndRejectedTopDispatch();productionGeometryFoldMetadata(false);productionGeometryFoldMetadata(true);bimanualRecovery(false);bimanualRecovery(true);boundedRecoveryRetries(false);boundedRecoveryRetries(true);std::cout<<"preview servo integration PASS\n";return 0;}
   catch(const std::exception& e){setExternalSteadyNs(0);std::cerr<<e.what()<<'\n';return 1;}}

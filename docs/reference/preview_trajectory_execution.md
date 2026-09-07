@@ -2,6 +2,16 @@
 
 ## Status and scope
 
+The September 7 redesign adds a shared policy recovery lifecycle to the explicit
+`flow_infer_preview` profile. Planning backlog, unavailable reference history,
+first-plan timeout and sustained plan expiration request a finite accepted-state
+stop of the participating arms. They no longer request a global hardware fault
+merely because planning missed its progress budget. Invalid state, an uncertified
+stop, rejected/deviating dispatch, joint tracking and existing hardware, force,
+collision and geometry safety faults retain their independent handling. Validation
+for this revision is recorded in `outputs/preview_recovery_redesign_20260907/`;
+older numerical results below describe earlier revisions.
+
 The September 6 late-evening repair adds rejection diagnostics, transports
 geometry-hold gauge changes through pending plans, and corrects the artificial
 1.4/√3 dominant-axis rotation ceiling. Its current validation is recorded under
@@ -114,8 +124,14 @@ satisfying an outer polytope alone is insufficient. A common positive factor
 normalizes H and g without changing objective ratios or its minimizer. The
 original iteration/time budget still applies; the method does not promise
 convergence of every feasible request before its live splice deadline. At N=24
-its four dense angular matrices occupy about 1.62 MB per worker, excluding
-solver-internal storage and vectors. All coupled work runs outside the servo.
+the worker prewarms a 32-support-plane pool and the original 768-plane pool.
+Ordinary small problems avoid scanning hundreds of unused rows. Larger initial
+plane sets use the full pool immediately; a growing small problem can promote
+once, retaining every support plane and the original component boxes. Neither
+the objective nor the final norm certificate changes. The live request solve
+budget is also bounded by its original splice/expiry deadline minus one servo
+period; the offline maximum is not permission to finish a stale request.
+All coupled work runs outside the servo.
 A general recursive-feasibility guarantee for acceleration after changing the
 SO(3) chart has not been established.
 
@@ -155,7 +171,73 @@ are reference timing parameters; they do not increase physical velocity caps.
 The old output-error-based leash does not alter the new profile's canonical
 raw integration clock. Independent safety and force gates still do.
 
-### Current contact and stop behavior
+### Shared preview recovery and fresh observation barrier
+
+`preview_execution.recovery` explicitly declares `enable`,
+`fresh_plan_timeout_sec` and `max_attempts`. The tracked real preview profile
+uses 2 seconds and 3 attempts per policy session. Its cursor lookahead is an
+explicit common parameter, not an arm-specific gain. Other target profiles keep
+their existing behavior.
+
+The qualified default is `cursor.phase_lookahead_sec: 0.0`. On the September 6
+23:18:13 right-arm input, the new solver with the original phase estimator
+preserves terminal tracking error while shortening the longest observed QP.
+A 40ms lookahead lowers nominal angular jerk but increases terminal angular
+error; a 20ms trial also produces a plan expiration. Those window candidates
+remain available for offline comparison and are not the default robot setting.
+
+```mermaid
+stateDiagram-v2
+  Tracking --> Braking: planning progress unavailable
+  Braking --> WaitingFresh: both terminal stop samples dispatched
+  WaitingFresh --> Starting: current epoch + post-stop camera observation
+  Starting --> Tracking: both initial plans accepted
+  Starting --> Braking: plan failed or timed out
+  WaitingFresh --> Paused: no fresh candidate before timeout
+  Braking --> Paused: attempt budget exhausted and stop dispatched
+```
+
+The coordinator replaces both participating outputs in the same decision tick,
+before force composition, IK and final joint safety. Each finite brake starts
+from the corresponding accepted p/v/a; repeated requests cannot renew its clock.
+Stop completion requires accepted terminal dispatch provenance. A new epoch
+invalidates pending old results and policy chunks. Abandoned source IDs,
+backlog and nominal errors are recorded instead of silently folding old path
+debt into the new model reference.
+
+While waiting, the policy sends only a gripper-free authority heartbeat. It
+invalidates pending inference, overlay chaining and RTC state, then asks for one
+new paired chunk. The packet must carry the current recovery epoch and an
+observation timestamp strictly after the server's stop barrier. This timestamp
+is the earliest selected required camera host-arrival timestamp, converted from
+CLOCK_MONOTONIC_RAW to CLOCK_MONOTONIC; it is not a synchronized sensor-exposure
+timestamp. No bundle-receipt fallback is accepted for recovery. Old epochs,
+observations at/before the barrier, future observations and malformed metadata
+are rejected.
+
+During `Starting`, the raw reference clocks remain stationary until both first
+preview plans have been accepted. The policy does not commit row zero or a
+gripper command before this acknowledgement. Existing IK may refine a stationary
+joint solution within its declared TCP tolerance; the nominal p/v/a authority
+stays stationary. The gripper bridge and Python publisher suppress new policy
+gripper commands during recovery; previously accepted gripper actuation cannot
+be retroactively cancelled by this protocol.
+
+`Paused` is a policy state, not a hardware fault reset. A deliberate new
+arbitrated source/session or explicit successful ResetFault/InitMotion lifecycle
+can start a new attempt budget; ordinary lease-token renewal cannot. Teleop and
+manual gripper control retain their own profile authority. No failure of a
+hardware reset is reclassified as a successful recovery.
+
+The optional cursor phase window compares integrated signed tracking error over
+known future reference/output samples. It reduces sensitivity to an instantaneous
+velocity sign flip at a turn. Samples require matching source, epoch, authority
+and coordinate gauge and remain bounded by the original plan validity. Missing
+future samples use the original instantaneous estimate and increment a fallback
+counter. This changes reference-time pacing, without adding a pose low-pass or
+changing any physical velocity, acceleration, jerk or backlog cap.
+
+### Contact constraints during execution
 
 Only this new profile prepares the existing wrench filter and ForceGate before
 advancing the canonical follower. The later force composition reuses the same

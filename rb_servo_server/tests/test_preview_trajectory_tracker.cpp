@@ -199,6 +199,20 @@ bool testFailClosedAndOldPlanPreserved() {
   auto tiny=cfg; tiny.max_solve_time_sec=1e-12; PreviewTrajectoryTracker timeout(tiny);
   CHECK(timeout.plan(good,initial).status==PreviewSolveStatus::TimeBudgetExceeded);
   CHECK(!timeout.hasTrajectory()); CHECK(!timeout.sample(0.,after));
+  // A live request may shorten the budget but cannot mutate the configured
+  // cap or replace an accepted plan after its admission deadline is lost.
+  CHECK(tracker.plan(good,initial,{},PreviewContactSolveMode::Automatic,0.).status==
+      PreviewSolveStatus::TimeBudgetExceeded);
+  CHECK(tracker.plan(good,initial,{},PreviewContactSolveMode::Automatic,1e-12).status==
+      PreviewSolveStatus::TimeBudgetExceeded);
+  CHECK(tracker.plan(good,initial,{},PreviewContactSolveMode::Automatic,-.01).status==
+      PreviewSolveStatus::InvalidReference);
+  CHECK(tracker.plan(good,initial,{},PreviewContactSolveMode::Automatic,
+      std::numeric_limits<double>::quiet_NaN()).status==PreviewSolveStatus::InvalidReference);
+  CHECK(tracker.config().max_solve_time_sec==cfg.max_solve_time_sec);
+  CHECK(tracker.sample(.08,after)); CHECK(sameState(before,after));
+  CHECK(timeout.plan(good,initial,{},PreviewContactSolveMode::Automatic,1.).status==
+      PreviewSolveStatus::TimeBudgetExceeded); // a request cannot enlarge cfg
   auto restricted=cfg; restricted.max_working_set_recalculations=1;
   PreviewTrajectoryTracker work_limited(restricted);
   const auto limited=work_limited.plan(remote,initial);
@@ -240,6 +254,30 @@ bool testAngularNormAuthorityAndRebasedSplice() {
   const auto solved=coupled.plan(ref,initial);CHECK(accepted(solved));
   CHECK(solved.diagnostics.angular_norm_coupled);CHECK(solved.diagnostics.angular_norm_cuts>0);
   PreviewPolynomialTrajectory p;CHECK(coupled.exportTrajectory(p));
+  // Permuting axes is an exact symmetry of the shared angular objective,
+  // jerk box and norm balls. Reduced support-plane pools must preserve it.
+  PreviewTrajectoryTracker permuted(cfg);
+  const auto permuted_ref=reference([](double t){return pose({0.,0.,0.},{.2*t,1.1*t,1.1*t});});
+  const auto permuted_solved=permuted.plan(permuted_ref,initial);CHECK(accepted(permuted_solved));
+  PreviewPolynomialTrajectory pp;CHECK(permuted.exportTrajectory(pp));
+  CHECK(solved.diagnostics.angular_norm_cuts>32); // exercises pool promotion
+  const auto objective=[&](const PreviewPolynomialTrajectory& plan,const Eigen::Vector3d& demand) {
+    const double V=cfg.max_angular_velocity_rad_s,A=cfg.max_angular_acceleration_rad_s2-.5*V*V;
+    const double J=(cfg.max_angular_jerk_rad_s3-2.5*V*A-(5./6.)*V*V*V)/std::sqrt(3.);
+    double cost=0.;
+    for(std::size_t k=0;k<plan.count;++k) {
+      const Eigen::Vector3d error=plan.p.row(k+1).tail<3>().transpose()-demand*((k+1)*plan.step_sec);
+      cost+=error.squaredNorm()/(cfg.angular_tracking_scale_rad*cfg.angular_tracking_scale_rad);
+      cost+=cfg.jerk_weight*plan.jerk.row(k).tail<3>().squaredNorm()/(J*J);
+      if(k)cost+=cfg.jerk_difference_weight*(plan.jerk.row(k)-plan.jerk.row(k-1)).tail<3>().squaredNorm()/(J*J);
+    }
+    return cost;
+  };
+  const double cost=objective(p,{1.1,1.1,.2}),permuted_cost=objective(pp,{.2,1.1,1.1});
+  // The norm certificate terminates within configured precision. A nearly flat
+  // jerk=.001 optimum can have different p/v/a components at the same cost;
+  // compare the actual objective, not falsely demand bit-identical active sets.
+  CHECK(std::abs(cost-permuted_cost)<=cfg.feasibility_tolerance*std::max({1.,cost,permuted_cost}));
   const double V=cfg.max_angular_velocity_rad_s,A=cfg.max_angular_acceleration_rad_s2-.5*V*V;
   for(std::size_t k=0;k<p.count;++k) {
     CHECK(p.v.row(k).tail<3>().norm()<=V+cfg.feasibility_tolerance);

@@ -1714,6 +1714,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             {"deadline_jerk_minimization", follower.deadline_jerk_minimization},
             {"continuous_hold_resume", follower.continuous_hold_resume},
             {"preview_execution", follower.preview_execution.enable},
+            {"preview_recovery", follower.preview_execution.recovery.enable},
             {"gripper_state_max_age_sec", config_.servo.command_timeout_sec},
             {"output_smd", {
                 {"mode", follower.output_smd.mode == FollowerOutputSmdMode::PositionLowpass2
@@ -1758,6 +1759,18 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["preview_execution"]={
         {"left",preview_json(snapshot.left_cartesian_solve.preview_execution)},
         {"right",preview_json(snapshot.right_cartesian_solve.preview_execution)}};
+    const auto& recovery=snapshot.preview_recovery;
+    message["preview_recovery"]={
+        {"enabled",recovery.enabled},{"state",toString(recovery.state)},
+        {"reason",toString(recovery.cause)},{"sample_time_ns",recovery.sample_time_ns},
+        {"epoch",recovery.epoch},{"min_observation_time_ns",recovery.min_observation_time_ns},
+        {"attempts",recovery.attempts},{"completed",recovery.completed},
+        {"rejected_frames",recovery.rejected_frames},
+        {"started_time_ns",recovery.started_time_ns},
+        {"abandoned_source_wire_seq",recovery.abandoned_source_wire_seq},
+        {"abandoned_source_recv_seq",recovery.abandoned_source_recv_seq},
+        {"abandoned_backlog_sec",recovery.abandoned_backlog_sec},
+        {"candidate_source_wire_seq",recovery.candidate_source_wire_seq}};
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
     message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
     const bool worker_enabled =
@@ -2365,7 +2378,18 @@ void StatePublisher::threadMain() {
 
         // Forward the arbitrated gripper setpoint to gripper_server (rate-limited
         // inside the bridge). Off the RT loop, non-blocking.
-        if (gripper_bridge_) gripper_bridge_->forward(snapshot.command);
+        if (gripper_bridge_) {
+            auto gripper_command=snapshot.command;
+            bool recovery_profile=false;
+            for(const auto& profile:config_.cartesian_control.tcp_pose_target_profiles)
+                if(profile.name==gripper_command.tcp_target_profile)
+                    recovery_profile=profile.ruckig_follower.preview_execution.recovery.enable;
+            if(recovery_profile && snapshot.preview_recovery.enabled &&
+               snapshot.preview_recovery.state!=PreviewRecoveryState::Tracking) {
+                gripper_command.left.has_gripper=false;gripper_command.right.has_gripper=false;
+            }
+            gripper_bridge_->forward(gripper_command);
+        }
 
         // Push the latest gripper open percent into the control loop's safety gate so
         // the TCP fingertip offset points track the live jaw geometry. Non-blocking

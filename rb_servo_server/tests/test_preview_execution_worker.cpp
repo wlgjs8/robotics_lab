@@ -144,6 +144,22 @@ bool testWorkerSpliceAndAdmission() {
   CHECK(received); CHECK(allocation_audit::count==0);
   if (!first.accepted()) std::cerr<<"worker status="<<static_cast<int>(first.status)<<" solve="<<static_cast<int>(first.diagnostics.status)<<'\n';
   CHECK(first.accepted()); CHECK(sameState(first.initial,r.cold_initial));
+  FollowerOutputKinematics phase;
+  CHECK(first.phase_reference.count>2);
+  CHECK(samplePreviewExecutionPhaseReference(first,1.004,1.,r.identity,r.gauge,1e-7,phase));
+  auto rejected_forecast=first;rejected_forecast.status=PreviewExecutionWorkerStatus::SolveRejected;
+  CHECK(samplePreviewExecutionPhaseReference(rejected_forecast,1.004,1.,r.identity,r.gauge,1e-7,phase));
+  auto unrelated=r.identity;++unrelated.parent_plan_id;
+  CHECK(samplePreviewExecutionPhaseReference(first,1.004,1.,unrelated,r.gauge,1e-7,phase));
+  ++unrelated.source_recv_seq;
+  CHECK(!samplePreviewExecutionPhaseReference(first,1.004,1.,unrelated,r.gauge,1e-7,phase));
+  auto changed_gauge=r.gauge;++changed_gauge.revision;
+  CHECK(!samplePreviewExecutionPhaseReference(first,1.004,1.,r.identity,changed_gauge,1e-7,phase));
+  changed_gauge=r.gauge;changed_gauge.translation.x()=.01;
+  CHECK(!samplePreviewExecutionPhaseReference(first,1.004,1.,r.identity,changed_gauge,1e-7,phase));
+  CHECK(!samplePreviewExecutionPhaseReference(first,1.051,1.,r.identity,r.gauge,1e-7,phase));
+  CHECK(!samplePreviewExecutionPhaseReference(first,1.02,1.05,r.identity,r.gauge,1e-7,phase));
+  CHECK(!samplePreviewExecutionPhaseReference(first,.999,1.,r.identity,r.gauge,1e-7,phase));
   CHECK(validatePreviewExecutionResult(first,1.,r.identity)==PreviewExecutionAcceptance::Ready);
   auto stale=r.identity; ++stale.epoch;
   CHECK(validatePreviewExecutionResult(first,1.,stale)==PreviewExecutionAcceptance::EpochMismatch);
@@ -318,6 +334,23 @@ bool testGaugeTransportPreservesC2AndIdentity() {
     CHECK((after.angular_acceleration_body-before.angular_acceleration_body).norm()<1e-12);
     CHECK((after.angular_jerk_stand-target.rotation*before.angular_jerk_stand).norm()<1e-10);
   }
+  CHECK(result.phase_reference.count==original.phase_reference.count);
+  for(std::size_t k=0;k<result.phase_reference.count;++k) {
+    const auto& before=original.phase_reference.samples[k];const auto& after=result.phase_reference.samples[k];
+    CHECK(before.relative_time_sec==after.relative_time_sec);
+    auto expected=math::se3FromPose(before.kinematics.pose);
+    expected.translation()+=target.translation;expected.rotation()=target.rotation*expected.rotation();
+    CHECK(math::positionDistance(after.kinematics.pose,math::poseFromSe3(expected))<1e-12);
+    CHECK(math::orientationDistanceRad(after.kinematics.pose,math::poseFromSe3(expected))<1e-10);
+    for(const auto pair : {std::pair{before.kinematics.velocity,after.kinematics.velocity},
+                           std::pair{before.kinematics.acceleration,after.kinematics.acceleration}}) {
+      CHECK(pair.first.x==pair.second.x&&pair.first.y==pair.second.y&&pair.first.z==pair.second.z);
+      CHECK(pair.first.rx==pair.second.rx&&pair.first.ry==pair.second.ry&&pair.first.rz==pair.second.rz);
+    }
+  }
+  FollowerOutputKinematics phase;
+  CHECK(samplePreviewExecutionPhaseReference(result,1.014,1.005,r.identity,target,1e-7,phase));
+  CHECK(!samplePreviewExecutionPhaseReference(original,1.014,1.005,r.identity,target,1e-7,phase));
   PreviewMotionSample start;CHECK(result.trajectory.sample(0,start));CHECK(sameState(start,result.initial));
   CHECK(validatePreviewExecutionResult(result,1.005,r.identity)==PreviewExecutionAcceptance::Ready);
   auto current=r.identity;++current.gate_revision;

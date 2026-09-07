@@ -45,7 +45,8 @@ def _arm_epoch(payload: dict[str, Any], side: str) -> int:
     )
 
 
-def _command_pose(payload: dict[str, Any], side: str) -> np.ndarray:
+def command_pose(payload: dict[str, Any], side: str) -> np.ndarray:
+    """Strict command FK reader; never substitute measured pose or legacy RPY."""
     arm = payload.get(side)
     raw = arm.get("tcp_command_stand") if isinstance(arm, dict) else None
     if not isinstance(raw, dict):
@@ -139,7 +140,7 @@ class ServoCommandHistory:
             for side in SIDES:
                 try:
                     epoch = _arm_epoch(payload, side)
-                    pose = _command_pose(payload, side)
+                    pose = command_pose(payload, side)
                 except (TypeError, ValueError) as exc:
                     self._history[side].clear()
                     self._last_rejection = str(exc)
@@ -213,7 +214,7 @@ class ServoCommandHistory:
                     epoch = _arm_epoch(payload, side)
                     # Parsing the current payload too prevents a malformed observation
                     # from silently borrowing a valid pose from another packet.
-                    _command_pose(payload, side)
+                    command_pose(payload, side)
                     samples = [s for s in histories[side] if s.time_ns <= end]
                     if not samples:
                         raise ValueError(last_rejection)

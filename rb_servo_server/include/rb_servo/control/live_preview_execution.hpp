@@ -62,6 +62,17 @@ class LivePreviewExecution {
   // analytical state. It does not promise zero stopping distance. IK, contact
   // overlay and final joint safety retain their independent veto.
   bool contactGuardStopped();
+  // Planning recovery never grants motion authority to a stale reference.
+  // It sends one finite accepted-state brake, then holds until the shared
+  // coordinator supplies a post-stop observation and a new execution epoch.
+  bool requestRecovery(PreviewRecoveryCause cause);
+  bool seedStationaryRecovery(double now_sec, const Pose6D& nominal,
+                              bool stationary, PreviewRecoveryCause cause);
+  LivePreviewOutput recoveryOutput(double now_sec);
+  bool recoveryStopped() const;
+  bool restartRecovery();
+  bool recovering() const { return recovery_cause_ != PreviewRecoveryCause::None; }
+  PreviewRecoveryCause recoveryCause() const { return recovery_cause_; }
   PreviewDispatchTransaction transaction(const Pose6D& nominal,
                                          const Pose6D& composed) const;
   bool observeDispatch(const PreviewDispatchTransaction& transaction,
@@ -74,6 +85,9 @@ class LivePreviewExecution {
   bool hasPlan() const { return active_.accepted() || brake_trajectory_.valid; }
   bool braking() const { return brake_trajectory_.valid; }
   const PreviewMotionSample& sample() const { return sample_; }
+  const PreviewMotionSample& acceptedSample() const { return accepted_sample_; }
+  const Pose6D& acceptedPose() const { return accepted_epoch_?accepted_sample_.pose:cold_.pose; }
+  const Pose6D& recoveryAnchorPose() const { return recovery_seed_valid_?recovery_seed_.pose:acceptedPose(); }
   const PreviewExecutionResult& lastResult() const { return received_; }
   const LivePreviewAdmissionDiagnostics& admissionDiagnostics() const { return admission_diagnostics_; }
 
@@ -103,18 +117,23 @@ class LivePreviewExecution {
   std::size_t history_begin_{0}, history_count_{0};
   PreviewExecutionRequest request_{};
   PreviewExecutionResult active_{}, staged_{}, received_{};
+  PreviewExecutionResult phase_reference_result_{};
   PreviewMotionSample sample_{}, accepted_sample_{};
   PreviewMotionState cold_{};
   mutable PreviewExecutionTelemetry telemetry_{};
   LivePreviewAdmissionDiagnostics admission_diagnostics_{};
   std::uint64_t epoch_{1}, gate_revision_{1}, request_id_{0}, gauge_revision_{0};
   double initialized_at_{0}, last_time_{0}, next_request_at_{0};
+  double planning_starved_since_sec_{0};
   double brake_origin_sec_{0}, accepted_sample_time_sec_{0};
   std::uint64_t brake_plan_id_{0}, accepted_plan_id_{0};
   Eigen::Vector3d fold_translation_{Eigen::Vector3d::Zero()};
   Eigen::Quaterniond fold_rotation_{Eigen::Quaterniond::Identity()};
   const char* brake_reason_{"braking"};
   const char* stop_fault_reason_{nullptr};
+  PreviewRecoveryCause recovery_cause_{PreviewRecoveryCause::None};
+  PreviewMotionSample recovery_seed_{};
+  bool recovery_seed_valid_{false};
   bool initialized_{false}, staged_valid_{false}, faulted_{false}, accepted_epoch_{false};
 };
 

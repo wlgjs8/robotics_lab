@@ -22,7 +22,7 @@ CartesianChunkFollowerConfig rawConfig() {
   CartesianChunkFollowerConfig c;c.lin={.6,12,2000};c.ang={1.4,40,4000};
   c.window={0,8,4,1};c.fresh_chunk_replan=true;c.continuous_hold_resume=true;return c;
 }
-RuckigFollowerConfig config() {
+RuckigFollowerConfig config(bool recovery=false) {
   RuckigFollowerConfig c;c.enable=true;c.controller=RuckigFollowerController::DeltaPreview;
   c.fresh_chunk_replan=true;c.continuous_hold_resume=true;
   c.plan_leash_enable=true;c.plan_leash_start_m=.01;c.plan_leash_start_rad=.0349;
@@ -30,6 +30,7 @@ RuckigFollowerConfig config() {
   auto& p=c.preview_execution;p.enable=true;p.replan_period_sec=.01;p.splice_lead_sec=.01;
   p.max_result_age_sec=.05;p.worker_poll_period_sec=.0005;p.max_source_rows=32;
   p.cursor={true,.1,.2,1.1,1e-6,1e-6};
+  if(recovery)p.recovery={true,.25,3};
   auto& t=p.tracker;t.planning_dt_sec=.01;t.horizon_steps=24;
   t.max_linear_velocity_m_s=.6;t.max_linear_acceleration_m_s2=12;t.max_linear_jerk_m_s3=2000;
   t.max_angular_velocity_rad_s=1.4;t.max_angular_acceleration_rad_s2=40;t.max_angular_jerk_rad_s3=4000;
@@ -51,9 +52,10 @@ ChunkFrame frame(std::uint64_t wire=17,std::uint64_t recv=8,double delta=.001,do
 void letWorkerRun() {std::this_thread::sleep_for(std::chrono::milliseconds(3));}
 struct Fixture {
   CartesianChunkFollower raw{rawConfig()};
-  LivePreviewExecution exec{config(),rawConfig(),kDt};
+  LivePreviewExecution exec;
   Pose6D accepted{pose()};std::uint64_t tick{0};
-  explicit Fixture(double delta=.001,double angular_delta=0.) {raw.submitDeltaFrame(frame(17,8,delta,angular_delta),accepted);}
+  explicit Fixture(double delta=.001,double angular_delta=0.,bool recovery=false)
+      : exec(config(recovery),rawConfig(),kDt) {raw.submitDeltaFrame(frame(17,8,delta,angular_delta),accepted);}
   double now() const {return static_cast<double>(kStartNs+tick*kDtNs)*1e-9;}
   LivePreviewOutput step(bool stationary=true,double gate=1.,
                          const Eigen::Vector3d& normal=Eigen::Vector3d::Zero()) {
@@ -71,6 +73,14 @@ struct Fixture {
     return false;
   }
 };
+
+bool sameMotion(const PreviewMotionState& a,const PreviewMotionState& b) {
+  return math::positionDistance(a.pose,b.pose)<1e-11&&math::orientationDistanceRad(a.pose,b.pose)<1e-10&&
+      (a.linear_velocity-b.linear_velocity).norm()<1e-10&&
+      (a.linear_acceleration-b.linear_acceleration).norm()<1e-8&&
+      (a.angular_velocity_body-b.angular_velocity_body).norm()<1e-10&&
+      (a.angular_acceleration_body-b.angular_acceleration_body).norm()<1e-8;
+}
 
 bool coldAndC2Splice() {
   setExternalSteadyNs(kStartNs);Fixture f;
@@ -384,10 +394,30 @@ bool contactRetainsAngularUntilOriginalExpiry() {
   }
   CHECK(angular_id!=0&&terminal);return true;
 }
+bool forceFoldIsTransportedLikeGeometry() {
+  // 2026-09-07: a force fold is "where the arm was actually sent", the same rigid
+  // shift the follower and the output SMD took; the in-flight result is transported
+  // into the new gauge and admitted, the authority revision does not move and no
+  // staged work is cancelled. (Before: gate_mismatch, expiry, a 10 s brake.)
+  setExternalSteadyNs(kStartNs);Fixture f;
+  f.step();letWorkerRun(); // Result computed before the fold.
+  const auto gate=f.exec.telemetry().gate_revision;
+  f.exec.shiftCommonFrame(Eigen::Vector3d{.0001,0,0},Eigen::Quaterniond::Identity(),PreviewFoldCause::Force);
+  CHECK(f.raw.absorbOffset({.0001,0,0},Eigen::Quaterniond::Identity()));f.accepted.x+=.0001;
+  auto out=f.step();CHECK(!out.fault);
+  CHECK(f.exec.telemetry().gate_revision==gate);
+  CHECK(f.exec.telemetry().result_checks[static_cast<std::size_t>(PreviewExecutionAcceptance::GateMismatch)]==0);
+  CHECK(f.exec.telemetry().result_checks[static_cast<std::size_t>(PreviewExecutionAcceptance::Ready)]==1);
+  CHECK(f.exec.telemetry().result_gauge_transported==1);
+  CHECK(f.exec.telemetry().fold_force_count==1&&f.exec.telemetry().staged_cancel_counts[0]==0);
+  CHECK(std::string(f.exec.telemetry().last_admission_reason)=="ready");
+  return true;
+}
 bool authorityFoldAndResetCancellationAreAccounted() {
   setExternalSteadyNs(kStartNs);Fixture f;
   f.step();letWorkerRun(); // Result computed before authority changes.
-  f.exec.shiftCommonFrame(Eigen::Vector3d{.0001,0,0},Eigen::Quaterniond::Identity(),PreviewFoldCause::Force);
+  // Untagged: since 2026-09-07 the only fold that still breaks authority.
+  f.exec.shiftCommonFrame(Eigen::Vector3d{.0001,0,0},Eigen::Quaterniond::Identity(),PreviewFoldCause::Unknown);
   CHECK(f.raw.absorbOffset({.0001,0,0},Eigen::Quaterniond::Identity()));f.accepted.x+=.0001;
   auto out=f.step();CHECK(!out.fault);
   CHECK(f.exec.telemetry().result_checks[static_cast<std::size_t>(PreviewExecutionAcceptance::GateMismatch)]==1);
@@ -474,15 +504,319 @@ bool geometryFoldsTransportPendingStagedAndQueuedDispatch() {
   for(int axis=0;axis<3;++axis)CHECK(std::abs(t.gauge_translation_m[axis]-total_dp[axis])<1e-12);
   for(int axis=0;axis<4;++axis)CHECK(std::abs(t.gauge_quaternion_xyzw[axis]-total_q.coeffs()[axis])<1e-12);
   CHECK(t.fold_geometry_cause_mask==2&&t.fold_booked_time_ns<t.fold_applied_time_ns);
-  // Authority folds still cancel pending/staged work even when their numerical
-  // transform is identical to a transported geometry fold.
+  // Every TAGGED fold is a transport (2026-09-07): force and ROI/floor folds move
+  // the gauge without touching authority, exactly like the geometry hold. Only an
+  // untagged correction still cancels pending/staged work.
   const auto previous_gate=t.gate_revision;
   f.exec.shiftCommonFrame(Eigen::Vector3d::Zero(),Eigen::Quaterniond::Identity(),PreviewFoldCause::Force);
-  CHECK(f.exec.telemetry().gate_revision==previous_gate+1);
+  CHECK(f.exec.telemetry().gate_revision==previous_gate);
   f.exec.shiftCommonFrame(Eigen::Vector3d::Zero(),Eigen::Quaterniond::Identity(),PreviewFoldCause::RoiFloor);
-  CHECK(f.exec.telemetry().gate_revision==previous_gate+2);
+  CHECK(f.exec.telemetry().gate_revision==previous_gate);
   f.exec.shiftCommonFrame(Eigen::Vector3d::Zero(),Eigen::Quaterniond::Identity());
-  CHECK(f.exec.telemetry().gate_revision==previous_gate+3);
+  CHECK(f.exec.telemetry().gate_revision==previous_gate+1);
+  return true;
+}
+
+bool firstPlanStarvationRecoversWithoutLatch() {
+  setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);
+  auto out=f.step();CHECK(!out.active&&!out.fault);
+  // Every response belongs to a source replaced before the servo can read it.
+  // This makes first-plan starvation causal and independent of worker speed.
+  for(int i=0;i<40&&!f.exec.recovering();++i) {
+    letWorkerRun();f.raw.submitDeltaFrame(frame(100+i,200+i,0.),f.raw.lastPose());
+    out=f.step();CHECK(!out.fault);
+  }
+  CHECK(f.exec.recovering()&&!f.exec.failed()&&out.active);
+  CHECK(f.exec.recoveryCause()==PreviewRecoveryCause::FirstPlanTimeout);
+  CHECK(f.exec.telemetry().accepted==0&&f.exec.telemetry().expired==1);
+  CHECK(!f.exec.telemetry().active&&f.exec.telemetry().backlog_sec==0.);
+  CHECK(!f.exec.recoveryStopped());CHECK(!f.exec.restartRecovery());
+  const auto origin=f.exec.telemetry().last_brake_origin_sec;
+  const auto plan=f.exec.telemetry().plan_id;
+  const auto gate=f.exec.telemetry().gate_revision;
+  CHECK(f.exec.requestRecovery(PreviewRecoveryCause::Peer));
+  CHECK(f.exec.telemetry().last_brake_origin_sec==origin&&f.exec.telemetry().plan_id==plan);
+  CHECK(f.exec.telemetry().gate_revision==gate);
+  CHECK(f.exec.recoveryCause()==PreviewRecoveryCause::FirstPlanTimeout);
+  CHECK(f.accept(out));CHECK(f.exec.recoveryStopped());
+  const auto terminal=f.exec.acceptedSample();const auto epoch=f.exec.telemetry().epoch;
+  CHECK(f.exec.restartRecovery());CHECK(!f.exec.recovering()&&!f.exec.failed());
+  CHECK(f.exec.telemetry().epoch>epoch&&!f.exec.initialized());
+  f.raw.deactivate();f.raw.submitDeltaFrame(frame(900,901,0.),terminal.pose);
+  f.accepted.x+=.017; // A different readback must not overwrite the accepted stop seed.
+  out=f.step();CHECK(!out.fault&&!out.active);CHECK(sameMotion(f.exec.sample(),terminal));
+  letWorkerRun();CHECK(f.engage());CHECK(f.exec.telemetry().active);
+  return true;
+}
+
+bool stationaryExpiredPlanRecoversWithoutBacklog() {
+  setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);CHECK(f.engage());
+  const auto admitted=f.exec.telemetry().accepted;
+  bool expired=false;
+  for(int i=0;i<90&&!f.exec.recovering();++i) {
+    letWorkerRun();f.raw.submitDeltaFrame(frame(1000+i,2000+i,0.),f.raw.lastPose());
+    const auto out=f.step();CHECK(!out.fault);CHECK(f.accept(out));
+    expired=expired||f.exec.telemetry().expired>0;
+    CHECK(f.exec.telemetry().backlog_sec==0.);
+  }
+  CHECK(expired&&f.exec.recovering()&&!f.exec.failed());
+  CHECK(f.exec.recoveryCause()==PreviewRecoveryCause::PlanExpired);
+  CHECK(f.exec.telemetry().accepted==admitted);
+  CHECK(f.exec.recoveryStopped()&&!f.exec.telemetry().active);
+  return true;
+}
+
+bool recoveryPreservesBrakeAndDispatchedTerminal() {
+  setExternalSteadyNs(kStartNs);Fixture f(.006,.006,true);CHECK(f.engage());
+  PreviewBrake expected(config().preview_execution.tracker,kDt);bool moving=false;
+  for(int i=0;i<80&&!moving;++i) {
+    letWorkerRun();const auto out=f.step();CHECK(!out.fault&&out.active);CHECK(f.accept(out));
+    moving=f.exec.acceptedSample().linear_velocity.norm()>.02&&
+        f.exec.acceptedSample().angular_velocity_body.norm()>.01&&
+        expected.start(f.exec.acceptedSample())==PreviewBrakeStatus::Ready&&expected.durationSec()>.006;
+  }
+  CHECK(moving);const auto accepted=f.exec.acceptedSample();const double origin=f.now()-kDt;
+  // The next optimizer sample is deliberately not dispatched. Recovery must
+  // seed the last accepted command, not this newer unaccepted proposal.
+  letWorkerRun();const auto proposal=f.step();CHECK(!proposal.fault&&proposal.active);
+  CHECK(sameMotion(f.exec.acceptedSample(),accepted));
+  CHECK(f.exec.requestRecovery(PreviewRecoveryCause::Backlog));
+  CHECK(f.exec.telemetry().last_brake_origin_sec==origin);
+  const auto plan=f.exec.telemetry().plan_id;const auto gate=f.exec.telemetry().gate_revision;
+  bool terminal=false;PreviewMotionSample accepted_terminal;
+  for(int i=0;i<100;++i) {
+    CHECK(f.exec.requestRecovery(PreviewRecoveryCause::Peer));
+    CHECK(f.exec.telemetry().plan_id==plan&&f.exec.telemetry().gate_revision==gate);
+    CHECK(f.exec.telemetry().last_brake_origin_sec==origin);
+    CHECK(f.exec.recoveryCause()==PreviewRecoveryCause::Backlog);
+    const auto out=f.step();CHECK(out.active&&!out.fault&&!f.exec.failed());
+    CHECK(!f.exec.telemetry().active);
+    PreviewMotionSample original;const double elapsed=f.now()-kDt-origin;
+    CHECK(expected.sample(elapsed,original));CHECK(sameMotion(f.exec.sample(),original));
+    if(elapsed>=expected.durationSec()) {
+      CHECK(!f.exec.recoveryStopped());CHECK(!f.exec.restartRecovery());
+      // Reaching the terminal time alone cannot authorize a new epoch.
+      CHECK(f.accept(out));CHECK(f.exec.recoveryStopped());
+      accepted_terminal=f.exec.acceptedSample();terminal=true;break;
+    }
+    CHECK(!f.exec.recoveryStopped());CHECK(!f.exec.restartRecovery());CHECK(f.accept(out));
+  }
+  CHECK(terminal);const auto epoch=f.exec.telemetry().epoch;
+  CHECK(f.exec.restartRecovery());CHECK(f.exec.telemetry().epoch>epoch);
+  f.raw.deactivate();f.raw.submitDeltaFrame(frame(3000,4000,0.),accepted_terminal.pose);
+  const auto fresh=f.step();CHECK(!fresh.fault&&!fresh.active);
+  CHECK(sameMotion(f.exec.sample(),accepted_terminal));
+  CHECK(f.exec.sample().linear_velocity.isZero(0.)&&f.exec.sample().linear_acceleration.isZero(0.));
+  CHECK(f.exec.sample().angular_velocity_body.isZero(0.)&&f.exec.sample().angular_acceleration_body.isZero(0.));
+  return true;
+}
+
+bool recoveryDoesNotDowngradeSafetyFailures() {
+  {
+    setExternalSteadyNs(kStartNs);Fixture f(.001,0.,true);CHECK(f.engage());
+    CHECK(f.exec.requestRecovery(PreviewRecoveryCause::Peer));
+    const auto tx=f.exec.transaction(f.exec.sample().pose,f.exec.sample().pose);CHECK(tx.valid);
+    CHECK(!f.exec.observeDispatch(tx,tx.composed,false,.002,.01));
+    CHECK(f.exec.failed()&&std::string(f.exec.telemetry().status)=="dispatch_rejected");
+    CHECK(!f.exec.restartRecovery());
+  }
+  {
+    setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);f.accepted.x=std::numeric_limits<double>::quiet_NaN();
+    const auto out=f.step();CHECK(out.fault&&f.exec.failed());
+    CHECK(std::string(f.exec.telemetry().status)=="invalid_input");
+  }
+  {
+    setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);CHECK(f.engage());
+    CHECK(f.exec.requestRecovery(PreviewRecoveryCause::Peer));
+    const auto out=f.exec.recoveryOutput(std::numeric_limits<double>::quiet_NaN());
+    CHECK(out.fault&&f.exec.failed());CHECK(!f.exec.restartRecovery());
+    CHECK(std::string(f.exec.telemetry().status)=="invalid_recovery_state");
+  }
+  return true;
+}
+
+bool stationaryRecoverySeedRefusalsAreTransactional() {
+  {
+    setExternalSteadyNs(kStartNs);Fixture f(0.,0.,false);
+    const auto before=f.exec.sample();const auto epoch=f.exec.telemetry().epoch;
+    CHECK(!f.exec.seedStationaryRecovery(f.now(),pose(.43),true,PreviewRecoveryCause::Peer));
+    CHECK(!f.exec.initialized()&&!f.exec.recovering()&&!f.exec.hasPlan()&&!f.exec.failed());
+    CHECK(f.exec.telemetry().epoch==epoch&&sameMotion(f.exec.sample(),before));
+  }
+  {
+    setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);
+    const auto before=f.exec.sample();const auto epoch=f.exec.telemetry().epoch;
+    const double upper_time=static_cast<double>(UINT64_MAX)/1e9;
+    auto invalid_pose=pose(.43);invalid_pose.rz=std::numeric_limits<double>::quiet_NaN();
+    CHECK(!f.exec.seedStationaryRecovery(f.now(),pose(.43),true,PreviewRecoveryCause::None));
+    CHECK(!f.exec.seedStationaryRecovery(f.now(),pose(.43),false,PreviewRecoveryCause::Peer));
+    CHECK(!f.exec.seedStationaryRecovery(f.now(),invalid_pose,true,PreviewRecoveryCause::Peer));
+    for(const double time:{0.,-1.,upper_time,std::numeric_limits<double>::max(),
+                          std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
+      CHECK(!f.exec.seedStationaryRecovery(time,pose(.43),true,PreviewRecoveryCause::Peer));
+      CHECK(!f.exec.initialized()&&!f.exec.recovering()&&!f.exec.hasPlan()&&!f.exec.failed());
+      CHECK(f.exec.telemetry().epoch==epoch&&sameMotion(f.exec.sample(),before));
+    }
+    // Refused cold seeds do not poison the subsequent valid stationary seed.
+    CHECK(f.exec.seedStationaryRecovery(f.now(),pose(.43),true,PreviewRecoveryCause::Peer));
+    CHECK(f.exec.initialized()&&f.exec.recovering()&&!f.exec.failed());
+    CHECK(math::positionDistance(f.exec.sample().pose,pose(.43))==0.);
+    const auto seeded=f.exec.sample();const auto plan=f.exec.telemetry().plan_id;
+    const auto gate=f.exec.telemetry().gate_revision;
+    CHECK(!f.exec.seedStationaryRecovery(f.now(),pose(.47),true,PreviewRecoveryCause::Backlog));
+    CHECK(sameMotion(f.exec.sample(),seeded)&&f.exec.telemetry().plan_id==plan);
+    CHECK(f.exec.telemetry().gate_revision==gate&&f.exec.recoveryCause()==PreviewRecoveryCause::Peer);
+  }
+  return true;
+}
+
+bool recoveryOutputRejectsNanosecondOverflowBoundary() {
+  setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);
+  const double upper_time=static_cast<double>(UINT64_MAX)/1e9;
+  const double last_valid=std::nextafter(upper_time,0.);
+  // Start immediately below the clock boundary so the ordinary tick-gap fence
+  // cannot accidentally cover a missing upper-time guard.
+  CHECK(upper_time-last_valid<config(true).preview_execution.max_result_age_sec);
+  CHECK(f.exec.seedStationaryRecovery(last_valid,pose(),true,PreviewRecoveryCause::Peer));
+  const auto valid=f.exec.recoveryOutput(last_valid);CHECK(valid.active&&!valid.fault);
+  const auto rejected=f.exec.recoveryOutput(upper_time);
+  CHECK(rejected.fault&&!rejected.active&&f.exec.failed());
+  CHECK(std::string(f.exec.telemetry().status)=="invalid_recovery_state");
+  CHECK(!f.exec.restartRecovery());
+  return true;
+}
+
+bool recoverySeedSurvivesWaitingForStationaryDispatch() {
+  setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);
+  auto anchor=pose(.43);anchor.rz=.03;
+  CHECK(f.exec.seedStationaryRecovery(f.now(),anchor,true,PreviewRecoveryCause::Peer));
+  const auto held=f.exec.recoveryOutput(f.now());CHECK(held.active&&!held.fault);
+  CHECK(f.accept(held)&&f.exec.recoveryStopped());
+  const auto old_transaction=f.exec.transaction(held.pose,held.pose);
+  const auto terminal=f.exec.acceptedSample();CHECK(f.exec.restartRecovery());
+  f.accepted=pose(.47); // FK/readback residual cannot replace accepted terminal p/v/a.
+  f.raw.deactivate();
+  for(int i=0;i<3;++i) {
+    const auto waiting=f.step();CHECK(!waiting.active&&!waiting.fault&&!f.exec.initialized());
+    CHECK(math::positionDistance(waiting.pose,terminal.pose)==0.);
+    CHECK(math::orientationDistanceRad(waiting.pose,terminal.pose)<1e-12);
+    CHECK(math::positionDistance(f.exec.recoveryAnchorPose(),terminal.pose)==0.);
+  }
+  f.raw.submitDeltaFrame(frame(7000,7001,0.),terminal.pose);
+  f.raw.pauseForHold(f.now());CHECK(f.raw.holdPaused());
+  const auto paused=f.step();CHECK(!paused.active&&!paused.fault&&!f.exec.initialized());
+  CHECK(math::positionDistance(paused.pose,terminal.pose)==0.);
+  f.raw.deactivate();f.raw.submitDeltaFrame(frame(7002,7003,0.),terminal.pose);
+  for(int i=0;i<3;++i) {
+    const auto waiting=f.step(false);CHECK(!waiting.active&&!waiting.fault&&!f.exec.initialized());
+    CHECK(math::positionDistance(waiting.pose,terminal.pose)==0.);
+    CHECK(math::positionDistance(f.exec.recoveryAnchorPose(),terminal.pose)==0.);
+    CHECK(math::orientationDistanceRad(f.exec.recoveryAnchorPose(),terminal.pose)<1e-12);
+  }
+  f.raw.setPlanRateGate(0.); // Shared Starting freezes the reference until both arms are ready.
+  const auto first=f.step();CHECK(!first.active&&!first.fault&&f.exec.initialized());
+  CHECK(sameMotion(f.exec.sample(),terminal));
+  CHECK(math::positionDistance(first.pose,terminal.pose)==0.);
+  CHECK(math::orientationDistanceRad(first.pose,terminal.pose)<1e-12);
+  bool proposed=false;
+  for(int i=0;i<20;++i) {
+    letWorkerRun();const auto output=f.step();CHECK(!output.fault&&!f.exec.telemetry().active);
+    CHECK(sameMotion(f.exec.sample(),terminal));
+    if(!output.active)continue;
+    // A previous epoch's accepted brake receipt cannot open the new barrier.
+    CHECK(f.exec.observeDispatch(old_transaction,old_transaction.composed,true,.002,.01));
+    CHECK(!f.exec.telemetry().active);
+    CHECK(f.accept(output)&&f.exec.telemetry().active);proposed=true;break;
+  }
+  CHECK(proposed);
+  return true;
+}
+
+bool explicitResetCancelsPendingRecoverySeed() {
+  setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);
+  CHECK(f.exec.seedStationaryRecovery(f.now(),pose(.43),true,PreviewRecoveryCause::Peer));
+  const auto held=f.exec.recoveryOutput(f.now());CHECK(held.active&&!held.fault);
+  CHECK(f.accept(held)&&f.exec.recoveryStopped()&&f.exec.restartRecovery());
+  f.exec.reset("profile_exit");f.accepted=pose(.47);
+  f.raw.deactivate();f.raw.submitDeltaFrame(frame(8000,8001,0.),f.accepted);
+  const auto fresh=f.step();CHECK(!fresh.active&&!fresh.fault&&f.exec.initialized());
+  CHECK(math::positionDistance(fresh.pose,f.accepted)==0.);
+  CHECK(math::positionDistance(f.exec.sample().pose,f.accepted)==0.);
+  return true;
+}
+
+bool pendingRecoverySeedSharesGeometricFold() {
+  setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);
+  auto anchor=pose(.43);anchor.rz=.03;
+  CHECK(f.exec.seedStationaryRecovery(f.now(),anchor,true,PreviewRecoveryCause::Peer));
+  const auto held=f.exec.recoveryOutput(f.now());CHECK(held.active&&!held.fault);
+  CHECK(f.accept(held)&&f.exec.recoveryStopped());
+  auto expected=f.exec.acceptedSample();CHECK(f.exec.restartRecovery());
+  f.raw.deactivate();f.raw.submitDeltaFrame(frame(9000,9001,0.),expected.pose);
+  const Eigen::Vector3d dp{.001,-.002,.0005};
+  const Eigen::Quaterniond dR(math::exp3(Eigen::Vector3d{.04,.02,-.03}));
+  auto transformed=math::se3FromPose(expected.pose);
+  transformed.translation()+=dp;transformed.rotation()=dR*transformed.rotation();
+  expected.pose=math::poseFromSe3(transformed);
+  // Native geometry may book its common frame after the new raw anchor exists
+  // but before the first preview step initializes the new execution epoch.
+  CHECK(f.raw.absorbOffset(dp,dR));
+  ++f.tick;setExternalSteadyNs(kStartNs+kDtNs);
+  const auto folds=f.exec.telemetry().fold_geometry_hold_count;
+  f.exec.shiftCommonFrame(dp,dR,PreviewFoldCause::GeometryHold,kStartNs,kStartNs+kDtNs,2);
+  CHECK(!f.exec.initialized()&&!f.exec.failed());
+  CHECK(math::positionDistance(f.exec.recoveryAnchorPose(),expected.pose)<1e-12);
+  CHECK(math::orientationDistanceRad(f.exec.recoveryAnchorPose(),expected.pose)<1e-12);
+  CHECK(f.exec.telemetry().fold_geometry_hold_count==folds+1);
+  CHECK(f.exec.telemetry().gauge_revision==1&&f.exec.telemetry().fold_geometry_cause_mask==2);
+  CHECK(f.exec.telemetry().fold_booked_time_ns==kStartNs&&
+        f.exec.telemetry().fold_applied_time_ns==kStartNs+kDtNs);
+  f.raw.setPlanRateGate(0.);
+  const auto first=f.step();CHECK(!first.active&&!first.fault&&f.exec.initialized());
+  CHECK(sameMotion(f.exec.sample(),expected));
+  CHECK(math::positionDistance(first.pose,expected.pose)<1e-12);
+  letWorkerRun();CHECK(f.engage());
+  CHECK(sameMotion(f.exec.acceptedSample(),expected));
+  CHECK(f.exec.telemetry().gauge_revision==1&&f.exec.telemetry().active);
+  return true;
+}
+
+bool recordedAngularExpiryStateHasFiniteBrake() {
+  // 214623 LEFT phase-0 replay: last accepted tick 1605519767005249
+  // (t=22.792005348252133), immediately before braking_expired. Fixture:
+  // outputs/preview_recovery_redesign_20260907/214623_first_expiry_previous_accepted.json.
+  // No contact or common-frame fold was active in this captured interval.
+  PreviewMotionState initial;
+  const Eigen::Quaterniond rotation(.0551202148002129,.8100621927610276,
+                                    .5505109656161757,-.194161485665721);
+  initial.pose=math::poseFromSe3(pinocchio::SE3(rotation.normalized().toRotationMatrix(),
+      Eigen::Vector3d{.4249954211115257,.081616673815217,-.1998582424954639}));
+  initial.linear_velocity={.0022494897871945,-.0010306031914868,.0074318886980092};
+  initial.linear_acceleration={.6219668921986238,-.0728622416362507,.4135063107990034};
+  initial.angular_velocity_body={.1144594572847579,.0447025387041554,.3439951551857169};
+  initial.angular_acceleration_body={-2.769263637670227,-.2849283236274891,-8.141883016311898};
+  const auto limits=config(true).preview_execution.tracker;
+  PreviewBrake brake(limits,kDt);CHECK(brake.start(initial)==PreviewBrakeStatus::Ready);
+  PreviewMotionSample first,terminal,held;
+  CHECK(brake.sample(0.,first)&&sameMotion(first,initial));
+  CHECK(brake.durationSec()>0.&&brake.durationSec()<config(true).preview_execution.max_result_age_sec);
+  CHECK(brake.sample(brake.durationSec(),terminal));
+  CHECK(terminal.linear_velocity.isZero(0.)&&terminal.linear_acceleration.isZero(0.));
+  CHECK(terminal.angular_velocity_body.isZero(0.)&&terminal.angular_acceleration_body.isZero(0.));
+  const double precision=limits.feasibility_tolerance;
+  for(int k=0;k<=4000;++k) {
+    PreviewMotionSample sample;CHECK(brake.sample(brake.durationSec()*k/4000.,sample));
+    CHECK(sample.linear_velocity.cwiseAbs().maxCoeff()<=limits.max_linear_velocity_m_s+precision);
+    CHECK(sample.linear_acceleration.cwiseAbs().maxCoeff()<=limits.max_linear_acceleration_m_s2+precision);
+    CHECK(sample.linear_jerk.cwiseAbs().maxCoeff()<=limits.max_linear_jerk_m_s3+precision);
+    CHECK(sample.angular_velocity_body.norm()<=limits.max_angular_velocity_rad_s+precision);
+    CHECK(sample.angular_acceleration_body.norm()<=limits.max_angular_acceleration_rad_s2+precision);
+    CHECK(sample.angular_jerk_stand.norm()<=limits.max_angular_jerk_rad_s3+precision);
+  }
+  CHECK(brake.sample(brake.durationSec()+1.,held)&&sameMotion(held,terminal));
+  std::cout<<"recorded angular expiry brake: duration ms="<<brake.durationSec()*1e3
+           <<" displacement um="<<math::positionDistance(initial.pose,terminal.pose)*1e6
+           <<" rotation rad="<<math::orientationDistanceRad(initial.pose,terminal.pose)<<'\n';
   return true;
 }
 
@@ -492,8 +826,13 @@ int main() {
       frameShiftAndCanonicalIndependence()&&expiryAndDispatchRefusal()&&invalidInputAndContactStop()&&
       oldAcceptedTransactionAcrossFoldSeedsBrake()&&currentVelocityAuthority()&&coldRetreatAuthority()&&
       rejectedStagedPlanRetainsBrakeClock()&&contactRetainsAngularUntilOriginalExpiry()&&
-      geometryFoldsTransportPendingStagedAndQueuedDispatch()&&authorityFoldAndResetCancellationAreAccounted()&&
-      geometryFoldCannotTransportReplacedSource();
+      geometryFoldsTransportPendingStagedAndQueuedDispatch()&&authorityFoldAndResetCancellationAreAccounted()&&forceFoldIsTransportedLikeGeometry()&&
+      geometryFoldCannotTransportReplacedSource()&&firstPlanStarvationRecoversWithoutLatch()&&
+      stationaryExpiredPlanRecoversWithoutBacklog()&&recoveryPreservesBrakeAndDispatchedTerminal()&&
+      recoveryDoesNotDowngradeSafetyFailures()&&stationaryRecoverySeedRefusalsAreTransactional()&&
+      recoveryOutputRejectsNanosecondOverflowBoundary()&&recoverySeedSurvivesWaitingForStationaryDispatch()&&
+      explicitResetCancelsPendingRecoverySeed()&&pendingRecoverySeedSharesGeometricFold()&&
+      recordedAngularExpiryStateHasFiniteBrake();
   setExternalSteadyNs(0);
   if(!ok)return 1;
   std::cout<<"live preview execution: all checks passed (no hardware)\n";return 0;

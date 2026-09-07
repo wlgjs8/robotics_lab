@@ -1,6 +1,6 @@
 #pragma once
 
-// Offline progress-owner experiment. Canonical model poses remain immutable;
+// Bounded preview progress owner. Canonical model poses remain immutable;
 // this cursor changes only which reference time the output optimizer follows.
 // It does not authorize historical motion through a newly closed force gate.
 #include "rb_servo/control/follower_preview_reference.hpp"
@@ -34,6 +34,15 @@ struct PreviewExecutionCursorConfig {
   double max_rate{0};
   double translation_velocity_floor{0};
   double angular_velocity_floor{0};
+  // Zero explicitly retains the historical single-sample phase estimator.
+  // A nonzero window is supplied by the caller from currently valid forecasts.
+  double phase_lookahead_sec{0};
+};
+struct PreviewExecutionPhaseWindow {
+  static constexpr std::size_t kCapacity=5;
+  std::array<double,kCapacity> relative_time_sec{};
+  std::array<FollowerOutputKinematics,kCapacity> reference{}, output{};
+  std::size_t count{0};
 };
 enum class PreviewExecutionCursorStatus { Ready, Inactive, InvalidInput, BacklogExceeded };
 struct PreviewExecutionCursorStep {
@@ -42,6 +51,8 @@ struct PreviewExecutionCursorStep {
   double time_sec{0}, rate{1}, backlog_sec{0}, gate{1};
   double positive_lag_m{0}, positive_lag_rad{0};
   double cross_track_m{0}, cross_track_rad{0};
+  bool phase_window_used{false};
+  double phase_window_sec{0};
 };
 
 class PreviewExecutionCursor {
@@ -53,6 +64,9 @@ class PreviewExecutionCursor {
       leash.start_rad,leash.full_m,leash.full_rad,leash.min_gate};
     for(double v:positive) if(!std::isfinite(v)||v<=0)
       throw std::invalid_argument("explicit positive execution cursor parameters required");
+    if(!std::isfinite(c.phase_lookahead_sec)||c.phase_lookahead_sec<0 ||
+       c.phase_lookahead_sec>c.max_backlog_sec)
+      throw std::invalid_argument("invalid execution cursor lookahead");
     if(c.max_rate<1 || leash.full_m<=leash.start_m || leash.full_rad<=leash.start_rad || leash.min_gate>1)
       throw std::invalid_argument("invalid execution cursor range");
   }
@@ -65,6 +79,19 @@ class PreviewExecutionCursor {
   double timeSec() const { return time_; }
   PreviewExecutionCursorStep step(double now, const FollowerOutputKinematics& ref,
                                   const Pose6D& previous_output) {
+    return stepImpl(now,ref,previous_output,nullptr);
+  }
+  PreviewExecutionCursorStep step(double now,const PreviewExecutionPhaseWindow& window) {
+    if(window.count<2||window.count>window.kCapacity) {
+      PreviewExecutionCursorStep invalid;invalid.time_sec=time_;
+      invalid.status=PreviewExecutionCursorStatus::InvalidInput;return invalid;
+    }
+    return stepImpl(now,window.reference[0],window.output[0].pose,&window);
+  }
+ private:
+  PreviewExecutionCursorStep stepImpl(double now,const FollowerOutputKinematics& ref,
+                                     const Pose6D& previous_output,
+                                     const PreviewExecutionPhaseWindow* window) {
     PreviewExecutionCursorStep out;
     if(!active_) return out;
     out.time_sec=time_;
@@ -88,6 +115,48 @@ class PreviewExecutionCursor {
     out.positive_lag_rad=std::max(0.,along_r);
     out.cross_track_m=speed>=cfg_.translation_velocity_floor?(ep-along*v/speed).norm():ep.norm();
     out.cross_track_rad=angular_speed>=cfg_.angular_velocity_floor?(er-along_r*w/angular_speed).norm():er.norm();
+    if(window) {
+      if(cfg_.phase_lookahead_sec<=0 || window->relative_time_sec[0]!=0.)return out;
+      // A bounded path integral avoids assigning the whole separation to a
+      // noisy/brief instantaneous reversal. It is a progress estimate only:
+      // neither poses nor physical limits are modified, and signed lead is
+      // retained until after integration. Positive-only integration would
+      // recreate the reversal trap. No output low-pass or Taylor extrapolation.
+      double projected_m=0.,projected_rad=0.,path_m=0.,path_rad=0.;
+      double prior_projection_m=0.,prior_projection_rad=0.,prior_speed=0.,prior_omega=0.;
+      for(std::size_t k=0;k<window->count;++k) {
+        const double t=window->relative_time_sec[k];
+        const auto& r=window->reference[k];const auto& y=window->output[k];
+        if(!std::isfinite(t)||t<0||t>cfg_.phase_lookahead_sec||
+           (k&&t<=window->relative_time_sec[k-1])||!finitePreviewState(r)||!finitePreviewState(y))return out;
+        const Eigen::Vector3d delta(r.pose.x-y.pose.x,r.pose.y-y.pose.y,r.pose.z-y.pose.z);
+        const Eigen::Vector3d velocity(r.velocity.x,r.velocity.y,r.velocity.z);
+        const Eigen::Vector3d omega(r.velocity.rx,r.velocity.ry,r.velocity.rz);
+        const Eigen::Vector3d rotation_delta=-math::log3(math::rotationFromPose(r.pose).transpose()*
+                                                        math::rotationFromPose(y.pose));
+        const double projection_m=delta.dot(velocity),projection_rad=rotation_delta.dot(omega);
+        const double speed=velocity.norm(),angular_speed=omega.norm();
+        if(!std::isfinite(projection_m)||!std::isfinite(projection_rad)||
+           !std::isfinite(speed)||!std::isfinite(angular_speed))return out;
+        if(k) {
+          const double half_dt=.5*(t-window->relative_time_sec[k-1]);
+          projected_m+=half_dt*(prior_projection_m+projection_m);
+          projected_rad+=half_dt*(prior_projection_rad+projection_rad);
+          path_m+=half_dt*(prior_speed+speed);path_rad+=half_dt*(prior_omega+angular_speed);
+        }
+        prior_projection_m=projection_m;prior_projection_rad=projection_rad;
+        prior_speed=speed;prior_omega=angular_speed;
+      }
+      const double duration=window->relative_time_sec[window->count-1];
+      if(!std::isfinite(projected_m)||!std::isfinite(projected_rad)||
+         !std::isfinite(path_m)||!std::isfinite(path_rad)||duration<=0)return out;
+      out.positive_lag_m=path_m>0.&&path_m>=cfg_.translation_velocity_floor*duration?
+          std::max(0.,projected_m/path_m):0.;
+      out.positive_lag_rad=path_rad>0.&&path_rad>=cfg_.angular_velocity_floor*duration?
+          std::max(0.,projected_rad/path_rad):0.;
+      out.phase_window_used=true;out.phase_window_sec=duration;
+    }
+    if(!std::isfinite(out.positive_lag_m)||!std::isfinite(out.positive_lag_rad))return out;
     out.gate=planLeashGate(out.positive_lag_m,out.positive_lag_rad,leash_);
     // Recover delayed reference time rather than integrating a permanent delay.
     // The downstream QP still owns all physical velocity/acceleration/jerk caps.

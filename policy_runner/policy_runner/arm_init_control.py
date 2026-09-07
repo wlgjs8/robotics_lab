@@ -86,6 +86,7 @@ class _ArmRuntime:
     ft_required: bool = False
     tare_timed_out: bool = False
     tare_wait_elapsed: float = 0.0
+    external: bool = False
 
 
 def _ft_tare_pending(payload: Any, arm: str, *, required: bool = False) -> tuple[bool, str]:
@@ -116,6 +117,8 @@ def _ft_tare_pending(payload: Any, arm: str, *, required: bool = False) -> tuple
         return True, "tare samples accumulating"
     if ft.get("bias_valid") is False or (required and ft.get("bias_valid") is not True):
         return True, "bias invalid or unavailable"
+    if required and str(ft.get("tare_state", "")).lower() != "accepted":
+        return True, "tare not accepted"
     return False, f"auto_tare_stage={stage or 'idle'} bias_valid={ft.get('bias_valid')}"
 
 
@@ -223,6 +226,18 @@ class ArmInitOverrideController:
     def right_q_deg(self) -> tuple[float, ...] | None:
         return self._right.q_deg
 
+    @property
+    def external_init_active(self) -> bool:
+        # An externally committed init survives synthetic deadman Hold. Sending
+        # even a peer-only policy packet would explicitly cancel that move.
+        return any(r.on and r.external for r in (self._left, self._right))
+
+    @property
+    def policy_suspended_arms(self) -> tuple[str, ...]:
+        if self.external_init_active:
+            return ("left", "right")
+        return tuple(arm for arm in ("left", "right") if self._runtime(arm).on)
+
     def handle_command(self, command: ArmInitCommand) -> bool:
         self.changed = False
         self.error = ""
@@ -306,6 +321,24 @@ class ArmInitOverrideController:
             # Do not consume a previous request's Done before this request lands.
             # Legacy/mock snapshots without an acknowledgement remain compatible.
             ack = arm_block.get("request_id")
+            if status in {"planning", "executing"} and (
+                not runtime.on or (runtime.external and ack is not None and ack != runtime.request_id)
+            ):
+                # Observe ownership; never invent a target or retransmit this
+                # request. Remain passive through its tare, then re-anchor once.
+                runtime.on = True
+                runtime.external = True
+                runtime.request_id = ack if type(ack) is int and ack >= 0 else 0
+                runtime.motion_done = False
+                runtime.fail = False
+                runtime.fail_mode = ""
+                runtime.tare_wait_started = None
+                runtime.tare_timed_out = False
+                runtime.tare_wait_elapsed = 0.0
+                runtime.state = f"init {status}"
+                self._pending["started"].add(arm)
+                self._event(arm, "external_start", status=status)
+                changed = True
             if runtime.on and not runtime.motion_done and ack is not None and ack != runtime.request_id:
                 continue
             fail_mode = str(arm_block.get("fail_mode", "") or "")
@@ -410,6 +443,8 @@ class ArmInitOverrideController:
         return changed
 
     def compose_intent(self, intent: CommandIntent | None) -> CommandIntent | None:
+        if self.external_init_active:
+            return None
         if _ARM_INIT_DEBUG:
             any_on = self.left_on or self.right_on
             if any_on != self._dbg_prev_any_on:
@@ -490,6 +525,7 @@ class ArmInitOverrideController:
             "right_tare_timed_out": self._right.tare_timed_out,
             "init_override_left": bool(self.left_on),
             "init_override_right": bool(self.right_on),
+            "external_init_active": self.external_init_active,
             "left_state": self._state_for("left"),
             "right_state": self._state_for("right"),
             "left_server_status": self._left.server_status,
@@ -531,9 +567,9 @@ class ArmInitOverrideController:
             return None
         if mask.shape[0] < 2:
             return None
-        if self.left_on:
+        if "left" in self.policy_suspended_arms:
             mask[0] = 0.0
-        if self.right_on:
+        if "right" in self.policy_suspended_arms:
             mask[1] = 0.0
         return mask
 
@@ -567,6 +603,7 @@ class ArmInitOverrideController:
             self._pending["started"].add(arm)
             changed = True
             runtime.request_id = max(time.monotonic_ns(), runtime.request_id + 1)
+            runtime.external = False
             runtime.motion_done = False
             # Keep the known F/T prerequisite across requests. A missing block
             # on the new request must not turn a previously enabled sensor into
@@ -697,6 +734,9 @@ def apply_source_arm_mask(source: object, base_mask: Any, controller: ArmInitOve
         setattr(source, "arm_mask", mask)
     except Exception:
         return
+    set_override = getattr(source, "set_arm_init_suspension", None)
+    if callable(set_override):
+        set_override(controller.policy_suspended_arms, passive=controller.external_init_active)
 
 
 def apply_source_override_transitions(

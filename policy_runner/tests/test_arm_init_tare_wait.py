@@ -32,7 +32,8 @@ def _snapshot(status: str, *, t: float, ft: dict | None, arm: str = "right") -> 
 
 SETTLING = {"enabled": True, "connected": True, "auto_tare_stage": "settling", "bias_valid": False}
 ARMED = {"enabled": True, "connected": True, "auto_tare_stage": "awaiting_init", "bias_valid": False}
-ACCEPTED = {"enabled": True, "connected": True, "auto_tare_stage": "idle", "bias_valid": True}
+ACCEPTED = {"enabled": True, "connected": True, "auto_tare_stage": "idle", "bias_valid": True,
+            "tare_state": "accepted"}
 DISABLED = {"enabled": False, "connected": False, "auto_tare_stage": "off", "bias_valid": False}
 
 
@@ -163,12 +164,26 @@ class ArmInitTareWaitTest(unittest.TestCase):
         self.assertFalse(controller.right_on)
         self.assertEqual(controller.consume_transitions().done, ("right",))
 
-    def test_external_init_without_latch_does_not_wait(self):
+    def test_external_init_passively_waits_until_tare_is_accepted(self):
         controller = ArmInitOverrideController(ft_tare_wait_sec=2.0)
         controller.update_from_snapshot(_snapshot("executing", t=1.0, ft=ARMED))
+        self.assertEqual(controller.consume_transitions().started, ("right",))
+        self.assertTrue(controller.external_init_active)
+        self.assertIsNone(controller.compose_intent(None))
         controller.update_from_snapshot(_snapshot("done", t=2.0, ft=SETTLING))
+        self.assertTrue(controller.right_on)
+        self.assertEqual(controller.consume_transitions().done, ())
+        controller.update_from_snapshot(_snapshot("idle", t=3.0, ft=ACCEPTED))
         self.assertFalse(controller.right_on)
         self.assertEqual(controller.consume_transitions().done, ("right",))
+
+    def test_valid_bias_without_accepted_tare_does_not_resume(self):
+        for state in (None, "none", "rejected"):
+            controller = ArmInitOverrideController()
+            _start(controller)
+            controller.update_from_snapshot(_snapshot("done", t=1., ft={**ACCEPTED, "tare_state": state}))
+            self.assertTrue(controller.right_on)
+            self.assertEqual(controller.consume_transitions().done, ())
 
     def test_failure_during_tare_wait_cannot_be_released_by_late_bias(self):
         controller = ArmInitOverrideController()

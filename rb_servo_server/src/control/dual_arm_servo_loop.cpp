@@ -2091,6 +2091,8 @@ DualArmServoLoop::DualArmServoLoop(
                 1.0 / config_.servo.rate_hz);
         }
         preview_profile_executors_.push_back(std::move(entry));
+        preview_recovery_.enabled = preview_recovery_.enabled ||
+            profile.ruckig_follower.preview_execution.recovery.enable;
     }
 #endif
 
@@ -3189,10 +3191,12 @@ void DualArmServoLoop::loopMain() {
             command = metadata_hold(command);
         } else if (commandRequestsResetFault(command)) {
             clearLatchedCartesianTargets();
+            if(!fault_latched_.load() && !readOnlyMode()) resetPreviewRecoveryLifecycle();
             if (readOnlyMode()) {
                 command = metadata_hold(command);
             } else if (fault_latched_.load()) {
                 if (clearFaultLatch(left_state, right_state)) {
+                    resetPreviewRecoveryLifecycle();
                     const BackendTiming reset_read_timing = makeBackendTiming(loop_start, nowSteadyNs());
                     left_state_result = okReadState(left_state, reset_read_timing);
                     right_state_result = okReadState(right_state, reset_read_timing);
@@ -3998,6 +4002,8 @@ void DualArmServoLoop::loopMain() {
         }
         sample.left_cartesian_solve = left_last_cartesian_solve_;
         sample.right_cartesian_solve = right_last_cartesian_solve_;
+        preview_recovery_.sample_time_ns = nowSteadyNs();
+        sample.preview_recovery = preview_recovery_;
 #ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
         for (int i=0;i<2;++i) {
             if (preview_executor_[i]) {
@@ -4126,6 +4132,7 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_force_control = right_force_control_telemetry_;
             latest_snapshot_.right_state = right_state;
             latest_snapshot_.motion_epoch = motion_epoch_;
+            latest_snapshot_.preview_recovery = preview_recovery_;
             latest_snapshot_.command = command;
             latest_snapshot_.left_sent_q_deg = sent_target.left_q_target_deg;
             latest_snapshot_.right_sent_q_deg = sent_target.right_q_target_deg;
@@ -5071,6 +5078,213 @@ void DualArmServoLoop::shiftPreviewExecution(ArmId arm, const Eigen::Vector3d& d
 #endif
 }
 
+bool DualArmServoLoop::previewRecoveryFreezesRaw() const {
+    return preview_recovery_regime_ && preview_recovery_request_==PreviewRecoveryCause::None &&
+        preview_recovery_.state!=PreviewRecoveryState::Tracking &&
+        preview_recovery_.state!=PreviewRecoveryState::Starting;
+}
+
+void DualArmServoLoop::resetPreviewRecoveryLifecycle() {
+    // Called only by an explicit motion lifecycle reset, never by an ordinary
+    // repeated Hold packet. The epoch prevents old asynchronous policy output
+    // from becoming a new episode's first frame.
+    ++preview_recovery_.epoch;
+    preview_recovery_.state=PreviewRecoveryState::Tracking;
+    preview_recovery_.cause=PreviewRecoveryCause::None;
+    preview_recovery_.attempts=0;preview_recovery_.min_observation_time_ns=0;
+    preview_recovery_owner_bound_=false;preview_recovery_regime_=false;
+    preview_recovery_exhausted_=false;
+    preview_recovery_request_=PreviewRecoveryCause::None;
+}
+
+void DualArmServoLoop::updatePreviewRecoveryInput(const DualArmCommand& command,
+                                                 const TcpPoseTargetProfileConfig& profile) {
+    const auto& cfg=profile.ruckig_follower.preview_execution.recovery;
+    const unsigned mask=(command.left.mode==ControlMode::TcpPoseTarget && command.left.has_tcp_target?1u:0u) |
+        (command.right.mode==ControlMode::TcpPoseTarget && command.right.has_tcp_target?2u:0u);
+    preview_recovery_regime_=cfg.enable && mask!=0;
+    if(preview_recovery_.state!=PreviewRecoveryState::Tracking &&
+       preview_recovery_arm_mask_!=0 && mask!=preview_recovery_arm_mask_)
+        preview_recovery_regime_=false; // A deliberate per-arm mode change owns that arm.
+    if(!preview_recovery_regime_) {
+        if(preview_recovery_.state!=PreviewRecoveryState::Tracking)
+            preview_recovery_.state=PreviewRecoveryState::Paused;
+        return; // Existing Hold/Init/freedrive/source safety semantics own motion.
+    }
+    const bool new_session=preview_recovery_owner_bound_ &&
+        (command.source.source_id!=preview_recovery_owner_.source_id ||
+         command.source.session_id!=preview_recovery_owner_.session_id);
+    if(!preview_recovery_owner_bound_ || new_session) {
+        preview_recovery_owner_=command.source;preview_recovery_owner_bound_=true;
+    } else {
+        // Routine lease renewal is authority refresh, not a new retry budget.
+        preview_recovery_owner_.lease_token=command.source.lease_token;
+    }
+    if(new_session) {
+        // An explicit new arbitrated policy session may retry a policy pause.
+        // Its cached frame still cannot cross the newly issued observation fence.
+        preview_recovery_.attempts=0;
+        preview_recovery_request_=PreviewRecoveryCause::Peer;
+    }
+    if(preview_recovery_.state==PreviewRecoveryState::Tracking || new_session)
+        preview_recovery_arm_mask_=mask;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    const auto all_stopped=[&] {
+        for(int i=0;i<2;++i) if(preview_recovery_arm_mask_&(1u<<i))
+            if(!preview_executor_[i] || !preview_executor_[i]->recoveryStopped())return false;
+        return true;
+    };
+    // THE RETRY BUDGET IS A RATE, NOT A LIFETIME TOTAL (2026-09-07). max_attempts
+    // bounds a brake->retry loop, but it used to count every recovery of the
+    // session: servo_log_20260907_024935.csv spent three unrelated plan expiries
+    // over 8 minutes and the next one left both arms Paused until the operator
+    // re-engaged. After attempts_reset_sec without a NEW recovery the budget is
+    // whole again, and a Paused regime that has sat that long re-arms WaitingFresh
+    // so the next fresh frame of the same session restarts it (a stale cached
+    // frame cannot: the observation fence is renewed here). 0 = lifetime total.
+    if(cfg.attempts_reset_sec>0 && preview_recovery_.started_time_ns>0 &&
+       last_loop_start_ns_-preview_recovery_.started_time_ns>cfg.attempts_reset_sec*1e9) {
+        if(preview_recovery_.attempts>0) {preview_recovery_.attempts=0;preview_recovery_exhausted_=false;}
+        if(preview_recovery_.state==PreviewRecoveryState::Paused &&
+           last_loop_start_ns_-preview_recovery_.state_started_time_ns>cfg.attempts_reset_sec*1e9 &&
+           all_stopped()) {
+            preview_recovery_.state=PreviewRecoveryState::WaitingFresh;
+            preview_recovery_.state_started_time_ns=last_loop_start_ns_;
+            preview_recovery_.min_observation_time_ns=nowSteadyNs();
+        }
+    }
+    if(preview_recovery_.state==PreviewRecoveryState::Braking && all_stopped()) {
+        preview_recovery_.state=preview_recovery_exhausted_
+            ?PreviewRecoveryState::Paused:PreviewRecoveryState::WaitingFresh;
+        preview_recovery_.state_started_time_ns=last_loop_start_ns_;
+        // Especially with send-at-tick-start, the accepted terminal dispatch
+        // can complete after loop_start. Fence images after that observation,
+        // not after the earlier scheduled tick boundary.
+        preview_recovery_.min_observation_time_ns=nowSteadyNs();
+    }
+    if(preview_recovery_.state==PreviewRecoveryState::WaitingFresh) {
+        if(last_loop_start_ns_-preview_recovery_.state_started_time_ns>
+           cfg.fresh_plan_timeout_sec*1e9) {
+            preview_recovery_.state=PreviewRecoveryState::Paused;
+            preview_recovery_.state_started_time_ns=last_loop_start_ns_;
+            preview_recovery_.cause=PreviewRecoveryCause::RetryTimeout;
+        } else if(chunk_frame_cache_recv_seq_ && chunk_frame_cache_recv_seq_!=preview_recovery_checked_frame_) {
+            preview_recovery_checked_frame_=chunk_frame_cache_recv_seq_;
+            const auto& f=chunk_frame_cache_;
+            // Ingest runs inside the tick. A valid one-shot candidate can arrive
+            // after loop_start; freshness must use the clock after that ingest,
+            // otherwise it is permanently consumed as a "future" packet.
+            const auto validation_time_ns=nowSteadyNs();
+            const bool paired=(!(preview_recovery_arm_mask_&1u)||(f.has_left && f.has_left_delta)) &&
+                (!(preview_recovery_arm_mask_&2u)||(f.has_right && f.has_right_delta));
+            const bool fresh=f.recovery_metadata_present && f.preview_recovery_epoch==preview_recovery_.epoch &&
+                f.observation_time_ns>preview_recovery_.min_observation_time_ns &&
+                f.observation_time_ns<=validation_time_ns &&
+                f.receiver_seq>preview_recovery_.abandoned_source_recv_seq &&
+                validation_time_ns*1e-9-f.recv_steady_sec>=0 &&
+                validation_time_ns*1e-9-f.recv_steady_sec<profile.ruckig_follower.chunk_feed_timeout_sec;
+            if(paired && fresh && f.schema_generation==3 && f.chunk_metadata_present && f.proprio_valid && all_stopped()) {
+                bool restarted=true;
+                for(int i=0;i<2;++i) if(preview_recovery_arm_mask_&(1u<<i)) {
+                    restarted=preview_executor_[i]->restartRecovery() && restarted;
+                    auto ctx=armContext(i==0?ArmId::Left:ArmId::Right);
+                    ctx.chunk_follower.deactivate();ctx.follower_output_smd.deactivate();ctx.pose_track_smd.deactivate();
+                    (i==0?left_chunk_submitted_recv_seq_:right_chunk_submitted_recv_seq_)=0;
+                    resetChunkFollowerEngageWait(ctx.arm);
+                }
+                if(restarted) {
+                    preview_recovery_.state=PreviewRecoveryState::Starting;
+                    preview_recovery_.state_started_time_ns=last_loop_start_ns_;
+                    preview_recovery_.candidate_source_wire_seq=f.seq;
+                    preview_recovery_.candidate_source_recv_seq=f.receiver_seq;
+                } else {
+                    recordChunkFollowerFaultRequest(ArmId::Left,"preview recovery terminal dispatch provenance lost");
+                }
+            } else ++preview_recovery_.rejected_frames;
+        }
+    } else if(preview_recovery_.state==PreviewRecoveryState::Starting &&
+              last_loop_start_ns_-preview_recovery_.state_started_time_ns>cfg.fresh_plan_timeout_sec*1e9) {
+        preview_recovery_request_=PreviewRecoveryCause::RetryTimeout;
+    }
+#endif
+}
+
+void DualArmServoLoop::coordinatePreviewRecovery(ArmCommand (&commands)[2],
+                                                const TcpPoseTargetProfileConfig& profile) {
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    if(!preview_recovery_regime_)return;
+    auto cause=preview_recovery_request_;
+    for(int i=0;i<2;++i) if((preview_recovery_arm_mask_&(1u<<i)) && preview_executor_[i] &&
+                            preview_executor_[i]->recovering() && cause==PreviewRecoveryCause::None)
+        cause=preview_executor_[i]->recoveryCause();
+    const bool new_recovery=cause!=PreviewRecoveryCause::None &&
+        (preview_recovery_.state==PreviewRecoveryState::Tracking ||
+         preview_recovery_.state==PreviewRecoveryState::Starting ||
+         preview_recovery_request_!=PreviewRecoveryCause::None);
+    if(new_recovery) {
+        preview_recovery_.state=PreviewRecoveryState::Braking;preview_recovery_.cause=cause;
+        ++preview_recovery_.epoch;
+        preview_recovery_exhausted_=preview_recovery_.attempts>=
+            static_cast<uint64_t>(profile.ruckig_follower.preview_execution.recovery.max_attempts);
+        if(!preview_recovery_exhausted_)++preview_recovery_.attempts;
+        preview_recovery_.started_time_ns=preview_recovery_.state_started_time_ns=last_loop_start_ns_;
+        preview_recovery_.min_observation_time_ns=0;
+        preview_recovery_.abandoned_source_wire_seq=chunk_frame_cache_.seq;
+        preview_recovery_.abandoned_source_recv_seq=chunk_frame_cache_recv_seq_;
+        preview_recovery_.abandoned_backlog_sec=0;
+        for(int i=0;i<2;++i) if(preview_recovery_arm_mask_&(1u<<i)) {
+            const auto arm=i==0?ArmId::Left:ArmId::Right;
+            auto ctx=armContext(arm);auto* e=preview_executor_[i];
+            if(!e) {recordChunkFollowerFaultRequest(arm,"preview recovery executor unavailable");continue;}
+            const auto raw=ctx.chunk_follower.outputKinematics().pose;
+            const auto accepted=e->acceptedPose();
+            preview_recovery_.abandoned_position_error_m[i]=math::positionDistance(raw,accepted);
+            preview_recovery_.abandoned_rotation_error_rad[i]=math::log3(
+                math::rotationFromPose(raw).transpose()*math::rotationFromPose(accepted)).norm();
+            preview_recovery_.abandoned_backlog_sec=std::max(preview_recovery_.abandoned_backlog_sec,e->telemetry().backlog_sec);
+            const auto& previous_previous=i==0?left_prevprev_sent_q_deg_:right_prevprev_sent_q_deg_;
+            const bool ready=e->initialized()?e->requestRecovery(cause):
+                e->seedStationaryRecovery(last_loop_start_ns_*1e-9,
+                    nominalOfEmitted(arm,kinematics_->computeTcpStand(arm,ctx.prev_sent_q_deg,ctx.mount)),
+                    ctx.prev_sent_q_deg==previous_previous,cause);
+            if(!ready)recordChunkFollowerFaultRequest(arm,"preview recovery cannot certify a stop");
+        }
+        preview_recovery_request_=PreviewRecoveryCause::None;
+    }
+    if(preview_recovery_.state==PreviewRecoveryState::Braking ||
+       preview_recovery_.state==PreviewRecoveryState::WaitingFresh ||
+       preview_recovery_.state==PreviewRecoveryState::Paused) {
+        for(int i=0;i<2;++i) if(preview_recovery_arm_mask_&(1u<<i)) {
+            const auto arm=i==0?ArmId::Left:ArmId::Right;auto* e=preview_executor_[i];
+            if(!e || !e->recovering()) {
+                // An explicit Hold/Init may have retired the executor. It must
+                // not be cold-started by a repeated old session heartbeat.
+                commands[i].mode=ControlMode::Hold;commands[i].has_tcp_target=false;
+                preview_dispatch_transaction_[i].valid=false;continue;
+            }
+            const auto output=e->recoveryOutput(last_loop_start_ns_*1e-9);
+            if(output.fault) {recordChunkFollowerFaultRequest(arm,output.reason);continue;}
+            commands[i].mode=ControlMode::TcpPoseTarget;commands[i].has_tcp_target=true;
+            commands[i].tcp_target_stand=output.pose;commands[i].has_gripper=false;
+            auto ctx=armContext(arm);ctx.abc_telemetry.stage_tcp_target_stand=output.pose;
+            ctx.abc_telemetry.preview_execution=e->telemetry();
+            preview_used_this_tick_[i]=true;
+            preview_dispatch_transaction_[i]=e->transaction(output.pose,output.pose);
+        }
+    } else if(preview_recovery_.state==PreviewRecoveryState::Starting) {
+        bool both=true;
+        for(int i=0;i<2;++i) if(preview_recovery_arm_mask_&(1u<<i))
+            both=both && preview_executor_[i] && preview_executor_[i]->telemetry().active;
+        if(both) {
+            preview_recovery_.state=PreviewRecoveryState::Tracking;++preview_recovery_.completed;
+            preview_recovery_.state_started_time_ns=last_loop_start_ns_;
+        }
+    }
+#else
+    (void)commands;(void)profile;
+#endif
+}
+
 void DualArmServoLoop::applyPreviewExecution(ArmId arm, ArmCommand& command,
                                             const TcpPoseTargetProfileConfig& profile) {
     const bool enabled=profile.ruckig_follower.preview_execution.enable;
@@ -5101,7 +5315,7 @@ void DualArmServoLoop::applyPreviewExecution(ArmId arm, ArmCommand& command,
     if (selected->failed()) {
         hold();recordChunkFollowerFaultRequest(arm,selected->telemetry().status);return;
     }
-    if (!ctx.chunk_follower.active() || ctx.chunk_follower.holdPaused() ||
+    if ((!selected->recovering() && (!ctx.chunk_follower.active() || ctx.chunk_follower.holdPaused())) ||
         command.mode!=ControlMode::TcpPoseTarget || !command.has_tcp_target || !kinematics_) {
         selected->reset("inactive");hold();return;
     }
@@ -5326,6 +5540,7 @@ void DualArmServoLoop::mergeAbcTelemetry(
 }
 
 void DualArmServoLoop::pollChunkFrames() {
+    if (preview_recovery_regime_ && preview_recovery_.state==PreviewRecoveryState::Starting) return;
     if (!chunk_frame_receiver_) return;
     const std::uint64_t recv_seq = chunk_frame_receiver_->latestSeq();
     if (recv_seq == 0 || recv_seq == chunk_frame_cache_recv_seq_) return;
@@ -6066,9 +6281,15 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     }
     const bool arm_present =
         arm_id == ArmId::Left ? chunk_frame_cache_.has_left : chunk_frame_cache_.has_right;
+    const bool recovery_frame_current = !rf.preview_execution.recovery.enable ||
+        preview_recovery_.epoch==0 ||
+        (chunk_frame_cache_.recovery_metadata_present &&
+         chunk_frame_cache_.preview_recovery_epoch==preview_recovery_.epoch &&
+         chunk_frame_cache_.observation_time_ns>preview_recovery_.min_observation_time_ns &&
+         chunk_frame_cache_.observation_time_ns<=nowSteadyNs());
     if (chunk_frame_cache_recv_seq_ != 0 &&
         chunk_frame_cache_recv_seq_ != *submitted_recv_seq &&
-        arm_present && !(delta_preview && rf.continuous_hold_resume &&
+        arm_present && recovery_frame_current && !(delta_preview && rf.continuous_hold_resume &&
                          command_refused_recent && !follower->active())) {
         transition_reason = (delta_preview ? "delta preview frame " : "chunk frame ") +
             seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
@@ -6079,7 +6300,16 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             (arm_id == ArmId::Left ? chunk_frame_cache_.has_left_delta
                                    : chunk_frame_cache_.has_right_delta);
         if (delta_preview && preview_contract_valid) {
-            follower->submitDeltaFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
+            Pose6D anchor=reference;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+            if(preview_recovery_regime_ && preview_recovery_.state==PreviewRecoveryState::Starting &&
+               preview_executor_[arm_id==ArmId::Left?0:1])
+                anchor=preview_executor_[arm_id==ArmId::Left?0:1]->recoveryAnchorPose();
+#endif
+            // Both raw and preview restart in the accepted terminal nominal
+            // frame. Recomputing this origin from approximate IK FK would ask
+            // a supposedly stationary first plan to correct an artificial gap.
+            follower->submitDeltaFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), anchor);
         } else if (!delta_preview) {
             follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
         } else {
@@ -6151,7 +6381,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             abc.follower_divergence_pos_m, abc.follower_divergence_ang_rad, leash);
     }
     abc.follower_leash_gate = leash_gate;
-    follower->setPlanRateGate(std::min(safety_plan_gate, leash_gate));
+    follower->setPlanRateGate(preview_recovery_regime_ &&
+        preview_recovery_.state==PreviewRecoveryState::Starting ? 0.0 : std::min(safety_plan_gate, leash_gate));
     if(rf.preview_execution.enable) {
         const bool left=arm_id==ArmId::Left;
         const auto& force=left?left_force_control_telemetry_:right_force_control_telemetry_;
@@ -7393,6 +7624,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // applySafety(), so strict divergence explanation intentionally reads the
         // previous safety tick's intervention stamp through a short debounce.
         pollChunkFrames();
+        updatePreviewRecoveryInput(effective_command, left_tcp_profile);
         const auto servo_feedback_pose_for_arm = [this](
             const RobotState& state,
             const ArmControlContext& ctx
@@ -7430,7 +7662,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         ArmCommand arm_pose_track_command[2];
         for (int i = 0; i < 2; ++i) {
             ArmControlContext& ctx = arm_ctx[i];
-            if (arm_tcp_profile[i]->ruckig_follower.controller ==
+            if (previewRecoveryFreezesRaw() && (preview_recovery_arm_mask_ & (1u<<i))) {
+                arm_pose_track_command[i] = *arm_effective_cmd[i];
+                arm_pose_track_command[i].tcp_target_stand = nominalOfEmitted(ctx.arm,*arm_exec_fb[i]);
+                arm_pose_track_command[i].has_tcp_target = true;
+                arm_pose_track_command[i].mode = ControlMode::TcpPoseTarget;
+                ctx.abc_telemetry.follower_prefilter_stand = ctx.chunk_follower.outputKinematics().pose;
+            } else if (arm_tcp_profile[i]->ruckig_follower.controller ==
                 RuckigFollowerController::DeltaTwist) {
                 ctx.chunk_follower.deactivate();
                 ctx.follower_output_smd.deactivate();
@@ -7548,9 +7786,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             const bool eligible =
                 pend.valid && track.has_tcp_target && track.mode == ControlMode::TcpPoseTarget &&
                 ctx.chunk_follower.active() && !ctx.chunk_follower.holdPaused();
+            // One pending fold per arm and tick: the geometry shortfall (collision /
+            // row / IK-throttle bits) and/or the force deviation (kPlanFoldForceBit),
+            // booked by applySafety last tick. Both are the same kind of thing, "where
+            // the arm was actually sent", and both are transported, never treated as
+            // an authority break. Only the geometry part is an obstruction worth an
+            // engaged/released log; the force part recurs every tick of a contact.
+            const bool geometry = pend.valid && (pend.geometry_cause_mask & kPlanFoldGeometryBits) != 0u;
             if (eligible && ctx.chunk_follower.absorbOffset(pend.dp, pend.dR)) {
                 ctx.follower_output_smd.shift(pend.dp, pend.dR);
-                shiftPreviewExecution(ctx.arm,pend.dp,pend.dR,PreviewFoldCause::GeometryHold,
+                shiftPreviewExecution(ctx.arm,pend.dp,pend.dR,
+                                      geometry ? PreviewFoldCause::GeometryHold : PreviewFoldCause::Force,
                                       pend.booked_time_ns,pend.geometry_cause_mask);
                 // The pose emitted this tick came from the un-shifted plan: move it too.
                 pinocchio::SE3 T = math::se3FromPose(track.tcp_target_stand);
@@ -7558,8 +7804,10 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 T.rotation() = pend.dR.toRotationMatrix() * T.rotation();
                 track.tcp_target_stand = math::poseFromSe3(T);
                 const double dist = pend.dp.norm();
-                collision_fold_total_m_[static_cast<std::size_t>(i)] += dist;
-                if (!fold_active) {
+                if (geometry) collision_fold_total_m_[static_cast<std::size_t>(i)] += dist;
+                if (!geometry) {
+                    // force-only: nothing to announce
+                } else if (!fold_active) {
                     fold_active = true;
                     collision_fold_started_ns_[static_cast<std::size_t>(i)] = now_ns;
                     collision_fold_total_m_[static_cast<std::size_t>(i)] = dist;
@@ -7576,7 +7824,16 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                               << " s, " << collision_fold_total_m_[static_cast<std::size_t>(i)] * 1000.0
                               << " mm folded so far\n";
                 }
-            } else if (fold_active && !pend.valid) {
+            } else if (eligible && pend.valid) {
+                uint64_t& last = plan_fold_declined_log_ns_[static_cast<std::size_t>(i)];
+                if (last == 0 || now_ns - last > 1'000'000'000ULL) {
+                    last = now_ns;
+                    std::cerr << "[WARN] plan fold " << toString(ctx.arm)
+                              << " declined by the chunk follower: " << pend.dp.norm() * 1000.0
+                              << " mm dropped (mask " << pend.geometry_cause_mask << ")\n";
+                }
+            }
+            if (fold_active && !geometry) {
                 fold_active = false;
                 std::cerr << "[INFO] hold_fold " << toString(ctx.arm) << " released after "
                           << (now_ns - collision_fold_started_ns_[static_cast<std::size_t>(i)]) * 1e-9
@@ -7594,6 +7851,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             else
                 resetPreviewExecution(arm_ctx[i].arm,"mode_changed");
         }
+        coordinatePreviewRecovery(arm_pose_track_command, left_tcp_profile);
 
         // THE HOLD FOLD, measuring half: remember the pose each follower plan
         // emitted this tick (after the ROI/collision folds, BEFORE the force
@@ -9152,7 +9410,27 @@ ServoTarget DualArmServoLoop::applySafety(
     for (int i = 0; i < 2; ++i) {
         PendingCollisionFold& pend = pending_collision_fold_[static_cast<std::size_t>(i)];
         pend.valid = false;
-        if (!kinematics_) continue;
+        // THE FORCE HALF of the plan fold, booked by foldForceDeviation this tick
+        // (chunk-follower sink only). Consumed here unconditionally: the overlay has
+        // already dropped the deviation, so a booking that is not written now is a
+        // displacement the plan never learns about.
+        PendingForceFold& pf = pending_force_fold_[static_cast<std::size_t>(i)];
+        const bool force_valid = pf.valid;
+        const Eigen::Vector3d force_dp = pf.dp;
+        const Eigen::Quaterniond force_dR = pf.dR;
+        pf.valid = false;
+        const auto book_force_only = [&]() {
+            if (!force_valid) return;
+            pend.dp = force_dp;
+            pend.dR = force_dR;
+            pend.booked_time_ns = last_loop_start_ns_;
+            pend.geometry_cause_mask = kPlanFoldForceBit;
+            pend.valid = true;
+        };
+        if (!kinematics_) {
+            book_force_only();
+            continue;
+        }
         const double applied = i == 0 ? safety_projection_telemetry_.left_applied_correction_deg_s
                                       : safety_projection_telemetry_.right_applied_correction_deg_s;
         const bool collision_hold =
@@ -9163,7 +9441,10 @@ ServoTarget DualArmServoLoop::applySafety(
         const HoldFoldConfig& hf = config_.safety.hold_fold;
         if (hf.enable) {
             const std::optional<Pose6D>& emitted = hold_fold_emitted_pose_[static_cast<std::size_t>(i)];
-            if (!emitted.has_value()) continue;
+            if (!emitted.has_value()) {
+                book_force_only();
+                continue;
+            }
             const bool rows_in_band = i == 0
                 ? (left_floor_engaged || left_roi_engaged || left_reach_engaged || left_user_floor_engaged)
                 : (right_floor_engaged || right_roi_engaged || right_reach_engaged || right_user_floor_engaged);
@@ -9176,9 +9457,20 @@ ServoTarget DualArmServoLoop::applySafety(
             const bool row_hold =
                 (rows_in_band || collision_constraints_engaged) &&
                 applied > kSafetyInterventionCorrectionEpsDegPerSec;
-            if (!(collision_hold || row_hold || ik_throttled)) continue;
+            if (!(collision_hold || row_hold || ik_throttled)) {
+                // Nothing geometric held the plan: the fold is the force deviation
+                // alone, exact from the overlay, not an FK difference that would
+                // carry IK residual into the plan every tick.
+                book_force_only();
+                continue;
+            }
             try {
                 Pose6D achieved = kinematics_->computeTcpStand(fold_arm, q_final, fold_mount);
+                // What was sent includes the force deviation composed this tick. A
+                // deviation the overlay still HOLDS (a fenced sink that declined the
+                // fold) is not the plan's and is stripped; a deviation the overlay
+                // DROPPED for the chunk follower is booked here, once, together with
+                // the geometry shortfall.
                 const control::AdmittanceOverlay& overlay = i == 0 ? left_overlay_ : right_overlay_;
                 if (overlay.hasDeviation()) achieved = overlay.strip(achieved);
                 control::HoldFoldLimits lim;
@@ -9193,7 +9485,8 @@ ServoTarget DualArmServoLoop::applySafety(
                     pend.dR = d.dR;
                     pend.booked_time_ns = last_loop_start_ns_;
                     pend.geometry_cause_mask = (collision_hold ? 1u : 0u) |
-                        (row_hold && rows_in_band ? 2u : 0u) | (ik_throttled ? 4u : 0u);
+                        (row_hold && rows_in_band ? 2u : 0u) | (ik_throttled ? 4u : 0u) |
+                        (force_valid ? kPlanFoldForceBit : 0u);
                     pend.valid = true;
                     (i == 0 ? safety_projection_telemetry_.left_hold_fold_m
                             : safety_projection_telemetry_.right_hold_fold_m) = d.dist_m;
@@ -9210,14 +9503,24 @@ ServoTarget DualArmServoLoop::applySafety(
                                   << hf.max_step_m * 1000.0 << " mm / " << hf.max_step_rad
                                   << " rad); the rows still hold\n";
                     }
+                    // The rows keep the geometry part; the deviation is not theirs.
+                    book_force_only();
+                } else {
+                    // Below the geometry floor: only the exact deviation is booked.
+                    book_force_only();
                 }
             } catch (const std::exception&) {
-                pend.valid = false;  // FK refused: nothing to book, the rows still hold
+                pend.valid = false;  // FK refused: nothing geometric to book, the rows still hold
+                book_force_only();
             }
             continue;
         }
-        // LEGACY (hold_fold disabled): book only what the collision rows removed.
-        if (!collision_hold) continue;
+        // LEGACY (hold_fold disabled): book only what the collision rows removed,
+        // plus the force deviation.
+        if (!collision_hold) {
+            book_force_only();
+            continue;
+        }
         const JointArray& q_req = plan_gate_requested[i];
         try {
             const pinocchio::SE3 T_req =
@@ -9230,8 +9533,18 @@ ServoTarget DualArmServoLoop::applySafety(
             pend.geometry_cause_mask = 1u | 8u;
             pend.valid = pend.dp.norm() > 1e-9 ||
                          std::abs(Eigen::AngleAxisd(pend.dR).angle()) > 1e-9;
+            if (force_valid) {
+                if (pend.valid) {
+                    pend.dp += force_dp;
+                    pend.dR = (force_dR * pend.dR).normalized();
+                    pend.geometry_cause_mask |= kPlanFoldForceBit;
+                } else {
+                    book_force_only();
+                }
+            }
         } catch (const std::exception&) {
             pend.valid = false;  // FK refused: nothing to book, the rows still hold
+            book_force_only();
         }
     }
     // SAFETY PLAN GATE input: how much of the step an OBSTRUCTION removed. Both
@@ -10508,6 +10821,7 @@ Pose6D DualArmServoLoop::nominalOfEmitted(ArmId arm, const Pose6D& emitted_stand
 }
 
 void DualArmServoLoop::resetForceReferenceForInit(ArmId arm) {
+    resetPreviewRecoveryLifecycle();
     const bool left = arm == ArmId::Left;
     const std::size_t i = left ? 0 : 1;
     // The accepted InitMotion owns the existing sent joint pose, including the old
@@ -10850,25 +11164,82 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm,
         ? Eigen::Quaterniond(math::exp3(er)).normalized()
         : Eigen::Quaterniond::Identity();
 
+    math::Vector3 accepted = dp;
     if (tel.law == "hold") {
         // The latched nominal becomes the composed pose: same pivot (the TCP),
         // same displacement, so next tick's nominal IS this tick's command.
-        *hold_nominal = overlay.compose(*hold_nominal);
-    } else {
-        if (!follower.absorbOffset(dp, dR)) {
-            tel.fold_sink = "declined: chunk follower refused";
-            return;
+        //
+        // THE WALL ON THE SINK (2026-09-07). The chunk-follower sink is walled by
+        // roi_fold, which clamps the emitted plan to the box every tick and folds the
+        // clamp back into the plan. This sink had no wall: the Tier-2 clamp bounds
+        // the COMMAND built from the nominal, and the pose-track wall brakes the SMD
+        // state at the face, but the nominal itself kept walking out of the box with
+        // the hand. MEASURED servo_log_20260907_021834.csv, right arm, hand-guide:
+        // at y_min (610-616 s) the nominal was pushed ~130 mm past the face while the
+        // command sat on it; the operator then pushed the other way at 17-35 N for
+        // 2.2 s (~108 mm of hand travel) and the command did not move, gave up,
+        // pushed again and got it moving only after 25 mm more -- the whole
+        // excursion had to be unwound first. At x_min (596-599 s) the same: 18 mm
+        // out, 1.1 s / 19 mm of dead zone on the way back. So: clamp the nominal to
+        // the box and the floor here, and let the part the box refuses vanish
+        // instead of being banked. A reversal then moves the command on its first
+        // tick, which is what a wall is.
+        const Pose6D composed = overlay.compose(*hold_nominal);
+        const Pose6D walled = clampPoseToRoi(clampPoseToFloor(composed));
+        const math::Vector3 refused(composed.x - walled.x, composed.y - walled.y,
+                                    composed.z - walled.z);
+        *hold_nominal = walled;
+        accepted -= refused;
+        const double refused_m = refused.norm();
+        if (refused_m > 1e-9) {
+            double& total = left ? left_hold_fold_refused_total_m_ : right_hold_fold_refused_total_m_;
+            uint64_t& last_log = left ? left_hold_fold_refused_log_ns_ : right_hold_fold_refused_log_ns_;
+            const bool first = total <= 0.0;
+            total += refused_m;
+            const uint64_t now_ns = nowSteadyNs();
+            if (first || now_ns - last_log > 1'000'000'000ULL) {
+                last_log = now_ns;
+                std::cerr << "[INFO] force fold " << toString(arm)
+                          << ": Hold nominal walled at the ROI/floor, refused "
+                          << refused_m * 1000.0 << " mm this tick (" << total * 1000.0
+                          << " mm so far); the hand's travel past the face is dropped, not banked\n";
+            }
+        } else {
+            double& total = left ? left_hold_fold_refused_total_m_ : right_hold_fold_refused_total_m_;
+            total = 0.0;
         }
-        // The output SMD sits between the follower and the overlay; its state must
-        // move with the plan or it would chase the fold as a step.
-        output_smd.shift(dp, dR);
-        shiftPreviewExecution(arm,dp,dR,PreviewFoldCause::Force,last_loop_start_ns_);
+    } else {
+        // BOOKED, NOT APPLIED (2026-09-07). The chunk-follower sink no longer shifts
+        // the plan here, mid-tick. The deviation is booked into the SAME pending
+        // plan fold the geometry hold uses (applySafety, this tick) and applied at
+        // the top of the next tick as one rigid transport of the follower, the
+        // output SMD and the preview executor. The composed target above already
+        // carries the deviation, so the wire sees it this tick either way; what
+        // changes is that the plan learns "this is what was sent" once, in one
+        // place, and never as an authority break. Measured before the change
+        // (servo_log_20260907_024935.csv): the separate same-tick force fold
+        // cancelled the staged preview plan on every sub-micrometre deviation, the
+        // active plan expired inside max_result_age_sec and both arms braked for
+        // 10+ s at a time; and when a geometry hold fired on the same tick the
+        // deviation was booked twice (the strip at the booking saw a deviation
+        // that had already been dropped here).
+        (void)output_smd;
+        PendingForceFold& pf = pending_force_fold_[left ? 0 : 1];
+        if (pf.valid) {
+            // Not consumed last tick (no booking pass ran): accumulate, never lose.
+            pf.dp += dp;
+            pf.dR = (dR * pf.dR).normalized();
+        } else {
+            pf.dp = dp;
+            pf.dR = dR;
+            pf.valid = true;
+        }
     }
     overlay.dropDeviation();   // the DISPLACEMENT only - the velocity state stays
-    absorbed += dp;
+    absorbed += accepted;
     absorbed_r = (dR * absorbed_r).normalized();
     tel.folded = true;
-    tel.fold_m = {dp.x(), dp.y(), dp.z()};
+    tel.fold_m = {accepted.x(), accepted.y(), accepted.z()};
     tel.fold_rad = {er.x(), er.y(), er.z()};
     tel.absorbed_m = {absorbed.x(), absorbed.y(), absorbed.z()};
     tel.absorbed_norm_m = absorbed.norm();
