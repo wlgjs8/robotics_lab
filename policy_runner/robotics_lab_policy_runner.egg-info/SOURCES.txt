@@ -97,6 +97,7 @@ tests/test_hdf5_viewer.py
 tests/test_init_tare_runner_integration.py
 tests/test_isaac_transport.py
 tests/test_joint_limit_stall_abort.py
+tests/test_k_normalize_runtime.py
 tests/test_openpi_remote_blank_depth.py
 tests/test_openpi_remote_fisheye.py
 tests/test_openpi_remote_rtc.py

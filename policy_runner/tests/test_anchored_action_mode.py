@@ -1,10 +1,13 @@
 """FLOW_INFER_ACTION_MODE=anchored: reception-time conversion + RTC re-anchoring.
 
-Contract under test (matches the sim rig's ACTION_MODE=anchored):
-  row k of an anchored chunk = pose at t0+k+1 in the chunk-start frame
-  (p_k = p0 + R0 a_k, R_k = R0 A_k). Chaining the converted per-step deltas must
-  reproduce those waypoints exactly, and the RTC shift must re-express the
-  unexecuted tail relative to the executed boundary row (T'_k = T_s^-1 T_{k+s}).
+Contract under test (the TRAINING side's, openpi pika_umi_policy._anchor_relative_chunk
+on a loader window starting at the observation frame):
+  row k of an anchored chunk = pose at t0+k in the chunk-start frame
+  (p_k = p0 + R0 a_k, R_k = R0 A_k), so row 0 is the identity. The conversion yields
+  H-1 per-step deltas, delta j = motion over [t0+j, t0+j+1]; chaining d_0..d_{j-1}
+  must reproduce anchored row j exactly, the model's noisy row 0 must be ignored, and
+  the RTC shift must re-express the unexecuted tail relative to the row the robot has
+  reached after s executed steps, row s (T'_k = T_s^-1 T_{k+s}, T'_0 = I).
 """
 import numpy as np
 import pytest
@@ -17,16 +20,20 @@ from policy_runner.openpi_remote import (
 )
 
 
-def _random_anchored_chunk(rng, horizon=24):
+def _random_anchored_chunk(rng, horizon=24, row0_noise=0.0):
+    """Training-shaped chunk: row 0 = identity (optionally + model noise), rows 1.. a
+    random walk of poses expressed in the row-0 frame."""
     chunk = np.zeros((horizon, 14), dtype=np.float32)
     for b in (0, 7):
         a = np.zeros(3)
         A = np.eye(3)
-        for k in range(horizon):
+        for k in range(1, horizon):
             a = a + rng.uniform(-0.01, 0.01, 3)
             A = A @ _rotvec_to_mat(rng.uniform(-0.05, 0.05, 3))
             chunk[k, b:b + 3] = a
             chunk[k, b + 3:b + 6] = _mat_to_rotvec(A)
+        if row0_noise > 0.0:
+            chunk[0, b:b + 6] = rng.uniform(-row0_noise, row0_noise, 6)
         chunk[:, b + 6] = rng.uniform(0.0, 1.0, horizon)
     return chunk
 
@@ -40,26 +47,41 @@ def test_deltas_chain_back_to_anchored_waypoints():
     rng = np.random.default_rng(0)
     chunk = _random_anchored_chunk(rng)
     deltas = anchored_chunk_to_deltas(chunk)
-    assert deltas.shape == chunk.shape
-    # gripper columns untouched
-    assert np.array_equal(deltas[:, 6], chunk[:, 6])
-    assert np.array_equal(deltas[:, 13], chunk[:, 13])
+    # the identity row is consumed: H-1 motions for H poses
+    assert deltas.shape == (chunk.shape[0] - 1, chunk.shape[1])
+    # gripper columns NOT shifted: delta j (motion over [t0+j, t0+j+1]) carries grip[t0+j],
+    # the delta-mode convention (a step's gripper is read at the START of the step)
+    assert np.array_equal(deltas[:, 6], chunk[:-1, 6])
+    assert np.array_equal(deltas[:, 13], chunk[:-1, 13])
     for b in (0, 7):
         p = np.zeros(3)
         R = np.eye(3)
-        for k in range(chunk.shape[0]):
-            p = p + R @ deltas[k, b:b + 3].astype(np.float64)
-            R = R @ _rotvec_to_mat(deltas[k, b + 3:b + 6])
-            assert np.allclose(p, chunk[k, b:b + 3], atol=1e-5), (b, k)
-            assert np.allclose(_mat_to_rotvec(R), chunk[k, b + 3:b + 6], atol=1e-4), (b, k)
+        for j in range(deltas.shape[0]):
+            p = p + R @ deltas[j, b:b + 3].astype(np.float64)
+            R = R @ _rotvec_to_mat(deltas[j, b + 3:b + 6])
+            # after executing d_0..d_j the robot is at anchored row j+1
+            assert np.allclose(p, chunk[j + 1, b:b + 3], atol=1e-5), (b, j)
+            assert np.allclose(_mat_to_rotvec(R), chunk[j + 1, b + 3:b + 6], atol=1e-4), (b, j)
 
 
-def test_first_delta_row_equals_first_anchored_row():
+def test_first_delta_row_equals_row1_and_row0_noise_is_ignored():
+    """Row 0 is the identity by construction; the model's ~0.5 mm regression noise there
+    must not leak into the first executed motion (the pre-2026-09-08 code executed row 0
+    as a null step and every later motion one step late)."""
     rng = np.random.default_rng(1)
     chunk = _random_anchored_chunk(rng)
     deltas = anchored_chunk_to_deltas(chunk)
     for b in (0, 7):
-        assert np.allclose(deltas[0, b:b + 6], chunk[0, b:b + 6], atol=1e-6)
+        assert np.allclose(deltas[0, b:b + 6], chunk[1, b:b + 6], atol=1e-6)
+    noisy = chunk.copy()
+    for b in (0, 7):
+        noisy[0, b:b + 6] = rng.uniform(-0.002, 0.002, 6)  # model noise on the identity row
+    noisy_deltas = anchored_chunk_to_deltas(noisy)
+    assert np.allclose(noisy_deltas, deltas, atol=1e-7)
+
+
+def test_short_chunk_yields_no_deltas():
+    assert anchored_chunk_to_deltas(np.zeros((1, 14), dtype=np.float32)).shape == (0, 14)
 
 
 def test_rtc_shift_anchored_reanchors_to_boundary_row():
@@ -71,13 +93,27 @@ def test_rtc_shift_anchored_reanchors_to_boundary_row():
     assert shifted.shape == chunk.shape
     assert np.array_equal(shifted[-steps:], np.zeros_like(shifted[-steps:]))
     for b in (0, 7):
-        ps = chunk[steps - 1, b:b + 3].astype(np.float64)
-        Rs = _rotvec_to_mat(chunk[steps - 1, b + 3:b + 6])
+        # after `steps` executed motions the robot stands on row `steps`: that row is
+        # the new anchor, so the shifted chunk starts with an identity row like the
+        # model's own output does
+        assert np.allclose(shifted[0, b:b + 6], 0.0, atol=1e-6)
+        ps = chunk[steps, b:b + 3].astype(np.float64)
+        Rs = _rotvec_to_mat(chunk[steps, b + 3:b + 6])
         for k in range(chunk.shape[0] - steps):
             pk = chunk[steps + k, b:b + 3].astype(np.float64)
             Rk = _rotvec_to_mat(chunk[steps + k, b + 3:b + 6])
             assert np.allclose(shifted[k, b:b + 3], Rs.T @ (pk - ps), atol=1e-5)
             assert np.allclose(shifted[k, b + 3:b + 6], _mat_to_rotvec(Rs.T @ Rk), atol=1e-4)
+        # gripper columns ride along unshifted
+        assert np.array_equal(shifted[:-steps, b + 6], chunk[steps:, b + 6])
+
+
+def test_rtc_shift_anchored_exhausted_plan_returns_zeros():
+    rng = np.random.default_rng(9)
+    chunk = _random_anchored_chunk(rng)
+    ident = (np.full(14, -1.0), np.full(14, 1.0))
+    out = rtc_shift_prev_chunk(chunk, chunk.shape[0], action_mode="anchored", norm_q=ident)
+    assert out.shape == chunk.shape and not out.any()
 
 
 def test_rtc_shift_delta_mode_unchanged():
@@ -118,8 +154,8 @@ def test_rtc_shift_anchored_normalized_space_roundtrip():
     # reference: direct math on unnormalized rows, then renormalize
     ref_un = chunk_un[steps:].copy()
     for b in (0, 7):
-        ps = chunk_un[steps - 1, b:b + 3]
-        Rs = _rotvec_to_mat(chunk_un[steps - 1, b + 3:b + 6])
+        ps = chunk_un[steps, b:b + 3]
+        Rs = _rotvec_to_mat(chunk_un[steps, b + 3:b + 6])
         for k in range(ref_un.shape[0]):
             pk = chunk_un[steps + k, b:b + 3]
             Rk = _rotvec_to_mat(chunk_un[steps + k, b + 3:b + 6])

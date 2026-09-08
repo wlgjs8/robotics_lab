@@ -339,11 +339,58 @@ ENVIRONMENT: list[dict] = [
     # Its band is safety.self_collision.mesh.environment (25/67 mm), NOT the 40/90 mm
     # self set: at 40 mm those same recorded poses violate on 1.1% of ticks, which would
     # clamp_hold the arm in a posture the cell already uses. See that config block.
-    {"name": "env_stand_riser", "size": (0.307, 0.324, 0.295), "xyz": (0.0, 0.0049, -0.1625),
+    # 2026-09-08: HEIGHT 295 -> 280, top face z -15 -> -30. There is a 15 mm circular
+    # spacer plate between the riser and the stand base plate (operator, 2026-09-08),
+    # so the stack is table -310 / riser top -30 / spacer -30..-15 / plate -15..0. Every
+    # measurement that disagreed with the -15 top agrees with -30:
+    #   * six hand-parked fingertip contacts on the riser top (2026-09-08 morning,
+    #     rbpodo_read_state, both arms x 3, tool tilted 45-90 deg): TCP centre
+    #     z -31.7 +/- 2.8 mm, six-point plane fit residuals +/-1.4 mm;
+    #   * both arms' tips resting on the top at once (2026-09-08, L -67.3,11.4,131.1,
+    #     -4.6,-158.7,76.9 / R 56.8,-20.0,-144.3,21.9,130.8,-75.9): the finger hulls
+    #     read -21.8 (left) / -16.4 mm (right) INTO the -15 top, i.e. the tips sat at
+    #     z -37 / -31; against -30 that is -7 / -1 mm, inside the finger-hull honeycomb
+    #     fill (p90 5.2 mm) plus the left arm's 8.6 mm box-vs-FK TCP residual;
+    #   * the 2026-09-07 10:17 fault (left elbow over the +x+y top corner, model 20.6 mm
+    #     hull / 23.6 raw mesh, tape 40) and the 12:01 right-gripper check (model 20.8,
+    #     tape 30) both close to within 2 mm once the top is 15 mm lower.
+    # Footprint 307 x 324 and centre y +4.9 are unchanged (faces were measured, the
+    # height was derived). The spacer itself is NOT modelled yet: its diameter has not
+    # been measured; if it overhangs the riser footprint it needs its own env_* entry
+    # (a 15 mm slab at z -30..-15), see the commented template below.
+    {"name": "env_stand_riser", "size": (0.307, 0.324, 0.280), "xyz": (0.0, 0.0049, -0.170),
      "rgba": (0.20, 0.20, 0.21, 1.0), "collision": True,
      "measured": "2026-09-06 two four-tip contact poses with the grippers fully open "
                  "(rbpodo_read_state), 8-contact mesh fit, rms 2.50 mm, arm-to-arm bias "
-                 "3.3 mm; height 295 from tips-down on the table."},
+                 "3.3 mm; height 280: table -310.5 (tips-down 2026-09-06) minus the 15 mm "
+                 "plate minus the 15 mm circular spacer (operator 2026-09-08), confirmed "
+                 "by six fingertip contacts on the top at z -31.7 +/- 2.8 mm."},
+    # The circular spacer between the riser top (-30) and the plate underside (-15).
+    # A CYLINDER, not a box: its diameter equals the riser's width (operator,
+    # 2026-09-08), so a 307 x 307 box would put material at the riser's +x+y corner
+    # where the disc has none -- and that corner is exactly where the left elbow sat
+    # in the 2026-09-07 10:17 fault (witness (153.8, 168.1) mm; the disc's rim is
+    # 60 mm inboard of it there). Concentric with the riser (y +4.9). A <cylinder> is
+    # a coal primitive like the box, so the monitor checks it as-is and rb_gui draws
+    # it from the same numbers.
+    # RADIUS 0.133 (diameter 266), NOT the riser half-width 0.1535 the operator's
+    # "same size as the riser" would give. In the 2026-09-08 both-tips-on-the-riser-top
+    # pose (L -67.3,11.4,131.1,-4.6,-158.7,76.9 / R 56.8,-20.0,-144.3,21.9,130.8,-75.9)
+    # the left finger_left rests at (126.6, 73.4) and the right finger_right at
+    # (131.2, -57.6) mm, radii 146 / 143 from the riser centre, at z -31..-37 -- ON the
+    # riser top -- and the finger bodies above the tips lean inboard through the
+    # z -30..-15 band. collision_pose_probe at that pose: radius 0.1535 reads the two
+    # fingers 16.7 / 16.4 mm INSIDE the spacer, 0.143 still 10.0 / 7.3 mm, 0.135
+    # 2.0 mm, 0.133 just clear. So 0.133 is the largest concentric radius that pose
+    # allows (finger-hull honeycomb fill, p90 5 mm, works in the same direction).
+    # TAPE THE DIAMETER and replace this bound with the measurement.
+    {"name": "env_stand_spacer", "shape": "cylinder", "radius": 0.133, "length": 0.015,
+     "xyz": (0.0, 0.0049, -0.0225),
+     "rgba": (0.35, 0.35, 0.36, 1.0), "collision": True,
+     "measured": "2026-09-08 operator: 15 mm thick circular plate between riser and "
+                 "stand plate, 'same size as the riser'; radius bounded to 0.143 by two "
+                 "fingertip contacts resting on the riser top at r 143/146 mm "
+                 "(rbpodo_read_state, see comment). Diameter not yet taped."},
     # Two identical 800 mm cube tables butted along +X. The robot's riser stands on
     # table 1; the place boxes sit on table 2. The X placement is NOT a tape
     # measurement -- it is fitted to where the arms actually work in
@@ -365,7 +412,8 @@ ENVIRONMENT: list[dict] = [
 
 
 def _environment_elements(spec: dict) -> tuple[ET.Element, ET.Element]:
-    """One env_* link (a box) plus its fixed joint to `stand`.
+    """One env_* link (a box, or a z-axis cylinder with `shape: "cylinder"`,
+    `radius`, `length`) plus its fixed joint to `stand`.
 
     Visual only unless the entry sets `collision: True`. That flag is what puts the
     box into the CHECKED set: buildGeom(..., pinocchio::COLLISION, ...) is what the
@@ -384,22 +432,33 @@ def _environment_elements(spec: dict) -> tuple[ET.Element, ET.Element]:
     if not name.startswith("env_"):
         raise SystemExit(f"environment entry {name!r}: name must start with env_ "
                          "(rb_gui picks furniture up by that prefix)")
-    size = tuple(float(v) for v in spec["size"])
+    shape = str(spec.get("shape", "box"))
     xyz = tuple(float(v) for v in spec["xyz"])
-    if len(size) != 3 or min(size) <= 0.0:
-        raise SystemExit(f"{name}: size must be three positive metres, got {size}")
+    if shape == "box":
+        size = tuple(float(v) for v in spec["size"])
+        if len(size) != 3 or min(size) <= 0.0:
+            raise SystemExit(f"{name}: size must be three positive metres, got {size}")
+        geom_tag, geom_attr = "box", {"size": " ".join(f"{v:.6g}" for v in size)}
+    elif shape == "cylinder":
+        radius = float(spec["radius"])
+        length = float(spec["length"])
+        if radius <= 0.0 or length <= 0.0:
+            raise SystemExit(f"{name}: cylinder radius/length must be positive metres, "
+                             f"got {radius}/{length}")
+        geom_tag, geom_attr = "cylinder", {"radius": f"{radius:.6g}", "length": f"{length:.6g}"}
+    else:
+        raise SystemExit(f"{name}: shape must be box or cylinder, got {shape!r}")
     if len(xyz) != 3:
         raise SystemExit(f"{name}: xyz must be three metres, got {xyz}")
     if not str(spec.get("measured", "")).strip():
         raise SystemExit(f"{name}: no `measured` provenance. Every furniture dimension "
                          "is a tape measurement with no CAD behind it; record how and "
                          "when it was taken or it cannot be re-checked.")
-    size_attr = " ".join(f"{v:.6g}" for v in size)
     link = ET.Element("link", {"name": name})
     visual = ET.SubElement(link, "visual")
     ET.SubElement(visual, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
     geometry = ET.SubElement(visual, "geometry")
-    ET.SubElement(geometry, "box", {"size": size_attr})
+    ET.SubElement(geometry, geom_tag, dict(geom_attr))
     material = ET.SubElement(visual, "material", {"name": name + "_material"})
     rgba = tuple(float(v) for v in spec.get("rgba", (0.55, 0.52, 0.48, 1.0)))
     ET.SubElement(material, "color", {"rgba": " ".join(f"{v:.4g}" for v in rgba)})
@@ -410,7 +469,7 @@ def _environment_elements(spec: dict) -> tuple[ET.Element, ET.Element]:
         collision = ET.SubElement(link, "collision")
         ET.SubElement(collision, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
         col_geometry = ET.SubElement(collision, "geometry")
-        ET.SubElement(col_geometry, "box", {"size": size_attr})
+        ET.SubElement(col_geometry, geom_tag, dict(geom_attr))
     joint = _fixed_joint(name + "_fixed", "stand", name,
                          " ".join(f"{v:.6g}" for v in xyz), "0.0 0.0 0.0")
     return link, joint

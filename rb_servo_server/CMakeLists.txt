@@ -346,6 +346,9 @@ if(BUILD_TESTING)
     add_executable(recorded_pose_ik_audit tools/recorded_pose_ik_audit.cpp)
 target_link_libraries(recorded_pose_ik_audit PRIVATE rb_servo_core)
 
+    add_executable(collision_pose_probe tools/collision_pose_probe.cpp)
+    target_link_libraries(collision_pose_probe PRIVATE rb_servo_core)
+
 add_executable(test_follower_output_smd tests/test_follower_output_smd.cpp)
     target_link_libraries(test_follower_output_smd PRIVATE rb_servo_core)
     add_test(NAME follower_output_smd COMMAND test_follower_output_smd)

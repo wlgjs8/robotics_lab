@@ -222,12 +222,120 @@ def _pp_shift(side: str) -> tuple[float, float] | None:
     return _PP_SHIFT_DEFAULT.get(side)
 
 
+# K-NORMALISATION (2026-09-08). The successor to the shift above, and the DEPLOY HALF of a
+# training-side change: `boltv2r6knorm` / `boltv2r6knormcrop` were converted with
+# `convert_pika_umi_storage_video.py --k-normalize [--crop-px 24,18]`, which remaps every frame
+# onto ONE virtual pinhole camera with the exact homography Kv . K^-1 (K read per episode from
+# the stored `camera_calib/color_intrinsics`). A checkpoint trained that way expects the same
+# remap at inference; feed it raw frames and its input is off-distribution by the very offset the
+# remap exists to remove. Serving one of those checkpoints therefore REQUIRES
+# FLOW_INFER_K_NORMALIZE=1 (plus FLOW_INFER_CROP_PX=24,18 for the *knormcrop* arm), and serving a
+# non-normalised checkpoint requires it OFF.
+#
+# The virtual camera is a definition (the training constant), so it has a default. The INFERENCE
+# units' K is a measurement, and this process cannot read it: the camera bundle carries only
+# shm/geometry metadata, and the wrist units are held by camera_server. It must therefore be
+# supplied, and is FAIL-CLOSED when it is not -- a guessed fy would silently scale the image the
+# policy aims with. Measure it with `tools/read_wrist_intrinsics.py` (prints the two env lines).
+_K_VIRTUAL_DEFAULT = (393.0, 393.0, 320.0, 240.0)  # fx, fy, cx, cy -- matches the converter default
+
+
+def _k_normalize_enabled() -> bool:
+    return os.environ.get("FLOW_INFER_K_NORMALIZE", "0") == "1"
+
+
+def _parse_floats(raw: str, n: int, name: str) -> tuple[float, ...]:
+    try:
+        parts = tuple(float(v) for v in raw.split(","))
+    except ValueError:
+        raise ValueError(f"{name} must be {n} comma-separated numbers, got {raw!r}") from None
+    if len(parts) != n:
+        raise ValueError(f"{name} must be {n} comma-separated numbers, got {raw!r}")
+    return parts
+
+
+def _k_virtual() -> tuple[float, float, float, float]:
+    raw = os.environ.get("FLOW_INFER_K_VIRTUAL")
+    if not raw:
+        return _K_VIRTUAL_DEFAULT
+    fx, fy, cx, cy = _parse_floats(raw, 4, "FLOW_INFER_K_VIRTUAL")
+    if fx <= 0.0 or fy <= 0.0:
+        raise ValueError(f"FLOW_INFER_K_VIRTUAL needs positive focal lengths, got {raw!r}")
+    return fx, fy, cx, cy
+
+
+def _k_infer(side: str) -> tuple[float, float, float, float]:
+    """Measured intrinsics of the INFERENCE wrist unit on `side` (fx, fy, ppx, ppy).
+
+    Fail-closed: there is no default. The collection units' values are NOT a stand-in -- the whole
+    point of the remap is that the two bodies differ."""
+    name = f"FLOW_INFER_K_{side.upper()}"
+    raw = os.environ.get(name)
+    if not raw:
+        raise ValueError(
+            f"FLOW_INFER_K_NORMALIZE=1 requires {name}='fx,fy,ppx,ppy' for the inference camera on "
+            f"the {side} wrist; run tools/read_wrist_intrinsics.py to measure it (camera_server must "
+            "be down while it reads the device)"
+        )
+    fx, fy, ppx, ppy = _parse_floats(raw, 4, name)
+    if fx <= 0.0 or fy <= 0.0:
+        raise ValueError(f"{name} needs positive focal lengths, got {raw!r}")
+    return fx, fy, ppx, ppy
+
+
+def _k_crop_px() -> tuple[int, int] | None:
+    raw = os.environ.get("FLOW_INFER_CROP_PX")
+    if not raw:
+        return None
+    cx, cy = _parse_floats(raw, 2, "FLOW_INFER_CROP_PX")
+    if cx < 0 or cy < 0 or cx != int(cx) or cy != int(cy):
+        raise ValueError(f"FLOW_INFER_CROP_PX must be non-negative whole pixels 'x,y', got {raw!r}")
+    return int(cx), int(cy)
+
+
+def _k_normalize(rgb: np.ndarray, side: str) -> np.ndarray:
+    """Remap this frame onto the virtual camera, then apply the training-time crop.
+
+    Bit-identical to the training path (openpi examples/pika_umi/convert_pika_umi_storage_video.py
+    `_k_norm_homography` + `_post_k`): the same Kv . K^-1 homography, INTER_LINEAR, a BLACK border
+    where the virtual view sees past the real one (NOT edge-replicated -- the training frames carry
+    that black wedge), then an optional crop of `crop_px` off every edge resized back to the
+    original size. A no-op unless FLOW_INFER_K_NORMALIZE=1."""
+    if not _k_normalize_enabled():
+        return rgb
+    import cv2
+
+    fx, fy, ppx, ppy = _k_infer(side)
+    vfx, vfy, vcx, vcy = _k_virtual()
+    k = np.array([[fx, 0.0, ppx], [0.0, fy, ppy], [0.0, 0.0, 1.0]], dtype=np.float64)
+    kv = np.array([[vfx, 0.0, vcx], [0.0, vfy, vcy], [0.0, 0.0, 1.0]], dtype=np.float64)
+    h, w = rgb.shape[:2]
+    out = cv2.warpPerspective(
+        rgb,
+        kv @ np.linalg.inv(k),
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    crop = _k_crop_px()
+    if crop is not None:
+        cx, cy = crop
+        if 2 * cx >= w or 2 * cy >= h:
+            raise ValueError(f"FLOW_INFER_CROP_PX {crop} removes the whole {w}x{h} frame")
+        out = cv2.resize(out[cy : h - cy, cx : w - cx], (w, h), interpolation=cv2.INTER_LINEAR)
+    return out
+
+
 def _align_principal_point(rgb: np.ndarray, side: str) -> np.ndarray:
     """Translate the frame so the inference camera's principal point lands where the
     collection camera's did. Sub-pixel, edge-replicated; a no-op unless FLOW_INFER_PP_ALIGN=1."""
     shift = _pp_shift(side)
     if shift is None:
         return rgb
+    if _k_normalize_enabled():
+        # Both correct the same collect->infer optical mismatch; stacking them double-corrects it.
+        raise ValueError("FLOW_INFER_PP_ALIGN and FLOW_INFER_K_NORMALIZE are mutually exclusive")
     import cv2
 
     dx, dy = shift
@@ -318,21 +426,36 @@ def rtc_shift_prev_chunk(raw_chunk, execute_steps, action_mode="delta", norm_q=N
     pad = _np.zeros((steps, raw.shape[1]), dtype=raw.dtype)
     if action_mode == "anchored":
         # Anchored rows are transforms rel the OLD chunk anchor; the freeze must pin
-        # rows re-expressed rel the row that becomes the NEW anchor state:
-        # T'_k = T_s^-1 T_{k+s} per arm. raw_chunk is MODEL-SPACE (normalized), and
-        # SE(3) algebra on normalized values is garbage (real-robot 20260825 run:
-        # 30-50 mm boundary jumps, systematic base-ward drift). Unnormalize with the
-        # checkpoint's action q01/q99, transform, renormalize.
+        # rows re-expressed rel the row that becomes the NEW anchor state.
+        #
+        # Row semantics (openpi pika_umi_policy._anchor_relative_chunk, loader
+        # delta_timestamps from t=0): row k = pose at t0+k in the t0 frame, so row 0
+        # is the IDENTITY. After `steps` policy steps the robot is at row `steps`
+        # (NOT row steps-1, which is one step behind); the new observation's anchor
+        # is that row, and the shifted chunk must start with an identity row so it
+        # matches what the model itself emits at row 0:
+        #   T'_k = T_s^-1 T_{k+s},  k = 0 .. H-1-s   (T'_0 = I).
+        # Before 2026-09-08 this anchored at row steps-1, pinning every frozen row
+        # one step AHEAD of the true pose at each replan (a forward bias that the
+        # next freeze inherits).
+        #
+        # raw_chunk is MODEL-SPACE (normalized), and SE(3) algebra on normalized
+        # values is garbage (real-robot 20260825 run: 30-50 mm boundary jumps,
+        # systematic base-ward drift). Unnormalize with the checkpoint's action
+        # q01/q99, transform, renormalize.
         if norm_q is None:
             raise ValueError(
                 "anchored RTC shift requires action norm stats (q01/q99); "
                 "pass rtc_norm_stats (FLOW_INFER_RTC_NORM_STATS) or disable RTC")
+        if steps >= raw.shape[0]:
+            # The whole previous plan has been executed: nothing left to re-anchor.
+            return _np.zeros_like(raw)
         q01, q99 = norm_q
         un = _unnorm(raw[:, :14], q01, q99)
         shifted_un = un[steps:].copy()
         for b in _ANCHORED_ARM_BLOCKS:
-            ps = un[steps - 1, b:b + 3]
-            Rs = _rotvec_to_mat(un[steps - 1, b + 3:b + 6])
+            ps = un[steps, b:b + 3]
+            Rs = _rotvec_to_mat(un[steps, b + 3:b + 6])
             for k in range(shifted_un.shape[0]):
                 pk = un[steps + k, b:b + 3]
                 Rk = _rotvec_to_mat(un[steps + k, b + 3:b + 6])
@@ -419,24 +542,41 @@ def _renorm(x, q01, q99):
 def anchored_chunk_to_deltas(chunk):
     """UMI t0-anchored rows -> per-step ee_local deltas (exact, frame-free).
 
-    Row k of an anchored chunk is the pose at t0+k+1 expressed in the chunk-start
-    frame: p_k = p0 + R0 a_k, R_k = R0 A_k. The per-step delta the runner's
-    integrator expects is d_k = T_{k-1}^-1 T_k, which reduces to pure row algebra
-    (R0 cancels): d_0 = row_0; d_k = (A_{k-1}^T (a_k - a_{k-1}), rotvec(A_{k-1}^T A_k)).
-    Composing the emitted deltas with pose_compose_local therefore reproduces the
-    anchored waypoints exactly. Gripper columns pass through untouched.
+    Row semantics are the TRAINING side's (openpi pika_umi_policy._anchor_relative_chunk
+    on a loader window that starts at the observation frame, delta_timestamps t=0..H-1):
+    row k is the pose at t0+k expressed in the chunk-start frame, p_k = p0 + R0 a_k,
+    R_k = R0 A_k, so ROW 0 IS THE IDENTITY (the model emits ~0.5 mm of regression
+    noise there; it carries no motion). The per-step delta the runner's integrator
+    expects at policy step j (the motion over [t0+j, t0+j+1]) is therefore
+    d_j = T_j^-1 T_{j+1}, which reduces to pure row algebra (R0 cancels):
+        d_j = (A_j^T (a_{j+1} - a_j), rotvec(A_j^T A_{j+1})),  j = 0 .. H-2,
+    with row 0 taken as the exact identity (a_0 = 0, A_0 = I) rather than the model's
+    noisy row-0 output. The result has H-1 rows: row j of the output is executed at
+    step j after the observation, and composing d_0..d_{j-1} with pose_compose_local
+    reproduces anchored row j exactly.
+
+    Gripper columns are per-frame targets, grip[t0+k] on row k, and the runner reads
+    a step's gripper at the START of that step (the delta-mode convention: delta row j
+    spans [t0+j, t0+j+1] and carries grip[t0+j]). So the gripper is NOT shifted:
+    output row j keeps input row j's gripper; the last input row's gripper is dropped
+    with the tail.
+
+    Until 2026-09-08 this treated row k as the pose at t0+k+1 (d_0 = row_0): a null
+    first step plus every subsequent motion executed one policy step (33 ms) late.
     """
     import numpy as _np
     ch = _np.asarray(chunk, dtype=_np.float32)
-    out = ch.copy()
+    if ch.shape[0] < 2:
+        return _np.zeros((0, ch.shape[1]), dtype=_np.float32)
+    out = ch[:-1].copy()  # gripper (and any extra) columns: row j keeps input row j
     for b in _ANCHORED_ARM_BLOCKS:
-        prev_a = _np.zeros(3)
+        prev_a = _np.zeros(3)   # row 0 is the identity by construction
         prev_A = _np.eye(3)
-        for k in range(ch.shape[0]):
+        for k in range(1, ch.shape[0]):
             a_k = ch[k, b:b + 3].astype(_np.float64)
             A_k = _rotvec_to_mat(ch[k, b + 3:b + 6])
-            out[k, b:b + 3] = (prev_A.T @ (a_k - prev_a)).astype(_np.float32)
-            out[k, b + 3:b + 6] = _mat_to_rotvec(prev_A.T @ A_k).astype(_np.float32)
+            out[k - 1, b:b + 3] = (prev_A.T @ (a_k - prev_a)).astype(_np.float32)
+            out[k - 1, b + 3:b + 6] = _mat_to_rotvec(prev_A.T @ A_k).astype(_np.float32)
             prev_a, prev_A = a_k, A_k
     return out
 
@@ -770,7 +910,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         if self.action_mode == "anchored":
             print(
                 "[flow-infer] action_mode=anchored: chunk rows are t0-anchored transforms "
-                "(UMI PD2.1); converted to per-step deltas at reception, RTC freeze re-anchored.",
+                "(UMI PD2.1, row 0 = identity); converted to H-1 per-step deltas at reception "
+                "(identity row dropped, no one-step lag), RTC freeze re-anchored at row s.",
                 file=stderr, flush=True,
             )
         self._rtc_norm_q = None
@@ -1981,6 +2122,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             if self.wrist_crop_frac > 0.0:
                 rgb = _center_crop(rgb, self.wrist_crop_frac)
             rgb = _align_principal_point(rgb, key)
+            rgb = _k_normalize(rgb, key)
             images[key] = rgb
             decode_count += 1
         if missing_count > 0 or len(images) < 2:
@@ -2066,9 +2208,14 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # One-time proof of the actual image fed to the server (HWC). With crop_frac=0.65
         # on a 480x640 fisheye this prints (312, 416, 3); uncropped it prints (480, 640, 3).
         if not getattr(self, "_logged_wrist_shape", False):
+            geom = f"(crop_frac={self.wrist_crop_frac})"
+            if _k_normalize_enabled():
+                geom += (
+                    f" k_normalize=ON virtual={_k_virtual()} crop_px={_k_crop_px()} "
+                    f"K_left={_k_infer('left')} K_right={_k_infer('right')}"
+                )
             print(
-                f"[flow-infer] sending wrist images shape={images['left'].shape} "
-                f"(crop_frac={self.wrist_crop_frac})",
+                f"[flow-infer] sending wrist images shape={images['left'].shape} {geom}",
                 file=self.stderr,
                 flush=True,
             )

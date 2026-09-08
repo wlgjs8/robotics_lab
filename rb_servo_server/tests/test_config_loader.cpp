@@ -188,7 +188,10 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_real.safety.q_max_deg[2], 165.0));
         RB_CHECK(stack_real.network.command_bind == "udp://127.0.0.1:50256");
         RB_CHECK(stack_real.network.state_pub_endpoint == "udp://127.0.0.1:50356");
-        RB_CHECK(stack_real.network.state_pub_endpoints.size() == 4);
+        // 5 since 2026-09-07: scope 50356, GUI 50366, teleop_mux 50376, flow-infer 50378,
+        // and tools/near_pairs_watch.py 50390 (live near pairs for tape checks).
+        RB_CHECK(stack_real.network.state_pub_endpoints.size() == 5);
+        RB_CHECK(stack_real.network.state_pub_endpoints.back() == "udp://127.0.0.1:50390");
         RB_CHECK(stack_real.command_source.enforce_lease);
         RB_CHECK(stack_real.network.command_source_enforce_lease);
         RB_CHECK(near(stack_real.command_source.lease_timeout_sec, 60.0));

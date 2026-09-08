@@ -94,6 +94,21 @@ fi
 echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS overlay_runway_steps=$CHUNK_OVERLAY_RUNWAY_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
 echo "[flow-infer] chunk_activation_mode=$CHUNK_ACTIVATION_MODE tcp_target_profile=$TCP_TARGET_PROFILE"
 echo "[flow-infer] policy_dt_sec=${POLICY_DT:-<runner default 0.0334>} (must match the checkpoint's action-step-frames/fps)"
+# Wrist-image geometry. This MUST match how the served checkpoint's dataset was converted:
+#   FLOW_INFER_K_NORMALIZE=1  -> every frame is remapped onto the virtual camera
+#                                FLOW_INFER_K_VIRTUAL (default 393,393,320,240), exactly as
+#                                `convert_pika_umi_storage_video.py --k-normalize` did at training
+#                                time. Required by the boltv2r6knorm* checkpoints, wrong for the
+#                                others. Needs this cell's measured per-arm K
+#                                (FLOW_INFER_K_LEFT/RIGHT='fx,fy,ppx,ppy'; fail-closed without it —
+#                                see tools/read_wrist_intrinsics.py).
+#   FLOW_INFER_CROP_PX=24,18  -> the *knormcrop* arm's extra crop (cut every edge, resize back).
+#   FLOW_INFER_PP_ALIGN=1     -> the older translation-only fix; mutually exclusive with the above.
+if [ "${FLOW_INFER_K_NORMALIZE:-0}" = "1" ]; then
+  echo "[flow-infer] k_normalize=ON virtual=${FLOW_INFER_K_VIRTUAL:-393,393,320,240} crop_px=${FLOW_INFER_CROP_PX:-<none>} K_left=${FLOW_INFER_K_LEFT:-<unset -> will fail closed>} K_right=${FLOW_INFER_K_RIGHT:-<unset -> will fail closed>}"
+else
+  echo "[flow-infer] k_normalize=off (raw wrist frames; pp_align=${FLOW_INFER_PP_ALIGN:-0})"
+fi
 echo "[flow-infer] include_depth=${INCLUDE_DEPTH} -> args:${DEPTH_ARGS[*]:-<none, RGB-only>} (must match the served checkpoint's training)"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
 

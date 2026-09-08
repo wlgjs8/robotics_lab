@@ -540,7 +540,7 @@
     <visual>
       <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
       <geometry>
-        <box size="0.307 0.324 0.295" />
+        <box size="0.307 0.324 0.28" />
       </geometry>
       <material name="env_stand_riser_material">
         <color rgba="0.2 0.2 0.21 1" />
@@ -549,14 +549,36 @@
     <collision>
       <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
       <geometry>
-        <box size="0.307 0.324 0.295" />
+        <box size="0.307 0.324 0.28" />
       </geometry>
     </collision>
   </link>
   <joint name="env_stand_riser_fixed" type="fixed">
     <parent link="stand" />
     <child link="env_stand_riser" />
-    <origin xyz="0 0.0049 -0.1625" rpy="0.0 0.0 0.0" />
+    <origin xyz="0 0.0049 -0.17" rpy="0.0 0.0 0.0" />
+  </joint>
+  <link name="env_stand_spacer">
+    <visual>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <cylinder radius="0.133" length="0.015" />
+      </geometry>
+      <material name="env_stand_spacer_material">
+        <color rgba="0.35 0.35 0.36 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <cylinder radius="0.133" length="0.015" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="env_stand_spacer_fixed" type="fixed">
+    <parent link="stand" />
+    <child link="env_stand_spacer" />
+    <origin xyz="0 0.0049 -0.0225" rpy="0.0 0.0 0.0" />
   </joint>
   <link name="env_work_table">
     <visual>

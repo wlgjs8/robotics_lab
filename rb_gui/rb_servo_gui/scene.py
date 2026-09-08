@@ -2576,6 +2576,7 @@ def _environment_visuals_from_urdf(urdf_path: Path) -> list[dict[str, Any]]:
                 entry["wxyz"] = _matrix_to_wxyz(rotation)
                 geometry = visual.find("geometry")
                 box = geometry.find("box") if geometry is not None else None
+                cylinder = geometry.find("cylinder") if geometry is not None else None
                 mesh = geometry.find("mesh") if geometry is not None else None
                 if box is not None:
                     dims = tuple(float(v) for v in (box.get("size") or "").split())
@@ -2583,13 +2584,27 @@ def _environment_visuals_from_urdf(urdf_path: Path) -> list[dict[str, Any]]:
                         raise ValueError(f"<box size=\"{box.get('size')}\">")
                     entry["shape"] = "box"
                     entry["dimensions"] = dims
+                elif cylinder is not None:
+                    # URDF cylinder: axis along local z. `dimensions` keeps the
+                    # (2r, 2r, length) bounding box so the nominal/riser-height
+                    # bookkeeping below unpacks the same way as a box.
+                    radius = float(cylinder.get("radius") or "nan")
+                    length = float(cylinder.get("length") or "nan")
+                    if not (math.isfinite(radius) and math.isfinite(length)
+                            and radius > 0.0 and length > 0.0):
+                        raise ValueError(f"<cylinder radius=\"{cylinder.get('radius')}\" "
+                                         f"length=\"{cylinder.get('length')}\">")
+                    entry["shape"] = "cylinder"
+                    entry["radius"] = radius
+                    entry["length"] = length
+                    entry["dimensions"] = (2.0 * radius, 2.0 * radius, length)
                 elif mesh is not None and mesh.get("filename"):
                     entry["shape"] = "mesh"
                     entry["mesh_path"] = (urdf_path.parent / mesh.get("filename")).resolve()
                     scale = tuple(float(v) for v in (mesh.get("scale") or "1 1 1").split())
                     entry["mesh_scale"] = scale if len(scale) == 3 else (1.0, 1.0, 1.0)
                 else:
-                    raise ValueError("no <box> or <mesh> geometry")
+                    raise ValueError("no <box>, <cylinder> or <mesh> geometry")
                 color = visual.find("material/color")
                 rgba = tuple(float(v) for v in (color.get("rgba") or "").split()) if color is not None else ()
                 entry["rgb"] = (tuple(int(round(255 * c)) for c in rgba[:3])
@@ -2599,6 +2614,31 @@ def _environment_visuals_from_urdf(urdf_path: Path) -> list[dict[str, Any]]:
                 entry["error"] = f"{type(exc).__name__}: {exc}"
             out.append(entry)
     return out
+
+
+def _cylinder_mesh(radius: float, length: float, segments: int = 48):
+    """Closed z-axis cylinder (URDF convention) as (vertices, faces) numpy arrays
+    for viser add_mesh_simple: ring of `segments` around the top and bottom caps
+    plus the two cap centres."""
+    import numpy as np
+
+    n = max(int(segments), 3)
+    ang = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    half = 0.5 * float(length)
+    r = float(radius)
+    ring = np.stack([r * np.cos(ang), r * np.sin(ang)], axis=1)
+    top = np.column_stack([ring, np.full(n, half)])
+    bottom = np.column_stack([ring, np.full(n, -half)])
+    verts = np.vstack([top, bottom, [[0.0, 0.0, half]], [[0.0, 0.0, -half]]]).astype(np.float32)
+    ct, cb = 2 * n, 2 * n + 1
+    faces = []
+    for i in range(n):
+        j = (i + 1) % n
+        faces.append([i, j, n + j])          # side, outward
+        faces.append([i, n + j, n + i])
+        faces.append([ct, i, j])             # top cap, normal +z
+        faces.append([cb, n + j, n + i])     # bottom cap, normal -z
+    return verts, np.asarray(faces, dtype=np.int32)
 
 
 def _add_environment_visuals(server: Any, handles: dict[str, Any]) -> None:
@@ -2620,6 +2660,18 @@ def _add_environment_visuals(server: Any, handles: dict[str, Any]) -> None:
                     f"/stand/{key}",
                     color=entry["rgb"],
                     dimensions=entry["dimensions"],
+                    position=entry["position"],
+                    wxyz=entry["wxyz"],
+                )
+            elif entry["shape"] == "cylinder":
+                if not hasattr(server.scene, "add_mesh_simple"):
+                    continue
+                verts, faces = _cylinder_mesh(entry["radius"], entry["length"])
+                handle = server.scene.add_mesh_simple(
+                    f"/stand/{key}",
+                    vertices=verts,
+                    faces=faces,
+                    color=entry["rgb"],
                     position=entry["position"],
                     wxyz=entry["wxyz"],
                 )

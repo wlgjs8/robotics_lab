@@ -124,13 +124,13 @@ static bool run() {
     CollisionMonitor mon(cfg);
 
     std::cout << "geoms=" << mon.numGeometries() << " pairs=" << mon.numPairs() << "\n";
-    // 45 = 11 link hulls x 2 arms + 1 single-hull gripper x 2 + 20 stand CoACD hulls
-    //      + 1 env_stand_riser.
+    // 46 = 11 link hulls x 2 arms + 1 single-hull gripper x 2 + 20 stand CoACD hulls
+    //      + 1 env_stand_riser + 1 env_stand_spacer (cylinder, 2026-09-08).
     // The riser carries a <collision> since 2026-09-06 (it is the one cell structure
     // the arms approach — 35.7 mm measured), so it is a checked stand-side geometry in
     // its own `environment` barrier class. The stand contributes hulls ONLY since
     // 2026-09-06: upstream ver1 has no primitive stand boxes (ver2's 7 went with it).
-    RB_CHECK(mon.numGeometries() == 45);  // see the breakdown in runArticulatedGripper
+    RB_CHECK(mon.numGeometries() == 46);  // see the breakdown in runArticulatedGripper
     RB_CHECK(mon.numPairs() > 0);
 
     {
@@ -990,16 +990,16 @@ static bool runArticulatedGripper() {
     // RB5-850E, derived rather than guessed:
     //   per arm  11 link hulls (link0,1,4,5,6 single + link2,link3 CoACD x3)
     //          +  3 gripper (base + 2 fingers)                    = 14
-    //   stand    20 CoACD hulls + 1 env_stand_riser               = 21
-    //   total    14 x 2 + 21                                      = 49
-    // The single-hull baseline replaces the 3 gripper geoms with 1, so 45.
+    //   stand    20 CoACD hulls + 1 env_stand_riser + 1 env_stand_spacer = 22
+    //   total    14 x 2 + 22                                      = 50
+    // The single-hull baseline replaces the 3 gripper geoms with 1, so 46.
     // The gripper bolts straight to the flange -- the F/T sensor is inside
     // pika_gripper.STL, not a separate body (docs/reference/pika_tool_geometry.md).
     // The stand is hulls ONLY since the 2026-09-06 ver2 -> ver1 switch: upstream ver1
     // ships no primitive stand boxes, and its raw stand mesh is dropped by the
     // generator because a non-convex BVH blows the per-eval budget.
     std::cout << "articulated geoms=" << mon.numGeometries() << "\n";
-    RB_CHECK(mon.numGeometries() == 49);
+    RB_CHECK(mon.numGeometries() == 50);
 
     const JointArray init = kInitPose;
     auto fingerClears = [](const CollisionVerdict& v) {

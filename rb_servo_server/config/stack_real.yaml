@@ -648,7 +648,7 @@ safety:
     # by its own note above, cannot catch the first-contact transient -- plus operator
     # supervision and the E-stop. safety.SafetyVerdict::ExternalForceLimit exists in
     # the enum but is raised NOWHERE in the server, so do not count on it.
-    min_m: [0.300, -0.400, -0.400]
+    min_m: [0.200, -0.400, -0.330]
     max_m: [1.100, 0.400, 0.590]
     # runtime_* is the envelope a RUNTIME SetRoiBounds may move the box within, and it
     # is what rb_gui derives its slider limits from. z_min was -0.2 m, so the GUI could
@@ -1055,6 +1055,9 @@ safety:
       # a_brake at 3.0 would need 0.085 and the loader refuses to start -- which is how
       # this was caught. If a_brake is ever lowered, widen d_slow with it.
       #
+      # 2026-09-08: the riser TOP moved 15 mm down (-15 -> -30, a circular spacer sits
+      # under the plate; make_rb5_850e_urdfs.py ENVIRONMENT note). The closest-approach
+      # figures below were taken against the old top and are ~15 mm larger now.
       # 2026-09-07: 25/67 -> 20/62 (operator request, with the self set). The riser
       # box is an 8-contact mesh fit, rms 2.50 mm, whose 3.3 mm arm-to-arm bias term
       # is now ~1 mm after the mount calibration (b5ac8c5), so its position
@@ -1208,6 +1211,7 @@ network:
     - "udp://127.0.0.1:50366"  # viser GUI
     - "udp://127.0.0.1:50376"  # make run teleop_mux policy_runner
     - "udp://127.0.0.1:50378"  # external flow-infer readback alongside make run
+    - "udp://127.0.0.1:50390"  # rb_servo_server/tools/near_pairs_watch.py (2026-09-07): live near pairs + witness points for tape checks (50380 is the UMI pose port)
   state_pub_rate_hz: 100   # default publish rate for gui/scope/policy/flow/camera consumers. Temporarily raise to 500 only for PlotJuggler 500 Hz command-stream debugging (watch send_period_overrun / send_deadline_hit).
   command_source_allowlist: ["127.0.0.1/32"]
 
