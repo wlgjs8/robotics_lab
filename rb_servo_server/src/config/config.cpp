@@ -280,20 +280,27 @@ void parseFollowerOutputSmdConfig(
 void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path,
                                  PreviewExecutionConfig* out) {
     validateAllowedKeys(node, {"enable", "tracker", "cursor", "recovery", "replan_period_sec",
-        "splice_lead_sec", "max_result_age_sec", "worker_poll_period_sec", "max_source_rows"}, path);
+        "splice_lead_sec", "max_result_age_sec", "worker_poll_period_sec", "max_source_rows",
+        "dispatch_acceptance_position_tolerance_m", "dispatch_acceptance_rotation_tolerance_rad",
+        "max_plan_lead_m"}, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
     const auto require = [](const YAML::Node& section, const char* key, const std::string& at) {
         if (!has(section, key)) fail(at + "." + key + " is required when preview_execution.enable=true", section);
     };
     if (out->enable) {
         for (const char* key : {"tracker", "cursor", "replan_period_sec", "splice_lead_sec",
-                               "max_result_age_sec", "worker_poll_period_sec", "max_source_rows"})
+                               "max_result_age_sec", "worker_poll_period_sec", "max_source_rows",
+                               "dispatch_acceptance_position_tolerance_m",
+                               "dispatch_acceptance_rotation_tolerance_rad", "max_plan_lead_m"})
             require(node, key, path);
     }
     for (const auto& field : std::vector<std::pair<const char*, double*>>{
              {"replan_period_sec", &out->replan_period_sec}, {"splice_lead_sec", &out->splice_lead_sec},
              {"max_result_age_sec", &out->max_result_age_sec},
-             {"worker_poll_period_sec", &out->worker_poll_period_sec}}) {
+             {"worker_poll_period_sec", &out->worker_poll_period_sec},
+             {"dispatch_acceptance_position_tolerance_m", &out->dispatch_acceptance_position_tolerance_m},
+             {"dispatch_acceptance_rotation_tolerance_rad", &out->dispatch_acceptance_rotation_tolerance_rad},
+             {"max_plan_lead_m", &out->max_plan_lead_m}}) {
         if (has(node, field.first)) *field.second = asDouble(node[field.first], path + "." + field.first);
     }
     if (has(node, "max_source_rows")) out->max_source_rows = asInt(node["max_source_rows"], path + ".max_source_rows");
@@ -302,6 +309,7 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
         const auto at = path + ".tracker";
         validateAllowedKeys(sec, {"planning_dt_sec", "horizon_steps", "linear_tracking_scale_m",
             "angular_tracking_scale_rad", "jerk_weight", "jerk_difference_weight",
+            "reference_trust_full_sec", "reference_trust_tail_sec", "reference_trust_tail",
             "linear_tracking_tolerance_m", "angular_tracking_tolerance_rad",
             "max_linear_tracking_slack_m", "max_angular_tracking_slack_rad",
             "max_reference_chart_angle_rad", "feasibility_tolerance",
@@ -311,6 +319,9 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
                  {"planning_dt_sec", &t.planning_dt_sec}, {"linear_tracking_scale_m", &t.linear_tracking_scale_m},
                  {"angular_tracking_scale_rad", &t.angular_tracking_scale_rad}, {"jerk_weight", &t.jerk_weight},
                  {"jerk_difference_weight", &t.jerk_difference_weight},
+                 {"reference_trust_full_sec", &t.reference_trust_full_sec},
+                 {"reference_trust_tail_sec", &t.reference_trust_tail_sec},
+                 {"reference_trust_tail", &t.reference_trust_tail},
                  {"linear_tracking_tolerance_m", &t.linear_tracking_tolerance_m},
                  {"angular_tracking_tolerance_rad", &t.angular_tracking_tolerance_rad},
                  {"max_linear_tracking_slack_m", &t.max_linear_tracking_slack_m},
@@ -2605,6 +2616,7 @@ void validateConfig(const DualArmConfig& cfg) {
                 validatePositiveFinite(fc.gate_stream_arm_force_n, "force_control.force_gate.stream_arm_force_n");
                 validatePositiveFinite(fc.gate_stream_release_force_n, "force_control.force_gate.stream_release_force_n");
                 validateNonNegativeFinite(fc.gate_stream_arm_dwell_sec, "force_control.force_gate.stream_arm_dwell_sec");
+                validateNonNegativeFinite(fc.gate_stream_release_dwell_sec, "force_control.force_gate.stream_release_dwell_sec");
                 if (fc.gate_stream_release_force_n >= fc.gate_stream_arm_force_n) {
                     throw std::runtime_error(
                         "force_control.force_gate.stream_release_force_n must be < stream_arm_force_n - "
@@ -2789,6 +2801,9 @@ void validateConfig(const DualArmConfig& cfg) {
             positive(p.splice_lead_sec, "splice_lead_sec");
             positive(p.max_result_age_sec, "max_result_age_sec");
             positive(p.worker_poll_period_sec, "worker_poll_period_sec");
+            positive(p.max_plan_lead_m, "max_plan_lead_m");
+            positive(p.dispatch_acceptance_position_tolerance_m, "dispatch_acceptance_position_tolerance_m");
+            positive(p.dispatch_acceptance_rotation_tolerance_rad, "dispatch_acceptance_rotation_tolerance_rad");
             positive(t.planning_dt_sec, "tracker.planning_dt_sec");
             positive(t.linear_tracking_scale_m, "tracker.linear_tracking_scale_m");
             positive(t.angular_tracking_scale_rad, "tracker.angular_tracking_scale_rad");
@@ -2801,6 +2816,12 @@ void validateConfig(const DualArmConfig& cfg) {
             positive(t.max_reference_chart_angle_rad, "tracker.max_reference_chart_angle_rad");
             positive(t.feasibility_tolerance, "tracker.feasibility_tolerance");
             positive(t.max_solve_time_sec, "tracker.max_solve_time_sec");
+            nonnegative(t.reference_trust_full_sec, "tracker.reference_trust_full_sec");
+            if (!(t.reference_trust_tail_sec > t.reference_trust_full_sec) ||
+                !std::isfinite(t.reference_trust_tail_sec))
+                throw std::runtime_error(at + ".tracker.reference_trust_tail_sec must be finite and > reference_trust_full_sec");
+            if (!(t.reference_trust_tail > 0.0) || !(t.reference_trust_tail < 1.0))
+                throw std::runtime_error(at + ".tracker.reference_trust_tail must be in (0, 1)");
             const double servo_period = 1.0 / cfg.servo.rate_hz;
             const double horizon = t.horizon_steps * t.planning_dt_sec;
             if (t.horizon_steps < 1 || t.horizon_steps > control::PreviewTrajectoryTracker::kMaxHorizonSteps ||
@@ -4798,7 +4819,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             const YAML::Node g = sec["force_gate"];
             validateAllowedKeys(g, {"enable", "max_force_n", "max_torque_nm", "close_tau_s", "open_tau_s",
                                     "stream_judge_lpf_hz", "stream_arm_force_n", "stream_release_force_n",
-                                    "stream_arm_dwell_sec"},
+                                    "stream_arm_dwell_sec", "stream_release_dwell_sec"},
                                 "force_control.force_gate");
             if (has(g, "enable")) fc.gate_enable = asBool(g["enable"], "force_control.force_gate.enable");
             if (has(g, "max_force_n")) fc.gate_max_force_n = asDouble(g["max_force_n"], "force_control.force_gate.max_force_n");
@@ -4809,6 +4830,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(g, "stream_arm_force_n")) fc.gate_stream_arm_force_n = asDouble(g["stream_arm_force_n"], "force_control.force_gate.stream_arm_force_n");
             if (has(g, "stream_release_force_n")) fc.gate_stream_release_force_n = asDouble(g["stream_release_force_n"], "force_control.force_gate.stream_release_force_n");
             if (has(g, "stream_arm_dwell_sec")) fc.gate_stream_arm_dwell_sec = asDouble(g["stream_arm_dwell_sec"], "force_control.force_gate.stream_arm_dwell_sec");
+            if (has(g, "stream_release_dwell_sec")) fc.gate_stream_release_dwell_sec = asDouble(g["stream_release_dwell_sec"], "force_control.force_gate.stream_release_dwell_sec");
         }
         if (has(sec, "max_deviation_m")) fc.max_deviation_m = asDouble(sec["max_deviation_m"], "force_control.max_deviation_m");
         if (has(sec, "max_deviation_rad")) fc.max_deviation_rad = asDouble(sec["max_deviation_rad"], "force_control.max_deviation_rad");

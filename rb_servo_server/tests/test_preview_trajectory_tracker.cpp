@@ -55,6 +55,7 @@ PreviewTrackerConfig config() {
   c.linear_tracking_tolerance_m=.02; c.angular_tracking_tolerance_rad=.08;
   c.max_linear_tracking_slack_m=.08; c.max_angular_tracking_slack_rad=.25;
   c.max_reference_chart_angle_rad=1.; c.feasibility_tolerance=1e-7;
+  c.reference_trust_full_sec=.13; c.reference_trust_tail_sec=.24; c.reference_trust_tail=.1;
   c.max_solve_time_sec=.5; c.max_working_set_recalculations=300;
   return c;
 }
@@ -444,6 +445,104 @@ int benchmarkCoupled() {
 } // namespace
 
 
+bool testUncommittedReferenceTrust() {
+  // 2026-09-10: a reference that follows the committed rows and then runs away in its
+  // tail is what a policy chunk looks like under a hand push (servo_log_20260910_162808
+  // @88 s: rows 0-2 = 0.5 mm/step, rows 10-19 = 30-100 mm). Past the committed window
+  // the target is blended toward that window's own constant-velocity continuation, so
+  // the plan stops setting off after a future the next inference may withdraw.
+  // The deployed objective (jerk_weight 2000 against a 10 mm tracking scale) is what
+  // smears a far demand backwards into the present; the struct default 0.02 would
+  // simply cover it late.
+  auto blended=config();
+  blended.jerk_weight=2000.;blended.jerk_difference_weight=.01;
+  blended.linear_tracking_scale_m=.01;blended.angular_tracking_scale_rad=.03;
+  auto trusting=blended;
+  // A tail far beyond the horizon is how "trust the whole reference" is written.
+  trusting.reference_trust_full_sec=.13;trusting.reference_trust_tail_sec=10.;trusting.reference_trust_tail=.99;
+  const double hold=.13;
+  const auto tail_runaway=reference([&](double t) {
+    const double s=std::max(0.,t-hold);
+    return pose({.030*s*s/((.24-hold)*(.24-hold)),0.,0.});   // 0 until 0.13 s, 30 mm at 0.24 s
+  });
+  PreviewMotionState rest;rest.pose=pose({0.,0.,0.});
+  // THE METRIC IS THE LEAD OVER THE COMMITTED REFERENCE, which is what ran away on
+  // hardware: the command sat 26-45 mm ahead of the follower's own output.
+  double lead[2]={0,0},lead_speed[2]={0,0},reach[2]={0,0},slack[2]={0,0};
+  for(int i=0;i<2;++i) {
+    PreviewTrajectoryTracker tracker(i?blended:trusting);
+    const auto solved=tracker.plan(tail_runaway,rest);CHECK(accepted(solved));
+    slack[i]=solved.diagnostics.max_position_tracking_slack_m;
+    PreviewMotionSample committed,end;
+    CHECK(tracker.sample(hold,committed));CHECK(tracker.sample(.24,end));
+    lead[i]=committed.pose.x;                 // the committed reference is 0 here
+    lead_speed[i]=committed.linear_velocity.x();reach[i]=end.pose.x;
+  }
+  if(std::getenv("RB_TRUST_SWEEP")) {
+    for(auto pair:std::vector<std::pair<double,double>>{{.13,.3},{.13,.1},{.13,.03},{.10,.1},{.07,.05}}) {
+      auto c=blended;c.reference_trust_full_sec=pair.first;c.reference_trust_tail=pair.second;
+      PreviewTrajectoryTracker tr(c);const auto r=tr.plan(tail_runaway,rest);
+      PreviewMotionSample cm,en;tr.sample(hold,cm);tr.sample(.24,en);
+      std::cout<<"    sweep full="<<pair.first<<" tail="<<pair.second<<" accepted="<<r.accepted()
+               <<" lead="<<cm.pose.x*1e3<<" mm v="<<cm.linear_velocity.x()*1e3<<" mm/s reach="<<en.pose.x*1e3
+               <<" mm slack="<<r.diagnostics.max_position_tracking_slack_m*1e3<<" mm\n";
+    }
+  }
+  std::cout<<"  tail runaway: trusting lead(0.13 s)="<<lead[0]*1e3<<" mm v="<<lead_speed[0]*1e3
+           <<" mm/s reach(0.24 s)="<<reach[0]*1e3<<" mm | blended lead="<<lead[1]*1e3
+           <<" mm v="<<lead_speed[1]*1e3<<" mm/s reach="<<reach[1]*1e3<<" mm\n";
+  CHECK(lead[0]>.002);                          // full trust really does run ahead
+  CHECK(lead[1]<.6*lead[0]);
+  CHECK(lead_speed[1]<.6*lead_speed[0]);
+  CHECK(reach[1]>0. && reach[1]<.6*reach[0]);   // still moves that way, far less of it
+  // AND IT COSTS NO ACCEPTANCE HEADROOM, because acceptance scores the plan against the
+  // same blended target it was asked to track. Scoring against the raw reference
+  // charged the plan 6.5 mm of slack here for obeying the trust curve, and rejected 4
+  // plans outright during a 1.5 s floor contact on hardware (servo_log_20260910_172712).
+  std::cout<<"  tail runaway slack: trusting="<<slack[0]*1e3<<" mm blended="<<slack[1]*1e3
+           <<" mm (budget "<<blended.max_linear_tracking_slack_m*1e3<<" mm)\n";
+  CHECK(slack[0]==0. && slack[1]==0.);
+  // A STEADY REFERENCE IS EXACTLY UNCHANGED. Its own constant-velocity continuation is
+  // itself, so ordinary free-space tracking cannot be altered by this blend at all.
+  {
+    PreviewMotionState moving;moving.pose=pose({.4,-.2,.1});
+    moving.linear_velocity={.12,-.04,.03};moving.angular_velocity_body={.1,.03,-.04};
+    const Eigen::Vector3d p0(moving.pose.x,moving.pose.y,moving.pose.z);
+    const auto steady=reference([&](double t){return pose(p0+moving.linear_velocity*t,moving.angular_velocity_body*t);});
+    PreviewTrajectoryTracker f(trusting),d(blended);
+    CHECK(accepted(f.plan(steady,moving)));CHECK(accepted(d.plan(steady,moving)));
+    for(int k=0;k<=120;++k) {
+      PreviewMotionSample a,b;const double t=.002*k;
+      CHECK(f.sample(t,a));CHECK(d.sample(t,b));
+      CHECK(sameState(a,b,1e-9));
+    }
+  }
+  // COMMITTED-WINDOW TRACKING IS NEVER DEGRADED. A demand that lives entirely inside
+  // the committed window (a ramp to 26 mm by 0.13 s, held after) is tracked at least
+  // as well: the uncommitted tail no longer pulls the compromise away from the rows
+  // the policy did commit to.
+  const auto near_ramp=reference([](double t){return pose({.2*std::min(t,.13),0.,0.});});
+  PreviewMotionSample a,b;
+  {
+    PreviewTrajectoryTracker f(trusting);CHECK(accepted(f.plan(near_ramp,rest)));CHECK(f.sample(.13,a));
+    PreviewTrajectoryTracker d(blended);CHECK(accepted(d.plan(near_ramp,rest)));CHECK(d.sample(.13,b));
+  }
+  const double target=.2*.13;
+  std::cout<<"  near ramp at 0.13 s: reference="<<target*1e3<<" mm trusting x="<<a.pose.x*1e3
+           <<" mm blended x="<<b.pose.x*1e3<<" mm\n";
+  CHECK(std::abs(b.pose.x-target)<=std::abs(a.pose.x-target)+1e-9);
+  // The blend is a target, never an authority: an invalid trust curve is refused.
+  for(auto broken:{[]{auto c=config();c.reference_trust_tail_sec=c.reference_trust_full_sec;return c;}(),
+                   []{auto c=config();c.reference_trust_tail=1.;return c;}(),
+                   []{auto c=config();c.reference_trust_tail=0.;return c;}(),
+                   []{auto c=config();c.reference_trust_full_sec=-1.;return c;}()}) {
+    bool threw=false;
+    try { PreviewTrajectoryTracker tracker(broken); } catch(const std::invalid_argument&) { threw=true; }
+    CHECK(threw);
+  }
+  return true;
+}
+
 int main(int argc,char** argv) {
   if(argc==2 && std::string(argv[1])=="--benchmark") return benchmark();
   if(argc==2 && std::string(argv[1])=="--benchmark-coupled") return benchmarkCoupled();
@@ -454,7 +553,8 @@ int main(int argc,char** argv) {
       {"fail closed and preserve previous plan",testFailClosedAndOldPlanPreserved},
       {"angular norm authority and rebased splice",testAngularNormAuthorityAndRebasedSplice},
       {"jerk objective and sampler allocation",testJerkRegularizationAndSamplerAllocation},
-      {"initial tolerance preserves unmodified splice",testInitialTolerancePreservesSplice}};
+      {"initial tolerance preserves unmodified splice",testInitialTolerancePreservesSplice},
+      {"uncommitted reference trust",testUncommittedReferenceTrust}};
   try {
     for(const auto& test:tests) { if(!test.second()) return 1; std::cout << "PASS " << test.first << '\n'; }
   } catch(const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

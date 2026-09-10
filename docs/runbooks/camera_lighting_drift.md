@@ -99,9 +99,15 @@ Prepend to the tracked launch line (see the daily `~/NNNN VLA` notes):
 
 ```bash
 FLOW_INFER_DIAGNOSTIC_IMAGES=/home/plaif/workspace/robotics_lab/logs/flow_obs_am \
-FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_BUNDLES=20000 \
 ... ./tools/flow_infer_sweep_run.sh <model> --proprio-mode velocity_grip
 ```
+
+That captures the run's first 60 s by default. For a whole rollout add
+`FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_SECONDS=900` (or an explicit
+`FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_BUNDLES`); either one replaces the default.
+The 60 s default exists because the previous 120-bundle default captured only
+~12 s — on 2026-09-10 every run directory held exactly 120 pairs, all from the
+approach phase, so the descent being diagnosed was never in frame.
 
 Each run lands in its own `logs/flow_obs_am/run_<timestamp>` child (the explicit
 path is the parent; `auto` names it `logs/flow_obs_<timestamp>` instead), and the

@@ -160,6 +160,9 @@ struct PreviewTrajectoryTracker::Impl {
   Matrix angular_norm_cuts;
   Vector angular_norm_upper;
   double angular_objective_scale{1.0};
+  // e-folding time of the raw reference's share past the committed window (see
+  // PreviewTrackerConfig). Objective-neutral: it moves the target, never the Hessian.
+  double reference_trust_tau{0.0};
   Eigen::LLT<Matrix> translation_factor;
   Matrix unconstrained_translation;
   Axes velocity_limit, acceleration_limit, jerk_limit;
@@ -179,6 +182,10 @@ struct PreviewTrajectoryTracker::Impl {
         !positive(cfg.max_reference_chart_angle_rad) || cfg.max_reference_chart_angle_rad > 1.4 ||
         !positive(cfg.feasibility_tolerance) || cfg.feasibility_tolerance > 1e-4 ||
         cfg.max_working_set_recalculations < 1 || cfg.max_working_set_recalculations > 1000 ||
+        !nonnegative(cfg.reference_trust_full_sec) ||
+        !(cfg.reference_trust_tail_sec > cfg.reference_trust_full_sec) ||
+        !std::isfinite(cfg.reference_trust_tail_sec) ||
+        !positive(cfg.reference_trust_tail) || cfg.reference_trust_tail >= 1.0 ||
         !positive(cfg.max_solve_time_sec)) throw std::invalid_argument("Invalid preview tracker configuration");
     const double V = cfg.max_angular_velocity_rad_s;
     // Jr = integral_0^1 exp(-s*phi) ds gives ||Jr||<=1,
@@ -201,6 +208,10 @@ struct PreviewTrajectoryTracker::Impl {
     // This inscribed jerk cube still certifies the same chart jerk norm J.
     jerk_limit.tail<3>().setConstant(J/std::sqrt(3.0));
     const double h = cfg.planning_dt_sec;
+    // w(t) = 1 for t <= full, exp(-(t-full)/tau) after, with tau fixed by the
+    // (tail_sec, tail) pair.
+    reference_trust_tau=(cfg.reference_trust_tail_sec-cfg.reference_trust_full_sec)/
+        std::log(1.0/cfg.reference_trust_tail);
     for (int axis = 0; axis < 6; ++axis) {
       auto& q = axes[axis];
       q.prediction = Matrix::Zero(n,n); q.C = Matrix::Zero(3*n,n);
@@ -490,12 +501,53 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
     if(excess>cfg.feasibility_tolerance)return finish(PreviewSolveStatus::Infeasible);
   }
   const double h=cfg.planning_dt_sec;
-  Eigen::Matrix<double,kCapacity,6,Eigen::RowMajor> targets;
-  for(int k=0;k<x.n;++k) {
-    const Pose6D pose=referenceAt(ref,(k+1)*h);
-    targets.row(k).head<3>()=position(pose).transpose();
-    targets.row(k).tail<3>()=math::log3(R0.transpose()*math::rotationFromPose(pose)).transpose();
+  // REFERENCE TRUST (see PreviewTrackerConfig): past the committed window the target is
+  // blended toward the constant-velocity continuation of that window, so an uncommitted
+  // far demand no longer dictates today's acceleration. A steady reference continues
+  // into itself, so this is exactly a no-op for it. ONE closure serves both consumers --
+  // the QP's knots and the dense acceptance below -- so the plan is scored against
+  // exactly the reference it was asked to follow (scoring it against the raw reference
+  // instead spent tracking budget on the lag the blend deliberately introduces: 4
+  // tracking_budget_exceeded rejections in one 1.5 s floor contact,
+  // servo_log_20260910_172712 @28.4 s).
+  const double trust_full=cfg.reference_trust_full_sec;
+  const auto chart_of=[&](const Pose6D& p) {
+    Axes v;
+    v.head<3>()=position(p);
+    v.tail<3>()=math::log3(R0.transpose()*math::rotationFromPose(p));
+    return v;
+  };
+  Axes trust_anchor=start_p, trust_slope=start_v;
+  double trust_anchor_time=0.0;
+  if(trust_full>=h) {
+    trust_anchor=chart_of(referenceAt(ref,trust_full));
+    trust_anchor_time=trust_full;
+    trust_slope=(trust_anchor-chart_of(referenceAt(ref,trust_full-h)))/h;
   }
+  const auto target_at=[&](double t) {
+    Axes raw=chart_of(referenceAt(ref,t));
+    if(t<=trust_full)return raw;
+    Axes continuation=trust_anchor+trust_slope*(t-trust_anchor_time);
+    // The chart is only linearized out to max_reference_chart_angle_rad and every raw
+    // knot was validated against it; hold the continuation to the same ball so the
+    // blend (a convex combination) cannot leave it either.
+    const double angle=continuation.tail<3>().norm();
+    if(angle>cfg.max_reference_chart_angle_rad)
+      continuation.tail<3>()*=cfg.max_reference_chart_angle_rad/angle;
+    // A STEADY REFERENCE IS RETURNED UNTOUCHED, BIT FOR BIT. Its own continuation is
+    // itself, so the blend is analytically a no-op -- but only analytically: log3 and
+    // the knot interpolation leave a ~1e-16 residue, and the angular cutting-plane
+    // solve for a demand sitting ON the 1.4 rad/s ball is sensitive to exactly that
+    // (measured 2026-09-10 on the rebased-splice case: 348 -> 557 planes and the
+    // iteration cap, from a 1e-16 change in the target and nothing else). The
+    // threshold is 1 pm / 1 prad -- far below anything physical, far above the residue.
+    const Axes delta=continuation-raw;
+    if(delta.squaredNorm()<=1e-24)return raw;
+    const double w=std::exp(-(t-trust_full)/x.reference_trust_tau);
+    return Axes(raw+(1.0-w)*delta);
+  };
+  Eigen::Matrix<double,kCapacity,6,Eigen::RowMajor> targets;
+  for(int k=0;k<x.n;++k) targets.row(k)=target_at((k+1)*h).transpose();
   Trajectory candidate;
   candidate.count = static_cast<std::size_t>(x.n);
   candidate.step_sec = h;
@@ -838,7 +890,9 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
     d.max_angular_velocity_norm=std::max(d.max_angular_velocity_norm,state.angular_velocity_body.norm());
     d.max_angular_acceleration_norm=std::max(d.max_angular_acceleration_norm,state.angular_acceleration_body.norm());
     d.max_angular_jerk_norm=std::max(d.max_angular_jerk_norm,state.angular_jerk_stand.norm());
-    const Pose6D target=referenceAt(ref,t);
+    const Axes blended=target_at(t);
+    const Pose6D target=math::poseFromSe3(pinocchio::SE3(
+        Eigen::Matrix3d(R0*math::exp3(blended.tail<3>())),Eigen::Vector3d(blended.head<3>())));
     d.max_position_tracking_error_m=std::max(d.max_position_tracking_error_m,math::positionDistance(state.pose,target));
     d.max_orientation_tracking_error_rad=std::max(d.max_orientation_tracking_error_rad,math::orientationDistanceRad(state.pose,target));
     if(authority.enabled) {

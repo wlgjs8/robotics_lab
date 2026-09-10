@@ -48,13 +48,16 @@ int main() {
     CHECK(p.tracker.max_angular_jerk_rad_s3 == preview->max_angular_jerk_rad_s3);
     CHECK(cfg.cartesian_control.tcp_pose_target_profile_default != "flow_infer_preview");
     for (const char* key : {"replan_period_sec", "splice_lead_sec", "max_result_age_sec",
-                            "worker_poll_period_sec", "max_source_rows", "tracker", "cursor"}) {
+                            "worker_poll_period_sec", "max_source_rows", "tracker", "cursor",
+                            "dispatch_acceptance_position_tolerance_m",
+                            "dispatch_acceptance_rotation_tolerance_rad"}) {
         auto root = YAML::LoadFile(stack.string());
         follower(root)["preview_execution"].remove(key);
         CHECK(rejects(root, std::string(key) + " is required"));
     }
     const char* tracker_keys[] = {"planning_dt_sec", "horizon_steps", "linear_tracking_scale_m",
         "angular_tracking_scale_rad", "jerk_weight", "jerk_difference_weight",
+        "reference_trust_full_sec", "reference_trust_tail_sec", "reference_trust_tail",
         "linear_tracking_tolerance_m", "angular_tracking_tolerance_rad",
         "max_linear_tracking_slack_m", "max_angular_tracking_slack_rad",
         "max_reference_chart_angle_rad", "feasibility_tolerance",
@@ -94,7 +97,8 @@ int main() {
         follower(root)["preview_execution"]["max_source_rows"] = count;
         CHECK(rejects(root, "max_source_rows"));
     }
-    for (const char* key : {"replan_period_sec", "splice_lead_sec", "max_result_age_sec", "worker_poll_period_sec"}) {
+    for (const char* key : {"replan_period_sec", "splice_lead_sec", "max_result_age_sec", "worker_poll_period_sec",
+                            "dispatch_acceptance_position_tolerance_m", "dispatch_acceptance_rotation_tolerance_rad"}) {
         auto root = YAML::LoadFile(stack.string());
         follower(root)["preview_execution"][key] = YAML::Load(".nan");
         CHECK(rejects(root, key));

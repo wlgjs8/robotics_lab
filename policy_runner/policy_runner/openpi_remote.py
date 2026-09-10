@@ -1059,7 +1059,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         if snapshot_state["enabled"]:
             print(
                 f"[flow-infer] rgb snapshots -> {snapshot_state['directory']} "
-                f"(max_bundles={snapshot_state['max_bundles']})",
+                f"({self._diagnostic_image_writer.budget_description()})",
                 file=self.stderr,
                 flush=True,
             )

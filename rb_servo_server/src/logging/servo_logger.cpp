@@ -150,7 +150,8 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
             "source_wire_seq","source_recv_seq","backlog_sec","rate","plan_age_sec",
             "accepted_position_error_m","accepted_rotation_error_rad","solve_time_sec",
             "submitted","accepted","rejected","expired","contact_guard_count",
-            "contact_clamp_count","contact_clamp_active","contact_clamp_shift_m"})
+            "contact_clamp_count","contact_clamp_active","contact_clamp_shift_m","plan_leash_count",
+            "plan_leash_shift_m"})
         os << ',' << side << "_preview_execution_" << field;
     writePreviewDiagnosticsHeader(os, side);
     os << ',' << side << "_tcp_target_profile"
@@ -1198,7 +1199,8 @@ void writeArmProfilingColumns(
        << ',' << p.solve_time_sec << ',' << p.submitted << ',' << p.accepted
        << ',' << p.rejected << ',' << p.expired << ',' << p.contact_guard_count
        << ',' << p.contact_clamp_count << ',' << (p.contact_clamp_active ? 1 : 0)
-       << ',' << p.contact_clamp_shift_m;
+       << ',' << p.contact_clamp_shift_m << ',' << p.plan_leash_count
+       << ',' << p.plan_leash_shift_m;
     writePreviewDiagnosticsColumns(os, p);
     os << ',' << csvEscape(telemetry.tcp_target_profile)
        << ',' << (telemetry.tcp_target_profile_found ? 1 : 0)

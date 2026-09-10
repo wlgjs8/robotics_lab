@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -45,8 +46,49 @@ class CameraDiagnosticsTest(unittest.TestCase):
             clear=True,
         ):
             writer = BackgroundRgbSnapshotWriter()
-        self.assertEqual(writer.snapshot()["max_bundles"], 120)
+        snapshot = writer.snapshot()
+        self.assertIsNone(snapshot["max_bundles"])
+        self.assertEqual(snapshot["max_seconds"], 60.0)
         writer.close()
+
+    def test_default_budget_is_sixty_seconds_not_a_bundle_count(self) -> None:
+        with mock.patch.dict("os.environ", {"FLOW_INFER_DIAGNOSTIC_IMAGES": "off"}, clear=True):
+            writer = BackgroundRgbSnapshotWriter()
+        self.assertIsNone(writer.max_bundles)
+        self.assertEqual(writer.max_seconds, 60.0)
+        writer.close()
+
+    def test_an_explicit_bundle_cap_replaces_the_duration_default(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "FLOW_INFER_DIAGNOSTIC_IMAGES": "off",
+                "FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_BUNDLES": "20000",
+            },
+            clear=True,
+        ):
+            writer = BackgroundRgbSnapshotWriter()
+        self.assertEqual(writer.max_bundles, 20000)
+        self.assertIsNone(writer.max_seconds)
+        writer.close()
+
+    def test_duration_budget_stops_submissions_after_the_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = BackgroundRgbSnapshotWriter(tmp, max_seconds=0.05)
+            images = {
+                "left": np.full((8, 10, 3), 20, dtype=np.uint8),
+                "right": np.full((8, 10, 3), 220, dtype=np.uint8),
+            }
+            writer.submit(1, images)
+            time.sleep(0.08)
+            writer.submit(2, images)
+            writer.close()
+            snapshot = writer.snapshot()
+            self.assertEqual(snapshot["written_bundles"], 1)
+            self.assertEqual(snapshot["cap_drops"], 1)
+            run_dir = Path(str(snapshot["directory"]))
+            self.assertTrue((run_dir / "bundle_0000000001_left.jpg").is_file())
+            self.assertFalse((run_dir / "bundle_0000000002_left.jpg").is_file())
 
     def test_snapshot_writer_saves_post_crop_pair_and_counts_cap_drop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

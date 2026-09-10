@@ -1718,10 +1718,13 @@ bool testSpringlessLawRequiresTheFold() {
         RB_CHECK(cfg.force_control.gate_enable);
         RB_CHECK(cfg.force_control.hold_compliance);
         for (int i = 0; i < 3; ++i) {
-            // 2026-09-07: both laws are pure dampers (no spring, no bounce-back); the
-            // deviation is folded into the plan every tick and the force gate, not a
-            // spring, is what bounds the contact force. (2026-09-04 had k = 400 under
-            // the gate; that spring is what the fold could never be legal with.)
+            // 2026-09-10 (evening): both laws are pure dampers again. The requirement is
+            // YIELD-AND-STAY (a force drags the arm, it stays, the policy re-plans from
+            // there), and a spring returns the arm instead - measured 37 mm out and
+            // 238 mm/s back on the right arm. k = 0 + the fold makes plan == where the
+            // arm is, so no offset accumulates. The force is then a 2..10 N band; a
+            // designed force needs ref_force. What replaced the spring's job on the
+            // floor: the complete into-contact hold-back and the preview plan leash.
             RB_CHECK(cfg.force_control.stream.translation[i].k == 0.0);
             RB_CHECK(cfg.force_control.stream.rotation[i].k == 0.0);
             RB_CHECK(cfg.force_control.hold.translation[i].k == 0.0);

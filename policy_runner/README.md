@@ -483,9 +483,18 @@ or an explicit path:
 
 ```bash
 FLOW_INFER_DIAGNOSTIC_IMAGES=auto \
-FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_BUNDLES=120 \
 ./tools/flow_infer_real_policy.sh ...
 ```
+
+The default budget is the run's **first 60 seconds**
+(`FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_SECONDS`, timed from the first frame so model
+load and camera preflight do not spend it). It replaced a 120-bundle count,
+which was only ~12 s at the measured ~10 Hz inference rate — too short to
+contain the phase being diagnosed. Setting either
+`FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_BUNDLES` or
+`FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_SECONDS` replaces that default; set both and
+whichever runs out first stops the capture. At 640x480 JPEG95 the cost is about
+270 kB per bundle pair, so a 60 s default is roughly 160 MB per run.
 
 Every run gets its OWN directory, whichever form is used: `auto` writes under
 `logs/flow_obs_<timestamp>`, and an explicit path is treated as the parent, with

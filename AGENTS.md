@@ -146,6 +146,26 @@ Two invariants the hardware taught, both enforced by the loader:
   the fold and keeps its deviation fenced. With `k = 0` the contact force is a
   by-product (`b * v * g(F)`, ~7.6 N for 50 mm/s at b 1000), not a designed number;
   a designed force needs a `ref_force` (CM 0039), which is the next step.
+  **2026-09-10 — `k = 0` + the fold on BOTH laws, and the floor bounce is fixed
+  elsewhere.** The spring (`k = 400`) was tried for a few hours the same day because
+  `k = 0` has no force setpoint; it worked as designed (deviation 0.4-10 mm, exact
+  strip/compose) but it RETURNS the arm, and the requirement is yield-and-stay: a
+  force drags the arm by that much, the arm stays, and the policy re-observes and
+  re-plans from there (measured with the spring: pushed 37 mm out, back at
+  238 mm/s). `k = 0` + fold makes plan == where the arm actually is, so no offset
+  accumulates. What the spring was standing in for on the floor is now done by two
+  structural changes: the into-contact hold-back is COMPLETE while a sustained
+  contact stands (it used to leak 5-20 % of the advance and wind the reference
+  3-13 mm past the surface), and the preview plan is leashed against the follower's
+  own output (it used to run 37 mm away and snap back). Both were corrected the same
+  evening: the hold-back's contact DIRECTION now needs a release dwell
+  (`stream_release_dwell_sec`, else a chattering push disarmed it ~30 times a second),
+  and the leash is a PROJECTION at 20 mm with no bookkeeping (booking each refusal
+  double-counted against a successor already spliced from the dispatched state and
+  sawtoothed the command at the 100 Hz replan rate). A designed contact force
+  still needs `ref_force` (CM 0039) — its equilibrium `d = (F - F_ref)/k` is
+  offset-free at `F_ref` by construction, and with `k = 0` it does not change the
+  delay margin, so that is the shape to try next.
   Since the evening of 2026-09-03 rotation is RIGID on both laws and the hold law
   carries a hand-guide ENGAGEMENT LATCH (`hold_engage_force_n` 5 / `hold_release_force_n`
   2, judged on the physical pre-deadzone |F|; `control::HoldEngageLatch`), with the

@@ -28,6 +28,37 @@ struct PreviewTrackerConfig {
   double angular_tracking_scale_rad{0.03};
   double jerk_weight{0.02};
   double jerk_difference_weight{0.01};
+  // REFERENCE TRUST (2026-09-10). The reference is the source rolled forward over the
+  // whole horizon, but only its first ~100-133 ms is a chunk the policy has committed
+  // to executing: everything past that is replaced by the next inference. Taking the
+  // far knots at face value made the plan chase a future that had not happened yet --
+  // measured on servo_log_20260910_162808 @88 s, chunk rows 10-19 held 30-100 mm of
+  // intended travel while rows 0-2 held 0.5 mm/step, so the tracker set off at
+  // 120 mm/s, the command stood 45 mm ahead of the follower's own output, and the next
+  // chunks withdrew that future and it snapped back at 340 mm/s.
+  //
+  // Past reference_trust_full_sec each knot is therefore blended toward the CONSTANT
+  // VELOCITY CONTINUATION of the committed part, with the raw reference's share
+  // falling exponentially to reference_trust_tail at reference_trust_tail_sec:
+  //   target(t) = w(t)*reference(t) + (1-w(t))*(committed_end + committed_slope*dt).
+  // Properties that make this the right shape:
+  //   * a steady reference is UNCHANGED (its own continuation is itself), so free-space
+  //     tracking, corners and the C2 splice keep today's behaviour exactly;
+  //   * only a far demand that departs from the committed trend is discounted;
+  //   * the objective's Hessian is untouched, so the coupled contact QP costs what it
+  //     costs today. (De-weighting the far knots in the least-squares objective instead
+  //     was measured on 2026-09-10 to take that solve from 171 to 681 working-set
+  //     recalculations and 0.9 to 6.3 ms -- rejected outright at the deployed cap.)
+  // Acceptance uses THE SAME blended target: scoring the plan against the raw reference
+  // charged it for the lag the blend deliberately introduces (measured 2026-09-10: 4
+  // tracking_budget_exceeded rejections in one 1.5 s floor contact). The budget still
+  // bounds how far the plan may sit from what it was asked to track; what it no longer
+  // does is reject a plan for obeying this trust curve.
+  // No usable default -- every caller supplies all three (full trust is written
+  // explicitly as a tail far beyond the horizon).
+  double reference_trust_full_sec{0.0};
+  double reference_trust_tail_sec{0.0};
+  double reference_trust_tail{0.0};
   // Tracking is a soft objective. Slack is excess over these soft tolerances;
   // a trajectory whose dense tracking slack exceeds its budget is rejected.
   // Acceptance limits also require explicit caller values. NaN distinguishes

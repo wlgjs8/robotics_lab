@@ -1808,6 +1808,16 @@ struct ForceControlConfig {
     double gate_stream_arm_force_n = 5.0;
     double gate_stream_release_force_n = 2.0;
     double gate_stream_arm_dwell_sec = 0.10;
+    // RELEASE DWELL (2026-09-10 pm). Used by the servo loop's contact-DIRECTION
+    // Schmitt (dual_arm_servo_loop, preview path): the slow vector must stand
+    // below gate_stream_release_force_n for this long before the direction is
+    // disarmed. Without it a violently varying push toggled the arming at ~30 Hz
+    // (servo_log_20260910_183004, right arm 56.27/56.28 and 56.41/56.43 s: the
+    // dispatched contact direction flipped 1.00 <-> 0.00 within 16 ms), because a
+    // 2 Hz filter fed a sign-alternating 46 N ring still crosses 5 N and 2 N inside
+    // a few ticks. The gate's own stream channel keeps its arm dwell and needs no
+    // release dwell: its output is already slewed.
+    double gate_stream_release_dwell_sec = 0.20;
 
     // ---- the fence ---------------------------------------------------------
     // A DEAD BACKSTOP, not an operating limit. Non-positive = no fence on that part.
@@ -2134,6 +2144,22 @@ struct PreviewExecutionConfig {
     double max_result_age_sec = 0.0;
     double worker_poll_period_sec = 0.0;
     int max_source_rows = 0;
+    // THE PLAN LEASH: the dispatched pose may lead the source's own output by at
+    // most this much. Inside its tracking budget the plan is otherwise free to sit
+    // tens of mm away and close the gap at the tracker's full authority; measured
+    // 2026-09-10 it ran 37 mm out along a hand push and came back at 238 mm/s, and
+    // 25 mm off the floor at 2.5-4 Hz. The bound is applied as a PROJECTION of the
+    // dispatched position onto the ball of this radius around the source: no
+    // accumulator, nothing echoed to the worker, nothing to snap back. While the
+    // arm is held the command stands one leash length ahead and is carried along
+    // by the arm. Size it from the measured normal lead envelope (stack_real.yaml).
+    double max_plan_lead_m = 0.0;
+    // Dispatch acceptance: FK of the sent joints may differ from the planned
+    // Cartesian sample by at most this before the executor faults
+    // (accepted_deviation). The IK's own acceptance envelope is always included;
+    // these widen it explicitly (see stack_real.yaml for why and for how long).
+    double dispatch_acceptance_position_tolerance_m = 0.0;
+    double dispatch_acceptance_rotation_tolerance_rad = 0.0;
 };
 
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while

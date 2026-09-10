@@ -4,6 +4,7 @@
 #include "rb_servo/math/se3.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -11,6 +12,104 @@
 #include <thread>
 
 namespace rb_servo::control {
+namespace {
+// The dispatched closing velocity may sit above the knot-0 authority while the
+// executor's contact slew is mid-ramp. The authority is widened to
+// max(authority, ramp) where ramp is the FASTEST brake of that residual the QP can
+// realise: piecewise-constant jerk on the planning grid, jerk capped so the
+// acceleration box is met at each planning-interval end, i.e. exactly what the
+// tracker's Bernstein controls can do. The ramp's Bernstein/chord margin (j h^2 / 4
+// on the servo grid) is added only while the ramp is positive, its zero time and every
+// authority crossing are inserted as exact knots, so nothing beyond that
+// physically forced residual is admitted. Returns false on knot overflow.
+bool widenContactAuthorityWithRamp(PreviewContactConstraint& contact,double v0,double decel0,
+                                   const PreviewTrackerConfig& tracker,double servo_period_sec) {
+  using Knot=PreviewContactConstraint::Knot;
+  const double a_max=tracker.max_linear_acceleration_m_s2,j_max=tracker.max_linear_jerk_m_s3;
+  const double h_plan=tracker.planning_dt_sec,h=servo_period_sec;
+  if(!(v0>0.0)||!(a_max>0.0)||!(j_max>0.0)||!(h_plan>0.0)||!(h>0.0))return false;
+  // The tracker certifies contact rows on Bernstein controls per servo sub-interval:
+  // the middle control of a quadratic velocity piece sits |j| h^2 / 8 ABOVE the
+  // curve, and the curve's chord between knots sits |j| h^2 / 8 below it, so a
+  // brake at full jerk needs j h^2 / 4 of headroom on a piecewise-linear envelope.
+  const double margin=j_max*h*h/4.0;
+  // Piecewise profile of the fastest realisable brake: (t_k, v_k, a_k, j_k).
+  struct Piece { double t,v,a,j; };
+  std::array<Piece,PreviewTrajectoryTracker::kMaxHorizonSteps+2> pieces{};
+  std::size_t piece_count=0;
+  double t_zero=-1.0;
+  {
+    // decel0 < 0 = the splice is still ACCELERATING into the contact; the fastest
+    // brake first has to bring that acceleration down through zero.
+    double t=0.0,v=v0,a=std::clamp(decel0,-a_max,a_max);
+    const double horizon=contact.knots[contact.count-1].time_sec;
+    while(t<=horizon && piece_count<pieces.size()) {
+      const double j=std::min(j_max,(a_max-a)/h_plan);
+      pieces[piece_count++]={t,v,a,j};
+      // zero crossing inside this interval: v - a s - j s^2 / 2 = 0
+      double s_zero=-1.0;
+      if(j>0.0) {
+        const double disc=a*a+2.0*j*v;
+        if(disc>=0.0)s_zero=(-a+std::sqrt(disc))/j;
+      } else if(a>0.0) s_zero=v/a;
+      if(s_zero>=0.0 && s_zero<=h_plan) {t_zero=t+s_zero;break;}
+      v-=a*h_plan+0.5*j*h_plan*h_plan;a+=j*h_plan;t+=h_plan;
+    }
+  }
+  if(piece_count==0)return false;
+  const auto ramp=[&](double t) {
+    // The zero knot itself keeps the margin: the fastest brake reaches it with
+    // the acceleration box exactly tight, and an envelope that is also exactly
+    // tight there leaves the QP no numerical slack (measured: 9 um/s over a 0.1
+    // um/s tolerance -> Infeasible). One servo knot later the bound is 0.
+    if(t_zero>=0.0 && t>t_zero+1e-12)return 0.0;
+    std::size_t k=0;
+    while(k+1<piece_count && pieces[k+1].t<=t)++k;
+    const double s=t-pieces[k].t;
+    return std::max(0.0,pieces[k].v-pieces[k].a*s-0.5*pieces[k].j*s*s)+margin;
+  };
+  const auto bound=[&](double t) {
+    std::size_t hi=1;
+    while(hi+1<contact.count && contact.knots[hi].time_sec<t)++hi;
+    const auto& a=contact.knots[hi-1];const auto& b=contact.knots[hi];
+    const double u=std::clamp((t-a.time_sec)/(b.time_sec-a.time_sec),0.0,1.0);
+    return (1.0-u)*a.upper_velocity_m_s+u*b.upper_velocity_m_s;
+  };
+  // Merged knot times: the original grid plus the ramp's zero time.
+  std::array<double,PreviewContactConstraint::kCapacity> times{};
+  std::size_t time_count=0;
+  for(std::size_t k=0;k<contact.count;++k) {
+    const double t=contact.knots[k].time_sec;
+    if(t_zero>=0.0 && time_count>0 && times[time_count-1]<t_zero && t_zero<t) {
+      if(time_count>=times.size())return false;
+      times[time_count++]=t_zero;
+    }
+    if(time_count>=times.size())return false;
+    times[time_count++]=t;
+  }
+  std::array<Knot,PreviewContactConstraint::kCapacity> out{};
+  std::size_t count=0;
+  const auto push=[&](double t,double upper) {
+    if(count>=out.size())return false;
+    out[count++]={t,upper};return true;
+  };
+  for(std::size_t k=0;k<time_count;++k) {
+    const double tb=times[k],rb=ramp(tb),bb=bound(tb);
+    if(k>0) {
+      const double ta=times[k-1],ra=ramp(ta),ba=bound(ta);
+      const double da=ra-ba,db=rb-bb;
+      if((da>0.0)!=(db>0.0) && da!=db) {
+        const double u=da/(da-db);
+        const double tc=ta+u*(tb-ta);
+        if(tc>ta && tc<tb && !push(tc,ba+u*(bb-ba)))return false;
+      }
+    }
+    if(!push(tb,std::max(bb,rb)))return false;
+  }
+  contact.knots=out;contact.count=count;
+  return true;
+}
+}  // namespace
 namespace {
 using Clock = std::chrono::steady_clock;
 enum class SlotState : unsigned char { Free, Writing, Ready, Reading };
@@ -259,7 +358,8 @@ struct PreviewExecutionWorker::Impl {
     // A dispatched-state offset/clamp describes a held-back ACTIVE plan only.
     if(!r.dispatch_offset_m.allFinite() ||
        ((r.contact_clamped_dispatch || !r.dispatch_offset_m.isZero(0.0)) && (r.cold_start || r.has_brake_predecessor)) ||
-       (r.contact_clamped_dispatch && !contact_active))
+       (r.contact_clamped_dispatch && !contact_active) ||
+       !std::isfinite(r.contact_dispatch_ceiling_m_s) || r.contact_dispatch_ceiling_m_s<0.0)
       return finish(PreviewExecutionWorkerStatus::InvalidRequest);
     if (r.cold_start) {
       if (r.predecessor.valid || r.has_brake_predecessor ||
@@ -364,14 +464,36 @@ struct PreviewExecutionWorker::Impl {
       auto T=math::se3FromPose(out.initial.pose);T.translation()+=r.dispatch_offset_m;
       out.initial.pose=math::poseFromSe3(T);
     }
-    if(r.contact_clamped_dispatch) {
+    if(contact_active && !r.cold_start) {
       const Eigen::Vector3d& normal=r.contact_normal_stand;
-      const double excess=normal.dot(out.initial.linear_velocity)-contact.knots[0].upper_velocity_m_s;
-      if(excess>0) {
-        out.initial.linear_velocity-=excess*normal;
-        const double closing_acceleration=normal.dot(out.initial.linear_acceleration);
-        if(closing_acceleration>0)out.initial.linear_acceleration-=closing_acceleration*normal;
+      const double tol=tracker.config().feasibility_tolerance;
+      const double bound0=contact.knots[0].upper_velocity_m_s;
+      double closing_velocity=normal.dot(out.initial.linear_velocity);
+      double closing_acceleration=normal.dot(out.initial.linear_acceleration);
+      if(r.contact_clamped_dispatch) {
+        // The executor's contact slew: the dispatched closing velocity at the splice
+        // is capped by a ceiling still falling toward the authority, not cut to it.
+        const double ceiling=std::max(bound0,r.contact_dispatch_ceiling_m_s);
+        if(closing_velocity>ceiling) {
+          out.initial.linear_velocity-=(closing_velocity-ceiling)*normal;
+          closing_velocity=ceiling;
+        }
+        // Only a closing acceleration is removed. The slew keeps dispatching the
+        // ceiling's own fall; the plan must not start with retreat acceleration.
+        if(closing_acceleration>0) {
+          out.initial.linear_acceleration-=closing_acceleration*normal;
+          closing_acceleration=0;
+        }
       }
+      // A splice that still closes faster than the knot-0 authority (mid-slew, or an
+      // authority that fell between request and splice while the executor was not
+      // yet holding anything back) is never refused as Infeasible: the plan gets the
+      // fastest brake it can realise from that state, and nothing looser (2026-09-10
+      // pm: 27 such refusals in 5 s fed the expiry-brake cycle under a hand push).
+      if(closing_velocity>bound0+tol &&
+         !widenContactAuthorityWithRamp(contact,closing_velocity,-closing_acceleration,
+                                        tracker.config(),cfg.servo_period_sec))
+        return finish(PreviewExecutionWorkerStatus::InvalidRequest);
     }
     // Solver state is strictly worker-owned. Never publish its previous result
     // when this request fails; the servo owns the predecessor's finite lifetime.

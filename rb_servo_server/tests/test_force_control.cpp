@@ -553,6 +553,86 @@ bool testPreviewConstraintUsesExistingSustainedContactClassifier() {
     CHECK(released);return true;
 }
 
+// THE FOLLOWER'S CONTACT DIRECTION SURVIVES A CHATTERING PUSH (2026-09-10 pm).
+// Replays what the hand push did to the 2 Hz slow vector: a ~3.5 N mean push with a
+// 30 Hz +-46 N ring on it. Filtered at 2 Hz the ring still leaves ~3 N of ripple, so
+// the slow magnitude crosses BOTH the 5 N arm level and the 2 N release level every
+// cycle. Without a release dwell that disarms the direction ~30 times a second, and
+// the arm alternates between a complete hold-back and a free advance at 30 Hz
+// (servo_log_20260910_183004, right arm 56.27 and 56.41 s). The dwell must hold it
+// armed; a real release must still disarm it, and no later than it should.
+bool testFollowerContactDirectionSurvivesAChatteringPush() {
+    using rb_servo::math::Vector3;
+    auto cfg=shippedLaw();
+    cfg.gate_enable=true;cfg.gate_max_force_n=10.;cfg.gate_max_torque_nm=1.4;
+    cfg.gate_stream_judge_lpf_hz=2.;cfg.gate_stream_arm_force_n=5.;
+    cfg.gate_stream_release_force_n=2.;cfg.gate_stream_arm_dwell_sec=.10;
+    const double dt=.002,dwell=.20;
+    const int ticks_to_dwell=static_cast<int>(dwell/dt);
+    struct Run {
+        rb_servo::control::ForceGate gate;
+        rb_servo::control::FollowerContactDirectionArming arming;
+        int disarms=0,below=0;
+    };
+    const auto tick=[&](Run& r,const Vector3& force,double dwell_sec) {
+        r.gate.updateStream(force);
+        if(r.gate.streamForceN()<cfg.gate_stream_release_force_n)++r.below;
+        const bool was=r.arming.armed;
+        const bool armed=rb_servo::control::updateFollowerContactDirectionArming(r.arming,
+            r.gate.streamMeasuredForce(),dt,cfg.gate_stream_arm_force_n,
+            cfg.gate_stream_release_force_n,dwell_sec);
+        if(was&&!armed)++r.disarms;
+        return armed;
+    };
+    const auto push=[&](int i) {
+        return Vector3(-(3.5+46.*std::sin(2.*M_PI*30.*i*dt)),0.,0.);
+    };
+    // The chatter really does re-cross both levels: with no dwell it disarms
+    // repeatedly. This negative control is what makes the positive case mean
+    // something - it is the behaviour that shook the arm.
+    {
+        Run control;control.gate.configure(cfg,dt);
+        for(int i=0;i<1500;++i)tick(control,push(i),0.);
+        CHECK(control.below>0);CHECK(control.disarms>=10);
+    }
+    Run run;run.gate.configure(cfg,dt);
+    for(int i=0;i<1500;++i)tick(run,push(i),dwell);   // 3 s of the same push
+    CHECK(run.below>0);        // the slow magnitude did dip under the release level
+    CHECK(run.disarms==0);     // ... and the direction never let go
+    CHECK(run.arming.armed);
+    CHECK((run.arming.direction+Vector3::UnitX()).norm()<1e-9);
+    // While the contact fades, the latched direction must not follow the small,
+    // noisy remainder: the direction of a 1 N residue is not a contact normal.
+    Vector3 latched=Vector3::Zero();
+    for(int i=0;i<60&&latched.isZero(0.);++i) {
+        tick(run,Vector3::Zero(),dwell);
+        if(run.arming.release_sec>0.)latched=run.arming.direction;
+    }
+    CHECK(!latched.isZero(0.)&&run.arming.armed);
+    const int elapsed=static_cast<int>(std::llround(run.arming.release_sec/dt));
+    for(int i=0;i<ticks_to_dwell-elapsed-1;++i)tick(run,Vector3(0.,-1.,0.),dwell);
+    CHECK(run.arming.armed);                                  // still inside the dwell
+    CHECK((run.arming.direction-latched).norm()==0.);         // and still the same normal
+    // A real release: the slow vector stands under the release level for the dwell.
+    bool released=false;
+    for(int i=0;i<2000&&!released;++i) {
+        const double standing=run.arming.release_sec;
+        if(!tick(run,Vector3::Zero(),dwell)) {
+            released=true;
+            CHECK(standing+dt>=dwell-1e-12);        // never before the dwell is served
+            CHECK(run.arming.direction.isZero(0.)); // and the normal is dropped
+        }
+    }
+    CHECK(released&&run.disarms==1);
+    CHECK(run.below>=ticks_to_dwell);
+    // Arming is never delayed: one sample over the arm level arms it.
+    rb_servo::control::FollowerContactDirectionArming fresh;
+    CHECK(rb_servo::control::updateFollowerContactDirectionArming(fresh,Vector3(0.,0.,-6.),dt,
+        cfg.gate_stream_arm_force_n,cfg.gate_stream_release_force_n,dwell));
+    CHECK((fresh.direction+Vector3::UnitZ()).norm()<1e-12);
+    return true;
+}
+
 // A RELEASED GATE RE-OPENS TO EXACTLY 1.0 - on both channels. A first-order slew
 // only approaches 1; without the snap a gate that closed once stayed at 0.9999...
 // and its nanometre "cuts" kept invoking the tracker's hold (2026-09-04 22:32).
@@ -1415,6 +1495,7 @@ int main() {
     testGateStreamChannelIgnoresVibrationAndHoldsSustainedContact();
     testStreamReleaseKeepsNormalAndAllowsRecontact();
     testPreviewConstraintUsesExistingSustainedContactClassifier();
+    testFollowerContactDirectionSurvivesAChatteringPush();
     testGateStreamChannelAveragesOutAFlippingDirection();
     testGateReopensToExactlyOneAfterRelease();
     testHoldFoldDeltaFloorAndCap();

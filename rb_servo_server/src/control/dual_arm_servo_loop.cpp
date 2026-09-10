@@ -3654,19 +3654,55 @@ void DualArmServoLoop::loopMain() {
         // fastest stop the arm can actually execute, and it converges in a few ms.
         // Applied here, at the single point every fault path funnels through, rather
         // than at each of the ten currentFaultHoldTarget() call sites.
-        if (fault_latched_.load() && config_.safety.ddq_max_decel_ratio > 1.0) {
-            const SafetyClampTelemetry left_ramp = safety_filter_.clampMotionDetailed(
-                safe_target.left_q_target_deg,
-                left_prev_sent_q_deg_,
-                left_prevprev_sent_q_deg_,
-                filter_dt_sec);
-            const SafetyClampTelemetry right_ramp = safety_filter_.clampMotionDetailed(
-                safe_target.right_q_target_deg,
-                right_prev_sent_q_deg_,
-                right_prevprev_sent_q_deg_,
-                filter_dt_sec);
-            safe_target.left_q_target_deg = left_ramp.q_after_accel_limit_deg;
-            safe_target.right_q_target_deg = right_ramp.q_after_accel_limit_deg;
+        //
+        // DECELERATE, THEN LATCH (2026-09-10, operator decision). The ramp above
+        // still stopped at the WIDENED ceiling (ddq_max_decel_ratio x ddq_max =
+        // 6-12k deg/s^2) and aimed at the captured measured pose, which lies BEHIND
+        // a moving command: measured on servo_log_20260910_134846 at the
+        // accepted_deviation latch, 33 -> 0 deg/s in 4 ms with 15k deg/s^2 and a
+        // 10 Hz, 1.75 mm ring of the arm afterwards. A non-emergency latch now
+        // brakes every joint at 1x its declared ddq_max from the last SENT
+        // velocity and holds wherever that stop lands (no reversal toward the
+        // snapshot); the hold pose is re-latched to that stop point each tick so
+        // the published hold target is what is actually being sent. The joint
+        // limit / velocity clamps of the safety filter still run on the result.
+        // An emergency latch keeps the widened (fastest executable) ramp.
+        if (fault_latched_.load()) {
+            const bool emergency = motion_state_.load() == ServerMotionState::EmergencyLatched;
+            if (!emergency && filter_dt_sec > 0.0) {
+                const auto brake = [&](JointArray& target, const JointArray& prev,
+                                       const JointArray& prevprev) {
+                    JointArray stop = prev;
+                    for (int i = 0; i < kDof; ++i) {
+                        const double v = (prev[i] - prevprev[i]) / filter_dt_sec;
+                        const double a = config_.safety.ddq_max_deg_s2[i];
+                        const double dv = std::isfinite(a) && a > 0.0 ? a * filter_dt_sec : std::abs(v);
+                        const double v_next = std::abs(v) <= dv ? 0.0 : v - std::copysign(dv, v);
+                        stop[i] = prev[i] + v_next * filter_dt_sec;
+                    }
+                    const SafetyClampTelemetry ramp = safety_filter_.clampMotionDetailed(
+                        stop, prev, prevprev, filter_dt_sec);
+                    target = ramp.q_after_accel_limit_deg;
+                };
+                brake(safe_target.left_q_target_deg, left_prev_sent_q_deg_, left_prevprev_sent_q_deg_);
+                brake(safe_target.right_q_target_deg, right_prev_sent_q_deg_, right_prevprev_sent_q_deg_);
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                left_fault_hold_q_deg_ = safe_target.left_q_target_deg;
+                right_fault_hold_q_deg_ = safe_target.right_q_target_deg;
+            } else if (config_.safety.ddq_max_decel_ratio > 1.0) {
+                const SafetyClampTelemetry left_ramp = safety_filter_.clampMotionDetailed(
+                    safe_target.left_q_target_deg,
+                    left_prev_sent_q_deg_,
+                    left_prevprev_sent_q_deg_,
+                    filter_dt_sec);
+                const SafetyClampTelemetry right_ramp = safety_filter_.clampMotionDetailed(
+                    safe_target.right_q_target_deg,
+                    right_prev_sent_q_deg_,
+                    right_prevprev_sent_q_deg_,
+                    filter_dt_sec);
+                safe_target.left_q_target_deg = left_ramp.q_after_accel_limit_deg;
+                safe_target.right_q_target_deg = right_ramp.q_after_accel_limit_deg;
+            }
         }
 
         // Final output stage: moving average over the last N safety-passed
@@ -5381,7 +5417,8 @@ void DualArmServoLoop::applyPreviewExecution(ArmId arm, ArmCommand& command,
     // The canonical follower keeps its existing tick gate, including approach
     // and release; a tiny filtered direction plus a release slew must not create
     // a new binary speed constraint throughout otherwise free movement.
-    const auto contact=control::sustainedPreviewContactAuthority(force.reference_strip_enabled,gate);
+    const auto contact=control::followerPreviewContactAuthority(force.reference_strip_enabled,
+        gate.translation(),ctx.chunk_follower.advanceDirection());
     const auto output=selected->step(last_loop_start_ns_*1e-9,ctx.chunk_follower,reference,
                                    stationary,contact.gate,contact.normal_into_stand);
     abc.preview_execution=selected->telemetry();
@@ -6428,21 +6465,69 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             abc.follower_divergence_pos_m, abc.follower_divergence_ang_rad, leash);
     }
     abc.follower_leash_gate = leash_gate;
-    follower->setPlanRateGate(preview_recovery_regime_ &&
-        preview_recovery_.state==PreviewRecoveryState::Starting ? 0.0 : std::min(safety_plan_gate, leash_gate));
+    // THE PLAN CLOCK WAITS FOR THE EXECUTOR (2026-09-10 pm, operator decision).
+    // While the preview executor is braking (an expired plan, a contact stop) or
+    // recovering, the chunk follower's plan clock stops too: otherwise the reference
+    // runs on while the command stands still and the re-admitted plan closes that
+    // gap at the tracker's full acceleration (measured 15:28 run: 20 expiry brakes
+    // in 4.6 s, each followed by an 11 m/s^2 lunge to 300-450 mm/s). Frame
+    // acceptance is untouched; only the knot consumption pauses.
+    bool executor_waits = preview_recovery_regime_ &&
+        preview_recovery_.state==PreviewRecoveryState::Starting;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    if (rf.preview_execution.enable) {
+        if (const auto* executor = preview_executor_[arm_id==ArmId::Left?0:1])
+            executor_waits = executor_waits || executor->braking() || executor->recovering();
+    }
+#endif
+    follower->setPlanRateGate(executor_waits ? 0.0 : std::min(safety_plan_gate, leash_gate));
     if(rf.preview_execution.enable) {
         const bool left=arm_id==ArmId::Left;
         const auto& force=left?left_force_control_telemetry_:right_force_control_telemetry_;
         const bool roi_owns=left?left_roi_fold_active_:right_roi_fold_active_;
         if(force.reference_strip_enabled && !roi_owns) {
             const auto& gate=left?left_force_gate_:right_force_gate_;
-            const auto& w=force.wrench_stand;
-            const Eigen::Vector3d direction(w.fx,w.fy,w.fz);
-            const double norm=direction.norm();
-            // Preserve the follower's existing deadzoned direction contract;
-            // only move its evaluation to this tick for preview execution.
-            follower->setAdvanceGate(gate.translation(),norm>1e-9
-                ? Eigen::Vector3d(direction/norm):Eigen::Vector3d::Zero());
+            // THE CONTACT DIRECTION COMES FROM THE SLOW VECTOR (2026-09-10 pm, operator
+            // decision). This direction decides what the follower's advance gate, the
+            // executor's contact slew and the QP contact authority all treat as
+            // "closing". Taken from the raw deadzoned wrench it was rewritten every tick:
+            // a 3.5 N, 4 ms deadzone-edge blip on a 200 mm/s move flipped it and cut the
+            // whole move (servo_log_20260910_141150 @-24.25 s), and while the tool rang
+            // the F/T at 20-40 Hz it turned > 45 deg in 18 % of ticks (@134846 fault).
+            // Now: the gate's 2 Hz-filtered force vector (a zero-mean ring averages to
+            // nothing there), adopted only once its magnitude stands over the stream
+            // arm level and kept down to the release level (Schmitt). The tick-judged
+            // MAGNITUDE still drives the fade, so a real contact closes as fast as before
+            // once its direction is known: ~30 ms for a 15 N press, ~55 ms for 10 N.
+            //
+            // THE RELEASE DWELL (2026-09-10 pm, second revision). "The filter already
+            // outlasts a vibration cycle" was wrong: fed a sign-alternating 46 N push the
+            // 2 Hz vector still moves ~1 N per tick, so it crossed the 5 N arm level and
+            // the 2 N release level inside 16 ms and the dispatched direction flipped
+            // 1.00 <-> 0.00 at ~30 Hz (servo_log_20260910_183004, right arm 56.27 and
+            // 56.41 s). Arming stays instant; releasing now needs the slow vector to stand
+            // below the release level for gate_stream_release_dwell_sec.
+            auto& arming=left?left_follower_contact_dir_:right_follower_contact_dir_;
+            const bool armed=control::updateFollowerContactDirectionArming(arming,
+                gate.streamMeasuredForce(),dt_sec,
+                config_.force_control.gate_stream_arm_force_n,
+                config_.force_control.gate_stream_release_force_n,
+                config_.force_control.gate_stream_release_dwell_sec);
+            // A COMPLETE HOLD-BACK WHILE A SUSTAINED CONTACT STANDS (2026-09-10 pm).
+            // The gate used to attenuate the into-contact advance PROPORTIONALLY, so at
+            // |F| 8-9 N (gate 0.05-0.20) 5-20 % of it kept passing and the reference
+            // wound 3-13 mm PAST the floor, at ~14 mm/s; the plan then dived onto that
+            // error, contacted, was lifted, and dived again - the 2.5-4 Hz bounce
+            // (servo_log_20260910_172712, right arm 27.5-29.0 s). Armed means the gate's
+            // 2 Hz slow vector has stood over the arm level, i.e. a contact IS there:
+            // the advance into it is then removed ENTIRELY. That is "cannot go, keeps
+            // trying" instead of "creeps in", and it is not a rule about what the policy
+            // may command - the plan keeps asking and the fold keeps the plan where the
+            // arm actually is. Nothing is removed below the arm level (approach is
+            // untouched), and tangential / retreating advances are never touched at all.
+            // The tick fade itself stays observable in *_fc_gate_translation.
+            follower->setAdvanceGate(armed?0.0:gate.translation(),
+                armed?arming.direction:math::Vector3::Zero());
         }
     }
     // Contact-aware following is gone with the F/T stack: no external reaction

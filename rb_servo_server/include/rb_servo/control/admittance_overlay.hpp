@@ -251,8 +251,10 @@ public:
     //     below `gate_stream_release_force_n` (a Schmitt trigger). A pressed
     //     contact of 15 N arms it in ~180 ms; a vibration cycle never does.
     //
-    // WHY A SECOND CHANNEL: the tick-judged gate (above) is right for the chunk
-    // follower, which is validated on hardware, but on the streamed path it turned
+    // WHY A SECOND CHANNEL: the tick-judged gate (above) drives the chunk follower's
+    // MAGNITUDE fade (validated on hardware); since 2026-09-10 the follower's contact
+    // DIRECTION comes from this channel's slow vector too (servo loop, arm/release
+    // Schmitt without the dwell). On the streamed path the tick judgement turned
     // the tool's own motion-excited vibration into the command. Measured on the
     // UMI teleop logs of 2026-09-04: the compensated force while MOVING in free
     // space was 3-5 N RMS in 8-30 Hz against 0.3 N below 2 Hz, its excursions over

@@ -235,6 +235,7 @@ int main() {
         p.solve_time_sec = .0004; p.submitted = 23; p.accepted = 19;
         p.rejected = 3; p.expired = 2; p.contact_guard_count = 5;
         p.contact_clamp_count = 6; p.contact_clamp_active = true; p.contact_clamp_shift_m = .00025;
+        p.plan_leash_count = 7; p.plan_leash_shift_m = .0035;
         populateDetailedPreviewFixture(p);
         // Push REPEATEDLY, not once. ServoLogger::push() takes the ring mutex with
         // try_to_lock and DROPS the sample if the writer thread holds it -- deliberate,
@@ -337,7 +338,8 @@ int main() {
              "source_wire_seq","source_recv_seq","backlog_sec","rate","plan_age_sec",
              "accepted_position_error_m","accepted_rotation_error_rad","solve_time_sec",
              "submitted","accepted","rejected","expired","contact_guard_count",
-             "contact_clamp_count","contact_clamp_active","contact_clamp_shift_m"}) {
+             "contact_clamp_count","contact_clamp_active","contact_clamp_shift_m","plan_leash_count",
+             "plan_leash_shift_m"}) {
             const std::string name = std::string(side) + "_preview_execution_" + field;
             if (std::count(header_fields.begin(), header_fields.end(), name) != 1) {
                 std::cerr << "missing or duplicate preview column: " << name << '\n'; return 1;
@@ -348,14 +350,16 @@ int main() {
              {"enabled","1"},{"active","1"},{"status","tracking"},{"sample_time_ns","9007199254740993"},
              {"epoch","7"},{"plan_id","11"},{"source_wire_seq","13"},{"source_recv_seq","17"},
              {"submitted","23"},{"accepted","19"},{"rejected","3"},{"expired","2"},{"contact_guard_count","5"},
-             {"contact_clamp_count","6"},{"contact_clamp_active","1"},{"contact_clamp_shift_m","0.00025"}}) {
+             {"contact_clamp_count","6"},{"contact_clamp_active","1"},{"contact_clamp_shift_m","0.00025"},
+             {"plan_leash_count","7"}}) {
         if (column("left_preview_execution_" + item.first) != item.second) {
             std::cerr << "incorrect preview identity/counter column: " << item.first << '\n'; return 1;
         }
     }
     for (const auto& item : std::vector<std::pair<std::string, double>>{
              {"backlog_sec",.012},{"rate",1.03},{"plan_age_sec",.024},
-             {"accepted_position_error_m",.00015},{"accepted_rotation_error_rad",.00025},{"solve_time_sec",.0004}}) {
+             {"accepted_position_error_m",.00015},{"accepted_rotation_error_rad",.00025},{"solve_time_sec",.0004},
+             {"plan_leash_shift_m",.0035}}) {
         if (std::abs(std::stod(column("left_preview_execution_" + item.first)) - item.second) > 1e-9) {
             std::cerr << "incorrect preview timing/error column: " << item.first << '\n'; return 1;
         }

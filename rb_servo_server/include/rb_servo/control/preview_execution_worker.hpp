@@ -85,6 +85,18 @@ struct PreviewExecutionRequest {
   // predecessor (a brake already starts from the dispatched state).
   Eigen::Vector3d dispatch_offset_m{Eigen::Vector3d::Zero()};
   bool contact_clamped_dispatch{false};
+  // THE CONTACT SLEW (2026-09-10 pm). The executor does not cut the dispatched
+  // closing velocity to the authority in one tick; it caps it by a ceiling that
+  // falls from what was last dispatched along the tracker's own acceleration/jerk
+  // limits. At the splice that ceiling may still sit above the knot-0 authority:
+  // the worker splices from min(predecessor closing velocity, ceiling), removes only
+  // a closing acceleration, and widens the authority along the fastest
+  // plan-realisable brake of that residual (see widenContactAuthorityWithRamp).
+  // NEVER the ceiling's own deceleration as the plan's initial acceleration: that
+  // injected up to 12 m/s^2 of retreat along the force at every 10 ms replan and
+  // the plan ran 44 mm down the push before snapping back at 350 mm/s
+  // (servo_log_20260910_160035 @54.0-54.7 s, and @111-115 s of the 15:28 run).
+  double contact_dispatch_ceiling_m_s{0.0};
 };
 
 enum class PreviewExecutionWorkerStatus {

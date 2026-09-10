@@ -1769,10 +1769,70 @@ force_control:
   # i.e. 0.8 dB less at every contact, ring 7.2 -> 5.7 Hz at 18 ms; still stable by
   # 1.8 dB or more below 15 kN/m (the TPU tips), unstable only against the same
   # 30.7 kN/m rigid jig that 6/500 was. Same k = 0 row for hold. To revert: m 6.0.
+  # ============================================================================
+  # 2026-09-10 (evening): BACK TO k = 0 + THE FOLD. jhkim. The spring below was
+  # restored earlier the same day and is reverted here; the "hold the contact at
+  # 10 N" requirement is DEFERRED to a ref_force design (CM 0039), not abandoned.
+  # ============================================================================
+  # WHY THE SPRING WENT AGAIN. The requirement is YIELD-AND-STAY: a force must drag
+  # the arm by that much, the arm must stay where it was dragged, and the policy must
+  # re-observe and re-plan from there. A spring cannot do that - it returns the arm to
+  # the plan - and that return is exactly what was felt on the right arm at 17:51
+  # (pushed 37 mm, then back at 238 mm/s). k = 0 + fold hands the deviation to the
+  # plan every tick, so plan == where the arm actually is: no standing offset, and the
+  # arm stays put. The contact force is then a band (2..10 N), not a designed number;
+  # a designed number needs ref_force, whose equilibrium is d = (F - F_ref)/k and is
+  # therefore offset-free at F_ref by construction. That is the next step, not this one.
+  # NOTE the two changes that ship WITH this revert, because k = 0 alone was what
+  # bounced on the floor: the into-contact hold-back is now COMPLETE while a sustained
+  # contact stands (it used to leak 5-20 % of the advance and wind the reference 3-13 mm
+  # past the surface), and the preview plan carries a leash against the follower's own
+  # output (it used to be free to run 37 mm away and snap back).
+  #
+  # THE SPRING RATIONALE IS KEPT BELOW FOR THE NEXT ROUND (it is what a ref_force
+  # design will re-read), and its measurements stand:
+  # WHY IT WAS TRIED. With k = 0 there is no force setpoint, so a contact cannot be COMPLIED with:
+  # the plan presses until the gate closes, and when it turns around it leaves at full
+  # authority. Measured on the floor (servo_log_20260910_172712, right arm 27.5-29.0 s):
+  # the follower reference wound 3-13 mm PAST the floor - the gate attenuates but never
+  # stops (5-20 % of the advance keeps passing, and every airborne moment reopens it to
+  # 1.0) - the plan dived at -222 mm/s onto that error, contacted at 13-19 N, and left
+  # upward at +198 mm/s / 12 m/s^2 to 25 mm above the surface, at 2.5-4 Hz. THE
+  # COMPLIANCE LAYERS CONTRIBUTED NOTHING to that motion: overlay deviation <= 0.034 mm,
+  # force fold +4 mm over 1.1 s, contact clamp <= 0.045 mm. The same cycle is on the
+  # left arm in the 16:56 run and in the 2026-09-08 floor-bounce analysis (2.5-5 Hz).
+  # k = 0 cannot fix it because nothing pushes back.
+  # WITH k = 400 the contact has an equilibrium, F = k*d: the arm yields 25 mm at the
+  # gate's 10 N, and the stiffness the plan sees drops from the surface's ~9 N/mm to
+  # k*k_env/(k+k_env) ~ 0.4 N/mm - a 23x softening. The arm STAYS ON the surface
+  # instead of bouncing off it, so |F| stays in the gate's band, the gate stays closed,
+  # and the reference stops winding up. That is the loop this breaks.
+  # STABILITY IS UNCHANGED. The spring only adds a low-frequency restoring term, far
+  # below the 4-5.5 Hz this row rings at. Measured, same row
+  # (rb_servo_server/tools/force_loop_margin.py --rows 20:500 --k 0|400):
+  #     k [N/m] | T_d 18 ms: f_ring | GM 5k / 10k / 15k / 30.7k / 44.4k [dB]
+  #     0       |            4.64   | +13.2 / +7.2 / +3.6 / -2.6 / -5.8
+  #     400     |            4.69   | +13.2 / +7.2 / +3.7 / -2.6 / -5.8
+  # Identical to 0.1 dB at every contact stiffness: b remains the only stability knob,
+  # and this row is still unstable only against the same rigid jigs (>= 30 kN/m) that
+  # k = 0 was.
+  # THE FOLD DECLINES BY ITSELF for a law with a spring (AdmittanceOverlay::
+  # pureDamperTranslation is false, so DualArmServoLoop::foldForceDeviation returns
+  # "declined: law has a spring or a force target") - which is required: folding a
+  # spring's deviation into the plan would erase the very force it is holding. So
+  # fold_deviation STAYS true below: it is what the HOLD law (k = 0 hand-guide) needs,
+  # and the loader ties that pairing. On this path the 40 mm fence and the deviation
+  # rate caps are live again, and every plan-side anchor strips the standing deviation
+  # (DualArmServoLoop::nominalOfEmitted / AdmittanceOverlay::strip).
+  # MEASURED WITH THE SPRING (17:51 run): it worked as designed - *_fc_dev_norm_m
+  # reached 0.4-3.0 mm on the right arm and 9.98 mm on the left, and the strip/compose
+  # accounting stayed exact (accepted_position_error_m 0.001-0.016 mm, uncorrelated
+  # with the deviation). It is the RETURN that is wrong for this requirement, not the
+  # spring's implementation. To try it again: k 400.0 on the three rows below.
   stream:
     translation:
-      - {m: 20.0, b: 500.0, k: 0.0}   # x   10 N / 25 mm; m 12 = the 2026-09-04 trial
-      - {m: 20.0, b: 500.0, k: 0.0}   # y
+      - {m: 20.0, b: 500.0, k: 0.0}   # x   pure mass-damper: yields at F/b and STAYS
+      - {m: 20.0, b: 500.0, k: 0.0}   # y   (the fold books the deviation into the plan)
       - {m: 20.0, b: 500.0, k: 0.0}   # z
     # ROTATION: CM ships m 0.3 / b 10 / k 0 (derived for its 140 mm lever). On the
     # pika's 202.642 mm lever the rotational environment stiffness is k_env * L^2 =
@@ -1874,10 +1934,27 @@ force_control:
     # filter on the vector with these values armed 0 % on 7 of 10 arm-runs and
     # <= 2 % on the rest (real light contacts are not excluded there). A 15 N
     # press arms it in ~180 ms and half-closes it at ~250 ms; then it fades as before.
-    stream_judge_lpf_hz:     0.0    # 2026-09-07: OFF (raw vector; was 2.0 = contact band, 8-30 Hz vibration 20-200x down). jhkim A/B
+    # 2026-09-10 (jhkim): back ON at 2.0. Since today the CHUNK FOLLOWER's contact
+    # DIRECTION (advance gate, executor contact slew, QP authority) also comes from
+    # this slow vector, armed at stream_arm_force_n / released at stream_release_force_n;
+    # its magnitude fade stays tick-judged. Two accepted_deviation latches came from the
+    # raw direction: a 3.5 N, 4 ms deadzone-edge blip cutting a 200 mm/s move, and a
+    # 20-40 Hz F/T ring turning it > 45 deg in 18 % of ticks.
+    # Cost: a 15 N press is recognised ~30 ms late, 10 N ~55 ms (2 Hz first order).
+    stream_judge_lpf_hz:     2.0    # 2026-09-07 A/B had 0.0 (raw vector); 2.0 = contact band, 8-30 Hz vibration 20-200x down
     stream_arm_force_n:      5.0    # = hold_engage_force_n: one notion of "contact"
     stream_release_force_n:  2.0    # = hold_release_force_n
     stream_arm_dwell_sec:    0.10   # 3-5 vibration cycles (12-33 ms each measured)
+    # RELEASE DWELL (2026-09-10 pm, jhkim) - the follower contact-direction Schmitt only.
+    # The direction was released the instant the slow vector dipped under 2 N. Under a
+    # hand push whose |F| swings 0.4-46 N the 2 Hz vector still moves ~1 N per tick, so
+    # it re-crossed both levels within 16 ms and the dispatched direction toggled at
+    # ~30 Hz (servo_log_20260910_183004, right arm 56.27 and 56.41 s), which is the arm
+    # alternating between "hold back completely" and "advance freely" 30 times a second.
+    # 0.20 s = 2.5 filter time constants (tau = 80 ms at 2 Hz) and ~6 cycles of that
+    # chatter. Arming is NOT delayed. COST: after a real release the into-contact advance
+    # stays held back 0.2 s longer, on top of the filter's own decay.
+    stream_release_dwell_sec: 0.20
 
   # A DEAD BACKSTOP, not an operating limit. On a fold path the deviation is booked
   # into the plan every tick and never accumulates here; on a declined path (an
@@ -3128,6 +3205,40 @@ cartesian_control:
           max_result_age_sec: 0.05
           worker_poll_period_sec: 0.0005
           max_source_rows: 32  # Explicit snapshot bound, below the 64-row wire cap.
+          # DISPATCH ACCEPTANCE (TEMPORARY, 2026-09-10, jhkim). FK(sent joints) vs the
+          # planned Cartesian sample; the IK envelope (20 um / 0.5 mm best-effort) is
+          # always included, these widen it. Two accepted_deviation latches today were
+          # NOT IK or safety-clamp errors: the joint deceleration limiter
+          # (ddq_max_decel_ratio) led the IK solution by 0.64 mm and 0.84 mm while it
+          # bounded 10-12k deg/s^2 commands, and the 0.5 mm envelope faulted on that
+          # bounded lead. Until acceptance excludes the limiter's own lead (its
+          # declared budget is decel_overshoot_budget_deg), tolerate it here. Still
+          # far below any safety-clamp magnitude (mm) and the 35 mm actual-lead latch.
+          dispatch_acceptance_position_tolerance_m: 0.002
+          dispatch_acceptance_rotation_tolerance_rad: 0.005
+          # THE PLAN LEASH (2026-09-10 pm, jhkim; re-sized the same evening). How far the
+          # dispatched pose may lead this follower's own output. Inside its tracking
+          # budget (20 mm tolerance + 60 mm slack) the plan is otherwise free to sit tens
+          # of mm away: measured 37 mm out along a hand push with a 238 mm/s return
+          # (servo_log_20260910_175117 right arm 76.1-77.1 s) and 25 mm off the floor at
+          # 2.5-4 Hz.
+          #
+          # 15 mm was too tight and was sized from the wrong statistic. Uncensored normal
+          # policy motion in servo_log_20260910_183004 (right arm, 45 s, n=22491) leads by
+          # p50 1.6 / p99 10.3 / max 13.6 mm, and the lead does NOT grow with speed
+          # (max 13.6 mm at 5-20 mm/s, 10.5 mm at 200-400 mm/s), so no speed-proportional
+          # allowance is warranted - only headroom. At 15 mm the leash sat 1.4 mm above the
+          # normal maximum and pinned for the whole 1.1 s of a hand push. 20 mm is 1.5x the
+          # normal maximum and still less than any observed runaway (25-45 mm).
+          #
+          # The leash is a PROJECTION with no memory: the refusal is not booked and not
+          # echoed to the worker (booking it double-counted against a successor that is
+          # already spliced from the dispatched state, and sawtoothed the command at the
+          # 100 Hz replan rate). While the arm is held the command simply stands one leash
+          # length ahead and is carried along by the arm. Watch
+          # *_preview_execution_plan_leash_count (nonzero = the plan tried to run) and
+          # *_preview_execution_plan_leash_shift_m (this tick's refusal).
+          max_plan_lead_m: 0.020
           # Offline candidate jerk_2000_r10.json. Six physical ceilings are
           # inherited from this follower, with angular norm semantics in the QP.
           tracker:
@@ -3137,6 +3248,28 @@ cartesian_control:
             angular_tracking_scale_rad: 0.03
             jerk_weight: 2000.0
             jerk_difference_weight: 0.01
+            # REFERENCE TRUST (2026-09-10, jhkim). The reference is this follower rolled
+            # 240 ms forward, but ready_event replaces the chunk every ~100 ms and executes
+            # rows 0-2, so only the first ~130 ms is a future the policy has committed to.
+            # Past 0.13 s each target is blended toward the constant-velocity continuation
+            # of that committed window, the raw reference keeping an exponentially falling
+            # share that reaches 0.1 at 0.24 s (tau 47.8 ms).
+            # MEASURED WITHOUT IT (servo_log_20260910_162808 @76/88.5/92 s, right arm under
+            # a hand push): chunk rows 10-19 carried 30-100 mm of intended travel while the
+            # executed rows carried 0.5 mm/step, the tracker set off at 120 mm/s toward that
+            # far target, the command stood 26-45 mm ahead of the follower's own output, and
+            # when the next chunks withdrew the future it snapped back at 300-340 mm/s.
+            # A STEADY REFERENCE IS UNCHANGED (its own continuation is itself), so ordinary
+            # free-space tracking, corners and the C2 splice keep today's behaviour; only a
+            # far demand that departs from the committed trend is discounted. Physical
+            # envelopes are untouched, and acceptance still scores the plan against the RAW
+            # reference. This is deliberately not a de-weighting of the far knots in the
+            # objective: that variant was measured on 2026-09-10 to take the coupled contact
+            # solve from 171 to 681 working-set recalculations (0.9 -> 6.3 ms), i.e. past
+            # the 200 cap below, so every contact replan would have been rejected.
+            reference_trust_full_sec: 0.13
+            reference_trust_tail_sec: 0.24
+            reference_trust_tail: 0.1
             linear_tracking_tolerance_m: 0.02
             angular_tracking_tolerance_rad: 0.08
             max_linear_tracking_slack_m: 0.06

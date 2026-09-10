@@ -190,8 +190,21 @@ fi
 #           sent pose still discarded.
 #   chain  : pure plan-chain — each chunk integrates from the PREVIOUS chunk's
 #           integrated tail (no robot-state re-anchor at all). Shortfall carries
-#           over (lag, never loss). Also switches the per-tick command path to
-#           reanchor_mode=last_emitted_continuous unless explicitly overridden.
+#           over (lag, never loss).
+#           2026-09-10: this no longer drags the PER-TICK ABSOLUTE COMMAND path with
+#           it. That path used reanchor_mode=last_emitted_continuous, i.e. its own
+#           never-re-anchored chain, and it stood 17-19 mm (z -16, x -9) away from the
+#           servo's actual command for a whole run — measured by joining the step log
+#           and servo_log_20260910_175117. Under delta_preview that absolute target is
+#           not what drives the arm (the follower consumes the delta rows), but it IS
+#           what the ROI / floor / reach checks are evaluated against, what the SMD
+#           falls back to when the follower disengages, and what every step-log metric
+#           reports — so a private 17 mm offset there is a wrong safety input and a
+#           latent jump at re-engage. It now re-anchors to FK(q_sent) every chunk
+#           (measured_legacy with _state_anchor_source()=="command" in chain mode);
+#           the chunk-delta chain keeps carrying its shortfall, which is this knob's
+#           actual job. Override with FLOW_INFER_TCP_REANCHOR_MODE if a run needs the
+#           old private chain.
 # Action encoding of the served checkpoint (FLOW_INFER_ACTION_MODE):
 #   delta    (default): rows are per-step ee_local deltas, chained downstream.
 #   anchored : rows are chunk-start(t0)-anchored transforms (UMI PD2.1 -- the
@@ -213,7 +226,7 @@ CHUNK_ANCHOR="${FLOW_INFER_CHUNK_ANCHOR:-actual}"
 if [ "$CHUNK_ANCHOR" != "actual" ]; then
   SEQ_ARGS+=(--chunk-anchor-source "$CHUNK_ANCHOR")
   if [ "$CHUNK_ANCHOR" = "chain" ] && [ -z "${FLOW_INFER_TCP_REANCHOR_MODE:-}" ]; then
-    TCP_REANCHOR_MODE=last_emitted_continuous
+    TCP_REANCHOR_MODE=measured_legacy
   fi
   echo "[flow-infer] chunk_anchor_source=$CHUNK_ANCHOR (reanchor=$TCP_REANCHOR_MODE)"
 fi

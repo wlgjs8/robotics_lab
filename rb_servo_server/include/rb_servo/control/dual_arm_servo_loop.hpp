@@ -30,6 +30,7 @@
 #include "rb_servo/network/chunk_frame_receiver.hpp"
 #include "rb_servo/control/self_collision.hpp"
 #include "rb_servo/control/admittance_overlay.hpp"
+#include "rb_servo/control/preview_contact_authority.hpp"
 #include "rb_servo/control/collision_monitor.hpp"
 #include "rb_servo/control/init_motion_planner.hpp"
 #include "rb_servo/control/floor_constraint.hpp"
@@ -1097,6 +1098,14 @@ private:
     bool right_overlay_bounded_prev_ = false;
     bool left_gate_closed_prev_ = false;
     bool right_gate_closed_prev_ = false;
+    // Chunk-follower contact DIRECTION Schmitt state (2026-09-10): armed as soon as
+    // the gate's slow force vector stands over gate_stream_arm_force_n (arming is
+    // never delayed - holding back sooner is the safe side), released only after it
+    // has stayed below gate_stream_release_force_n for gate_stream_release_dwell_sec.
+    // The release timer is what stops a violently varying push from toggling the
+    // dispatched contact direction at ~30 Hz.
+    control::FollowerContactDirectionArming left_follower_contact_dir_{};
+    control::FollowerContactDirectionArming right_follower_contact_dir_{};
     // The FOLD's running total (force_control.fold_deviation): how far force has
     // moved each arm's plan this run, stand frame. Telemetry only - the overlay's
     // own deviation is ~0 on a fold path, so this is the number that says what the

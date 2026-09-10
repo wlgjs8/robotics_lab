@@ -53,6 +53,7 @@ PreviewTrackerConfig trackerConfig() {
   c.max_reference_chart_angle_rad=1.; c.feasibility_tolerance=1e-7;
   c.max_solve_time_sec=.5; c.max_working_set_recalculations=300;
   c.jerk_weight=2000.; c.jerk_difference_weight=10.;
+  c.reference_trust_full_sec=.13; c.reference_trust_tail_sec=.24; c.reference_trust_tail=.1;
   return c;
 }
 CartesianChunkFollowerConfig followerConfig() {
@@ -290,15 +291,35 @@ bool testClampedDispatchSplice() {
   auto contact=request(follower,1.02);contact.cold_start=false;contact.identity.parent_plan_id=first.identity.request_id;
   contact.predecessor=first.trajectory;contact.predecessor_origin_sec=first.splice_at_sec;
   contact.contact_gate=.5;contact.contact_normal_stand={1,0,0};
-  // Without the dispatched state the predecessor's closing velocity violates knot 0:
-  // refused, never clipped (the accepted splice is not the worker's to change).
+  // Without the dispatched state the predecessor's closing velocity violates knot 0.
+  // 2026-09-10 pm: no longer refused. The splice keeps the predecessor's state
+  // (never clipped) and the authority is widened along the fastest realisable brake.
   CHECK(worker.trySubmit(follower,contact));PreviewExecutionResult out;CHECK(waitResult(worker,out));
-  CHECK(out.status==PreviewExecutionWorkerStatus::SolveRejected);
-  CHECK(out.diagnostics.status==PreviewSolveStatus::Infeasible);
+  if(!out.accepted())std::cerr<<"unflagged contact splice status="<<static_cast<int>(out.status)
+      <<" solve="<<static_cast<int>(out.diagnostics.status)<<" violation="<<out.diagnostics.max_contact_velocity_violation_m_s
+      <<" rows="<<out.diagnostics.contact_constraint_rows<<" decomposed="<<out.diagnostics.contact_decomposed
+      <<" coupled_fallback="<<out.diagnostics.contact_coupled_fallback<<" nwsr="<<out.diagnostics.working_set_recalculations
+      <<" maxviol="<<out.diagnostics.max_constraint_violation<<" init v="<<out.initial.linear_velocity.transpose()
+      <<" a="<<out.initial.linear_acceleration.transpose()<<'\n';
+  CHECK(out.accepted());
+  CHECK((out.initial.linear_velocity-at_splice.linear_velocity).norm()<1e-12);   // never clipped
+  CHECK((out.initial.linear_acceleration-at_splice.linear_acceleration).norm()<1e-12);
+  {
+    const auto& tr=trackerConfig();const double tol=tr.feasibility_tolerance;
+    const double v0=at_splice.linear_velocity.x();
+    const double t_brake=v0/tr.max_linear_acceleration_m_s2+2*tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+3*tr.planning_dt_sec;
+    for(int k=0;k<=120;++k) {
+      PreviewMotionSample s;CHECK(out.trajectory.sample(.002*k,s));
+      if(.002*k>=t_brake)CHECK(s.linear_velocity.x()<=tol);
+    }
+  }
   contact.contact_clamped_dispatch=true;contact.dispatch_offset_m={-.0005,0,0};
   CHECK(worker.trySubmit(follower,contact));CHECK(waitResult(worker,out));
   if(!out.accepted())std::cerr<<"clamped dispatch worker status="<<static_cast<int>(out.status)
-      <<" solve="<<static_cast<int>(out.diagnostics.status)<<" slack="<<out.diagnostics.max_position_tracking_slack_m<<'\n';
+      <<" solve="<<static_cast<int>(out.diagnostics.status)<<" slack="<<out.diagnostics.max_position_tracking_slack_m
+      <<" nwsr="<<out.diagnostics.working_set_recalculations<<" rows="<<out.diagnostics.contact_constraint_rows
+      <<" decomposed="<<out.diagnostics.contact_decomposed<<" fallback="<<out.diagnostics.contact_coupled_fallback
+      <<" cviol="<<out.diagnostics.max_contact_velocity_violation_m_s<<" time="<<out.diagnostics.solve_time_sec<<'\n';
   CHECK(out.accepted());CHECK(out.diagnostics.contact_constrained);
   const double tol=trackerConfig().feasibility_tolerance;
   CHECK(std::abs(out.initial.pose.x-(at_splice.pose.x-.0005))<1e-12);
@@ -309,6 +330,32 @@ bool testClampedDispatchSplice() {
   CHECK((out.dispatch_offset_m-Eigen::Vector3d(-.0005,0,0)).norm()==0);
   PreviewMotionSample started;CHECK(out.trajectory.sample(0.,started));
   CHECK(std::abs(started.pose.x-out.initial.pose.x)<1e-12);
+  // Mid-slew splice (2026-09-10 pm): the executor still dispatches part of the
+  // closing velocity under its ceiling; the worker splices from that with the
+  // ramp's deceleration and widens the authority along the fastest realisable
+  // brake instead of refusing. The plan never closes faster than dispatched and
+  // is inside the authority once that brake is over.
+  const double v_ceiling=std::min(at_splice.linear_velocity.x(),.5*at_splice.linear_velocity.x()+.005);
+  auto slewed=contact;slewed.contact_dispatch_ceiling_m_s=v_ceiling;
+  CHECK(worker.trySubmit(follower,slewed));CHECK(waitResult(worker,out));
+  if(!out.accepted())std::cerr<<"mid-slew worker status="<<static_cast<int>(out.status)
+      <<" solve="<<static_cast<int>(out.diagnostics.status)<<" violation="<<out.diagnostics.max_contact_velocity_violation_m_s<<'\n';
+  CHECK(out.accepted());CHECK(out.diagnostics.contact_constrained);
+  CHECK(std::abs(out.initial.linear_velocity.x()-v_ceiling)<1e-12);
+  CHECK(out.initial.linear_acceleration.x()<=tol);   // closing acceleration removed, no retreat injected
+  {
+    const auto& tr=trackerConfig();
+    // fastest realisable brake from (v_ceiling, 2 m/s^2): bounded by the constant-jerk
+    // planning-grid ramp; certainly finished within this many seconds
+    const double t_brake=v_ceiling/tr.max_linear_acceleration_m_s2+tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+2*tr.planning_dt_sec;
+    for(int k=0;k<=120;++k) {
+      PreviewMotionSample s;CHECK(out.trajectory.sample(.002*k,s));
+      CHECK(s.linear_velocity.x()<=v_ceiling+2e-3+tol);   // Bernstein/chord margin j h^2/4 at most
+      if(.002*k>=t_brake)CHECK(s.linear_velocity.x()<=tol);
+    }
+  }
+  auto bad_ceiling=slewed;bad_ceiling.contact_dispatch_ceiling_m_s=-1.;
+  CHECK(worker.trySubmit(follower,bad_ceiling));CHECK(waitResult(worker,out));CHECK(out.status==PreviewExecutionWorkerStatus::InvalidRequest);
   // The offset/clamp describe a held-back ACTIVE plan: no cold start, no brake
   // predecessor, and a clamp needs a contact.
   auto bad=contact;bad.cold_start=true;bad.identity.parent_plan_id=0;bad.predecessor=PreviewPolynomialTrajectory{};

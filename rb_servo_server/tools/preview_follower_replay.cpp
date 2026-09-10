@@ -58,12 +58,14 @@ Parameters readParameters(const char* path) {
     exactKeys(c, {"planning_dt_sec", "horizon_steps", "max_linear_velocity_m_s", "max_linear_acceleration_m_s2", "max_linear_jerk_m_s3",
       "max_angular_velocity_rad_s", "max_angular_acceleration_rad_s2", "max_angular_jerk_rad_s3",
       "linear_tracking_scale_m", "angular_tracking_scale_rad", "jerk_weight", "jerk_difference_weight",
+      "reference_trust_full_sec", "reference_trust_tail_sec", "reference_trust_tail",
       "linear_tracking_tolerance_m", "angular_tracking_tolerance_rad", "max_linear_tracking_slack_m", "max_angular_tracking_slack_rad",
       "max_reference_chart_angle_rad", "feasibility_tolerance", "max_working_set_recalculations", "max_solve_time_sec"}, "tracker");
 #define FIELD(name) p.tracker.name=rr::finiteNumber(c.at(#name))
     FIELD(planning_dt_sec); FIELD(max_linear_velocity_m_s); FIELD(max_linear_acceleration_m_s2); FIELD(max_linear_jerk_m_s3);
     FIELD(max_angular_velocity_rad_s); FIELD(max_angular_acceleration_rad_s2); FIELD(max_angular_jerk_rad_s3);
     FIELD(linear_tracking_scale_m); FIELD(angular_tracking_scale_rad); FIELD(jerk_weight); FIELD(jerk_difference_weight);
+    FIELD(reference_trust_full_sec); FIELD(reference_trust_tail_sec); FIELD(reference_trust_tail);
     FIELD(linear_tracking_tolerance_m); FIELD(angular_tracking_tolerance_rad); FIELD(max_linear_tracking_slack_m); FIELD(max_angular_tracking_slack_rad);
     FIELD(max_reference_chart_angle_rad); FIELD(feasibility_tolerance); FIELD(max_solve_time_sec);
 #undef FIELD

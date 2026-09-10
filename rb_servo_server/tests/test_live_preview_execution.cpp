@@ -24,13 +24,13 @@ CartesianChunkFollowerConfig rawConfig() {
   CartesianChunkFollowerConfig c;c.lin={.6,12,2000};c.ang={1.4,40,4000};
   c.window={0,8,4,1};c.fresh_chunk_replan=true;c.continuous_hold_resume=true;return c;
 }
-RuckigFollowerConfig config(bool recovery=false) {
+RuckigFollowerConfig config(bool recovery=false,double leash=.020) {
   RuckigFollowerConfig c;c.enable=true;c.controller=RuckigFollowerController::DeltaPreview;
   c.fresh_chunk_replan=true;c.continuous_hold_resume=true;
   c.plan_leash_enable=true;c.plan_leash_start_m=.01;c.plan_leash_start_rad=.0349;
   c.plan_leash_full_m=.05;c.plan_leash_full_rad=.1;c.plan_leash_min_gate=.25;
   auto& p=c.preview_execution;p.enable=true;p.replan_period_sec=.01;p.splice_lead_sec=.01;
-  p.max_result_age_sec=.05;p.worker_poll_period_sec=.0005;p.max_source_rows=32;
+  p.max_result_age_sec=.05;p.worker_poll_period_sec=.0005;p.max_source_rows=32;p.max_plan_lead_m=leash;
   p.cursor={true,.1,.2,1.1,1e-6,1e-6};
   if(recovery)p.recovery={true,.25,3};
   auto& t=p.tracker;t.planning_dt_sec=.01;t.horizon_steps=24;
@@ -38,6 +38,7 @@ RuckigFollowerConfig config(bool recovery=false) {
   t.max_angular_velocity_rad_s=1.4;t.max_angular_acceleration_rad_s2=40;t.max_angular_jerk_rad_s3=4000;
   t.linear_tracking_scale_m=.01;t.angular_tracking_scale_rad=.03;
   t.jerk_weight=2000;t.jerk_difference_weight=.01;
+  t.reference_trust_full_sec=.13;t.reference_trust_tail_sec=.24;t.reference_trust_tail=.1;
   t.linear_tracking_tolerance_m=.02;t.angular_tracking_tolerance_rad=.08;
   t.max_linear_tracking_slack_m=.06;t.max_angular_tracking_slack_rad=.27;
   t.max_reference_chart_angle_rad=1;t.feasibility_tolerance=1e-7;
@@ -54,15 +55,28 @@ ChunkFrame frame(std::uint64_t wire=17,std::uint64_t recv=8,double delta=.001,do
 void letWorkerRun() {std::this_thread::sleep_for(std::chrono::milliseconds(3));}
 struct Fixture {
   CartesianChunkFollower raw{rawConfig()};
+  double leash_m{.020};
   LivePreviewExecution exec;
   Pose6D accepted{pose()};std::uint64_t tick{0};
-  explicit Fixture(double delta=.001,double angular_delta=0.,bool recovery=false)
-      : exec(config(recovery),rawConfig(),kDt) {raw.submitDeltaFrame(frame(17,8,delta,angular_delta),accepted);}
+  explicit Fixture(double delta=.001,double angular_delta=0.,bool recovery=false,double leash=.020)
+      : leash_m(leash),exec(config(recovery,leash),rawConfig(),kDt) {
+    raw.submitDeltaFrame(frame(17,8,delta,angular_delta),accepted);
+  }
   double now() const {return static_cast<double>(kStartNs+tick*kDtNs)*1e-9;}
   LivePreviewOutput step(bool stationary=true,double gate=1.,
                          const Eigen::Vector3d& normal=Eigen::Vector3d::Zero()) {
     setExternalSteadyNs(kStartNs+tick*kDtNs);raw.tick(kDt);
     auto out=exec.step(now(),raw,accepted,stationary,gate,normal);++tick;return out;
+  }
+  // THE PLAN LEASH invariant (2026-09-10): while an active plan is being dispatched,
+  // the pose sent may not lead the source's own output by more than max_plan_lead_m.
+  // A brake is exempt by design (it must land where its own dynamics put it).
+  bool leashed() const {
+    if(exec.braking())return true;
+    const auto& source=raw.outputKinematics().pose;
+    const Eigen::Vector3d lead(exec.sample().pose.x-source.x,exec.sample().pose.y-source.y,
+                               exec.sample().pose.z-source.z);
+    return lead.norm()<=leash_m+1e-9;
   }
   bool accept(const LivePreviewOutput& out) {
     if(!out.active)return true;
@@ -250,7 +264,7 @@ bool currentVelocityAuthority() {
   // closing authority but exceeds a second multiplication by the force gate.
   for(int i=0;i<35&&!witnessed_no_double_gate;++i) {
     letWorkerRun();const auto out=f.step(true,.01,Eigen::Vector3d::UnitX());
-    CHECK(!out.fault&&!f.exec.braking());CHECK(f.accept(out));
+    CHECK(!out.fault&&!f.exec.braking());CHECK(f.leashed());CHECK(f.accept(out));
     const double raw_v=f.raw.outputKinematics().velocity.x;
     const double preview_v=f.exec.sample().linear_velocity.x();
     witnessed_no_double_gate=out.active&&raw_v>1e-5&&preview_v>.01*raw_v+1e-7;
@@ -273,17 +287,23 @@ bool currentVelocityAuthority() {
   CHECK(f.exec.telemetry().contact_guard_count==0);
   CHECK(f.exec.telemetry().contact_clamp_count==1&&f.exec.contactClampActive());
   const double tol=config().preview_execution.tracker.feasibility_tolerance;
-  CHECK(f.exec.sample().linear_velocity.x()<=tol);
+  // 2026-09-10 pm: SLEWED, not cut. The dispatched closing velocity only falls from
+  // what was last dispatched, along the tracker's own jerk/acceleration limits.
+  const auto& tr=config().preview_execution.tracker;
+  const double v_prev=before_clamp.linear_velocity.x();
+  CHECK(f.exec.sample().linear_velocity.x()<=v_prev+tol);
+  CHECK(f.exec.sample().linear_velocity.x()>=v_prev-tr.max_linear_acceleration_m_s2*kDt-tol);
+  CHECK(f.exec.sample().linear_velocity.x()<v_prev-tol);
   CHECK(f.exec.sample().linear_acceleration.x()<=tol);
   // held back: no advance into the contact beyond the refused displacement's
   // second-order residual of one tick
-  CHECK(f.exec.sample().pose.x<=before_clamp.pose.x+1e-6);
+  CHECK(f.exec.sample().pose.x<=before_clamp.pose.x+v_prev*kDt+1e-6);
   CHECK(f.exec.telemetry().contact_clamp_shift_m>0);
   CHECK(f.accept(stopped));
   // The constrained replan (contact knots at authority 0) takes over without a
   // brake; the clamp retires with it and closing stays inside authority.
-  bool replanned=false;
-  for(int i=0;i<40&&!replanned;++i) {
+  bool replanned=false;double last_closing=f.exec.sample().linear_velocity.x();
+  for(int i=0;i<60&&!replanned;++i) {
     letWorkerRun();const auto out=f.step(true,.01,Eigen::Vector3d::UnitX());
     if(!(out.active&&!out.fault&&!f.exec.braking())) {
       const auto& tl=f.exec.telemetry();
@@ -294,11 +314,16 @@ bool currentVelocityAuthority() {
                <<" solve="<<tl.last_solve_status<<" raw_v="<<f.raw.outputKinematics().velocity.x<<'\n';
     }
     CHECK(out.active&&!out.fault&&!f.exec.braking());
-    CHECK(f.exec.sample().linear_velocity.x()<=std::max(0.,f.raw.outputKinematics().velocity.x)+tol);
+    // monotone: never above what was last dispatched (or the authority), and
+    // once the slew retires the plan itself is inside the authority
+    const double closing=f.exec.sample().linear_velocity.x();
+    CHECK(closing<=std::max(last_closing,std::max(0.,f.raw.outputKinematics().velocity.x))+tol);
+    last_closing=closing;
     CHECK(f.accept(out));
     replanned=!f.exec.contactClampActive();
   }
-  CHECK(replanned);CHECK(f.exec.telemetry().contact_guard_count==0);
+  CHECK(replanned);CHECK(f.exec.sample().linear_velocity.x()<=std::max(0.,f.raw.outputKinematics().velocity.x)+tol);
+  CHECK(f.exec.telemetry().contact_guard_count==0);
   CHECK(f.exec.telemetry().contact_clamp_shift_m==0);
   return true;
 }
@@ -317,13 +342,22 @@ bool contactClampFallsBackToBrakeOnlyWhenNoReplanArrives() {
   CHECK(moving);
   f.raw.setPlanRateGate(0);
   bool braked=false;std::uint64_t clamps=0;
+  const double tol=config().preview_execution.tracker.feasibility_tolerance;
+  double last_closing=f.exec.sample().linear_velocity.x();bool reached=false;
   for(int i=0;i<200&&!braked;++i) {
     const auto out=f.step(true,0,Eigen::Vector3d::UnitX());  // no letWorkerRun: no replan can land
     CHECK(!out.fault);CHECK(f.accept(out));
     clamps=f.exec.telemetry().contact_clamp_count;
     braked=f.exec.braking();
-    if(!braked)CHECK(f.exec.sample().linear_velocity.x()<=config().preview_execution.tracker.feasibility_tolerance);
+    if(!braked) {
+      // slewed down monotonically to the authority (0), then held there
+      const double closing=f.exec.sample().linear_velocity.x();
+      CHECK(closing<=last_closing+tol);last_closing=closing;
+      reached=reached||closing<=tol;
+      if(reached)CHECK(closing<=tol);
+    }
   }
+  CHECK(reached);
   CHECK(clamps>1);
   // the plan expired (braking_expired): a brake, not a fault, and no clamp ever
   // executed a closing velocity
@@ -365,7 +399,8 @@ bool rejectedStagedPlanRetainsBrakeClock() {
   setExternalSteadyNs(kStartNs);Fixture f(.01);CHECK(f.engage());
   PreviewBrake expected(config().preview_execution.tracker,kDt);bool moving_seed=false;
   for(int i=0;i<90&&!moving_seed;++i) {
-    letWorkerRun();const auto out=f.step();CHECK(!out.fault&&!f.exec.braking());CHECK(f.accept(out));
+    letWorkerRun();const auto out=f.step();CHECK(!out.fault&&!f.exec.braking());
+    CHECK(f.leashed());CHECK(f.accept(out));
     moving_seed=f.exec.sample().linear_velocity.x()>.08&&
         expected.start(f.exec.sample())==PreviewBrakeStatus::Ready&&expected.durationSec()>.028;
   }
@@ -919,6 +954,40 @@ bool sentJointStationarityUsesTolerance() {
   return true;
 }
 
+// THE LEASH IS A PROJECTION, NOT AN ACCUMULATOR (2026-09-10 pm). The first version
+// booked every refusal into the held-back shift, i.e. into the next request's
+// dispatch_offset_m. Since the successor is spliced FROM the dispatched state, that
+// double-counted: the command stepped back by the residual at each admission and
+// sawtoothed at the 100 Hz replan rate (measured 2-8 mm per step, servo_log_
+// 20260910_183004 right arm 46.0-47.1 s, ending in an accepted_deviation latch).
+// Run with a leash far below the ordinary tracking lead so it fires on nearly every
+// tick, and hold it to three things: the bound holds, nothing is booked, and the
+// dispatched pose stays continuous.
+bool leashProjectsWithoutBookkeepingOrSawtooth() {
+  setExternalSteadyNs(kStartNs);
+  Fixture f(.004,0.,false,.0005);   // 120 mm/s of source motion against a 0.5 mm leash
+  CHECK(f.engage());
+  double max_step=0;bool fired=false,moved=false,have_previous=false;Pose6D previous{};
+  for(int i=0;i<200;++i) {
+    letWorkerRun();const auto out=f.step();
+    CHECK(!out.fault);CHECK(f.leashed());CHECK(f.accept(out));
+    CHECK(f.exec.telemetry().contact_clamp_shift_m==0.);   // nothing is ever booked
+    if(f.exec.telemetry().plan_leash_count>0)fired=true;
+    if(out.active) {
+      if(have_previous) {
+        const double step=math::positionDistance(previous,out.pose);
+        max_step=std::max(max_step,step);moved=moved||step>1e-6;
+      }
+      previous=out.pose;have_previous=true;
+    }
+  }
+  CHECK(fired&&moved);
+  CHECK(f.exec.telemetry().plan_leash_shift_m>=0.);
+  // 2 ms at the follower's own 0.6 m/s ceiling is 1.2 mm; the sawtooth was 2-8 mm.
+  CHECK(max_step<.0013);
+  return true;
+}
+
 int main() {
   const bool ok=coldAndC2Splice()&&epochsAndContinuousGateIdentity()&&acceptedTransactionGaugeAndDeviation()&&
       frameShiftAndCanonicalIndependence()&&expiryAndDispatchRefusal()&&invalidInputAndContactStop()&&
@@ -931,7 +1000,8 @@ int main() {
       recoveryOutputRejectsNanosecondOverflowBoundary()&&recoverySeedSurvivesWaitingForStationaryDispatch()&&
       explicitResetCancelsPendingRecoverySeed()&&pendingRecoverySeedSharesGeometricFold()&&
       recordedAngularExpiryStateHasFiniteBrake()&&stationarySeedRefusalNamesThePredicate()&&
-      sentJointStationarityUsesTolerance()&&contactClampFallsBackToBrakeOnlyWhenNoReplanArrives();
+      sentJointStationarityUsesTolerance()&&contactClampFallsBackToBrakeOnlyWhenNoReplanArrives()&&
+      leashProjectsWithoutBookkeepingOrSawtooth();
   setExternalSteadyNs(0);
   if(!ok)return 1;
   std::cout<<"live preview execution: all checks passed (no hardware)\n";return 0;

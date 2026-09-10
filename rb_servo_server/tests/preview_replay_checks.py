@@ -27,6 +27,8 @@ def parameters():
             'max_angular_acceleration_rad_s2': 40., 'max_angular_jerk_rad_s3': 4000.,
             'linear_tracking_scale_m': .01, 'angular_tracking_scale_rad': .03,
             'jerk_weight': 20., 'jerk_difference_weight': .01,
+            'reference_trust_full_sec': .13, 'reference_trust_tail_sec': .24,
+            'reference_trust_tail': .1,
             'linear_tracking_tolerance_m': .02, 'angular_tracking_tolerance_rad': .08,
             'max_linear_tracking_slack_m': .08, 'max_angular_tracking_slack_rad': .25,
             'max_reference_chart_angle_rad': 1., 'feasibility_tolerance': 1e-7,

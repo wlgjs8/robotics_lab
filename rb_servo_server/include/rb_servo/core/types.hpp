@@ -442,8 +442,12 @@ struct PreviewExecutionTelemetry {
     // follower's closing-velocity authority instead of braked; the refused advance is
     // held back until the constrained replan takes over.
     uint64_t contact_clamp_count = 0;
+    uint64_t plan_leash_count = 0;
     bool contact_clamp_active = false;
     double contact_clamp_shift_m = 0.0;
+    // This tick's leash refusal (0 when the leash did not fire). The leash keeps no
+    // accumulator - it is a projection - so its magnitude is visible only here.
+    double plan_leash_shift_m = 0.0;
 
     // Latest observed result and cumulative counts survive lifecycle resets.
     // All status/reason pointers must be static literals. Result timing is in

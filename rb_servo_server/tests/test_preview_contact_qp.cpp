@@ -17,6 +17,7 @@ PreviewTrackerConfig config() {
   c.linear_tracking_tolerance_m=.02;c.angular_tracking_tolerance_rad=.08;
   c.max_linear_tracking_slack_m=.08;c.max_angular_tracking_slack_rad=.25;
   c.max_reference_chart_angle_rad=1.;c.feasibility_tolerance=1e-7;
+  c.reference_trust_full_sec=.13;c.reference_trust_tail_sec=.24;c.reference_trust_tail=.1;
   c.max_solve_time_sec=1.;c.max_working_set_recalculations=500;
   c.jerk_weight=2000.;c.jerk_difference_weight=.01;
   return c;

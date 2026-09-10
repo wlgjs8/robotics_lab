@@ -1328,6 +1328,9 @@ force_control:
     stream_arm_force_n:      5.0    # = hold_engage_force_n: one notion of "contact"
     stream_release_force_n:  2.0    # = hold_release_force_n
     stream_arm_dwell_sec:    0.10   # 3-5 vibration cycles (12-33 ms each measured)
+    # Release dwell for the follower contact-DIRECTION Schmitt (preview path only, so
+    # inert here). Kept in step with stack_real.yaml, where the rationale lives.
+    stream_release_dwell_sec: 0.20
 
   # A DEAD BACKSTOP, not an operating limit. On a fold path the deviation is booked
   # into the plan every tick and never accumulates here; on a declined path (an
