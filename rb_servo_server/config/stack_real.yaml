@@ -574,6 +574,28 @@ safety:
     arrival_taper_enable: true
     arrival_decel_deg_s2: 40.0     # 작을수록 더 완만/긴 감속; cap=√(2·a·d) deg/s
     arrival_min_speed_deg_s: 3.0   # tail이 waypoint_tol로 빨리 안착하도록 최저속도 floor
+    # 2026-09-10 출발 테이퍼(도착 테이퍼의 대칭 짝). 정지한 팔에 goal이 L=6°(pursuit
+    # lookahead) 앞에 놓이면 ddq가 한 틱에 0→wn²·L=1199°/s² 계단, 저크 600,000°/s³ 다.
+    # 실측(09-10 6개 런의 InitMotion 12건 전부, 예: servo_log_20260910_134846 tick 53690):
+    # 송신 속도 0→2.40°/s 한 틱, |a| 1199. 같은 런 정책 주행 50 s 구간의 명령 가속은
+    # p50 30 / p99 242 / max 1030°/s² — 이 한 틱이 주행 전체 최댓값보다 크다. 시작 "탁" 소리.
+    #
+    # 구현은 출력(ddq)이 아니라 **goal을 슬루**한다(joint_smd_tracker.hpp 참조). ddq에
+    # 슬루를 걸면 루프 안 위상지연이라 임계감쇠가 깨진다 — 개발 중 실측으로 8.6° 스텝에서
+    # 1.53° 오버슈트(TCP 21 mm)가 났다. goal 슬루는 2차계 자체를 안 건드리므로 무오버슈트·
+    # 직선 관절경로가 그대로 유지된다.
+    #
+    # 값 선택(핵심 제약): goal 슬루율 = max_jerk/wn² 가 순항속도 v_eq = wn·L/2ζ 보다
+    # 커야 한다. 안 그러면 pursuit carrot을 못 따라가 순항이 느려진다.
+    #   하한 = wn³·L/2ζ = 14.137³·6/2 = 8,477 °/s³  (8000을 쓰면 순항 42.4→40.0으로 6% 손실)
+    # 12,000 = 하한의 1.42배. 40° 이동 pursuit 시뮬 실측:
+    #   저크 off → 첫틱 1199°/s², 실현 peak jerk 599,578, 순항 42.41°/s, 이동 1562 ms
+    #   12,000   → 첫틱   24°/s², 실현 peak jerk  12,000, 순항 42.41°/s, 이동 1618 ms
+    # 즉 50배 부드러워지고 순항속도는 불변, 이동시간만 +56 ms(+3.6%).
+    #
+    # 이건 프로파일 한계이지 안전 클램프가 아니다 — 전역 ddq_max_deg_s2 와
+    # ddq_max_decel_ratio(비상 감속) 경로는 그대로. 0 = 비활성(09-10 이전 동작).
+    max_jerk_deg_s3: 12000.0
   floor_constraint:
     # 2026-07-12 operator decision: explicitly disabled so the 60 mm geometric
     # velocity damper cannot alter bolt-pick approach proprioception. This

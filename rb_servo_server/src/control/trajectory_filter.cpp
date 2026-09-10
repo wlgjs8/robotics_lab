@@ -213,7 +213,14 @@ JointArray TrajectoryFilter::smdJointTarget(
                 dq0[i] = (previous_sent_target[i] - last_previous_sent_target_[i]) / dt_sec;
             }
         }
-        joint_smd_.reset(previous_sent_target, dq0);
+        // A FRESH activation latches the goal at the seed pose; a continuity reseed of an
+        // already-active filter must not, or the departure taper restarts its ramp every
+        // time the safety clamp / output MA nudges the sent target (see reseed()).
+        if (was_active) {
+            joint_smd_.reseed(previous_sent_target, dq0);
+        } else {
+            joint_smd_.reset(previous_sent_target, dq0);
+        }
     }
     joint_smd_.setGoal(raw_target);
     const JointArray out = joint_smd_.step(dt_sec);

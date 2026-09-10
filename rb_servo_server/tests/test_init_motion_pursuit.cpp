@@ -728,6 +728,49 @@ bool test_release_arm_flattens_peer_column() {
     return true;
 }
 
+// ---------------------------------------------------------------------------------
+// initMotionQsyncHoldBlocks: a committed InitMotion must not stream into the queue-sync
+// settling hold.
+//
+// Regression target (2026-09-10, servo_log_20260910_111949.csv, left arm, program start):
+// the sequencer started streaming on the tick the stream armed, the queue entered warmup
+// the NEXT tick and pinned the output, and 738 ms later the release discharged on the
+// global ddq_max ceiling. Three acceleration discontinuities in 0.75 s:
+//   tick 1700  0 -> 2.42 deg/s  (+1212 deg/s^2)   start
+//   tick 1701  2.42 -> 0 deg/s  (-1212 deg/s^2)   hold engages
+//   tick 2070  0 -> 6.00 deg/s  (+3000 deg/s^2, four joints exactly at the clamp) release
+//
+// The rule under test is WHICH arms count. At a program start both boxes enter warmup
+// together; testing "either arm held" would pin a single-arm InitMotion behind the peer's
+// queue, which is exactly the cross-arm coupling the per-arm execs exist to avoid.
+// ---------------------------------------------------------------------------------
+bool test_qsync_hold_blocks_only_its_own_arms() {
+    // Nothing held -> never blocks, whatever the exec drives.
+    RB_CHECK(!initMotionQsyncHoldBlocks(true, false, false, false));
+    RB_CHECK(!initMotionQsyncHoldBlocks(false, true, false, false));
+    RB_CHECK(!initMotionQsyncHoldBlocks(true, true, false, false));
+
+    // A left-only exec follows the LEFT queue only.
+    RB_CHECK(initMotionQsyncHoldBlocks(true, false, true, false));
+    RB_CHECK(!initMotionQsyncHoldBlocks(true, false, false, true));
+
+    // A right-only exec follows the RIGHT queue only. This is the case that matters on
+    // hardware: the second arm pressed at a program start is already at `track` while the
+    // first is still draining, and it must not be held behind it.
+    RB_CHECK(initMotionQsyncHoldBlocks(false, true, false, true));
+    RB_CHECK(!initMotionQsyncHoldBlocks(false, true, true, false));
+
+    // A combined both-arm exec waits for BOTH queues: it streams one 12-DOF path, so
+    // either box still warming up would pin half of it.
+    RB_CHECK(initMotionQsyncHoldBlocks(true, true, true, false));
+    RB_CHECK(initMotionQsyncHoldBlocks(true, true, false, true));
+    RB_CHECK(initMotionQsyncHoldBlocks(true, true, true, true));
+
+    // An idle exec drives nothing and is never blocked.
+    RB_CHECK(!initMotionQsyncHoldBlocks(false, false, true, true));
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_brake_plan() && ok;
@@ -741,6 +784,7 @@ int main() {
     ok = test_request_freshness() && ok;
     ok = test_request_combined_vs_independent() && ok;
     ok = test_release_arm_flattens_peer_column() && ok;
+    ok = test_qsync_hold_blocks_only_its_own_arms() && ok;
     ok = test_auto_tare_after_init() && ok;
     if (!ok) {
         std::cerr << "test_init_motion_pursuit: FAILED\n";

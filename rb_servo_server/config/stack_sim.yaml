@@ -166,6 +166,12 @@ safety:
     arrival_taper_enable: true
     arrival_decel_deg_s2: 25.0     # sim: 더 완만하게(느린 wn과 조합) 관찰용
     arrival_min_speed_deg_s: 3.0
+    # 출발 테이퍼(도착 테이퍼의 대칭 짝). 근거/설계는 stack_real.yaml 참조.
+    # 하한 = wn³·L/2ζ = 3.1416³·6/2 = 93 °/s³ (그 아래면 순항이 throttle된다).
+    # 160 = 하한의 1.7배. sim 프로파일(fn 0.5) 40° pursuit 시뮬 실측:
+    #   저크 off → 첫틱 59.2°/s², peak jerk 29,609, 순항 9.42°/s, 이동 5748 ms
+    #   160      → 첫틱  0.3°/s², peak jerk    160, 순항 9.42°/s, 이동 5950 ms
+    max_jerk_deg_s3: 160.0
   floor_constraint:
     # DISABLED TO MATCH stack_real.yaml (operator, 2026-09-03). Real has run with the
     # stand floor off since the ft branch: the box's own bottom face sits at the stand

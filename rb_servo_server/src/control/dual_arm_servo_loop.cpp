@@ -3560,7 +3560,14 @@ void DualArmServoLoop::loopMain() {
             // (see servo_stream_armed_). Before this the stack holds by NOT
             // streaming: the box keeps its last reference, which is the same
             // mechanism the freedrive suppression already relies on.
-            if (motion_requested) {
+            //
+            // A COMMITTED InitMotion arms it too, even while it is emitting Hold. The
+            // queue-sync settling hold below only advances because held setpoints keep
+            // flowing, and applyInitMotionSequencer now refuses to stream until that hold
+            // lifts — so arming on a MOVING command alone would deadlock the two against
+            // each other (the sequencer waits for `track`, `track` waits for the stream).
+            // Same reason the compliant-Hold path arms it (see the force-control block).
+            if (motion_requested || initMotionSequenceCommitted()) {
                 servo_stream_armed_.store(true, std::memory_order_relaxed);
             }
             const ServoTarget desired =
@@ -11678,6 +11685,30 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     const auto non_idle = [](const InitMotionExec& e) {
         return e.status != InitMotionStatus::Idle;
     };
+    // QUEUE-SYNC SETTLING HOLD (queue_sync.hold_motion_until_track). The servo stream
+    // arms on the first motion command, and the control box's queue then runs warmup
+    // (trim 0, backlog exposed) and drain before it reaches `track`. That hold pins the
+    // OUTPUT at prev_sent — but it does not stop this sequencer, so a fresh InitMotion
+    // used to start streaming INTO the hold and produce three discontinuities in 0.75 s.
+    // MEASURED 2026-09-10 (servo_log_20260910_111949.csv, left arm, program start):
+    //   tick 1700  executing      command velocity 0 -> 2.42 deg/s  (+1212 deg/s^2)
+    //   tick 1701  warmup engages 2.42 -> 0.00 deg/s in ONE tick    (-1212 deg/s^2)
+    //   ticks 1701..2069  pinned for 738 ms with the goal 37.5 deg away
+    //   tick 2070  track, hold lifts: 0 -> 6.00 deg/s in one tick, four of six joints
+    //              EXACTLY at the global ddq_max ceiling [1500,1500,1500,2300,2300,3000]
+    //              (jerk 1.5e6 deg/s^3) — a saturated discharge, not a profile response.
+    // Same shape in the 11:10, 12:30 and 14:11 program starts. Holding the sequencer
+    // instead removes all three: the arm simply stands still until the queue is ready and
+    // then departs once, from rest, under the joint_target_smd departure taper. The wait
+    // is not added latency — the arm was already standing still for it, after a false
+    // start. Planning overlaps the hold, so nothing is serialized behind it. Only the
+    // FIRST arm to move after a program start sees this; later InitMotions (and the peer
+    // arm) are already at `track` and are unaffected.
+    const auto qsync_hold_blocks = [this](const InitMotionExec& e) {
+        return initMotionQsyncHoldBlocks(e.left_active, e.right_active,
+                                         qsyncSettlingHoldActive(ArmId::Left),
+                                         qsyncSettlingHoldActive(ArmId::Right));
+    };
     // Hand ONE arm of a multi-arm exec over to another exec. The exec keeps driving
     // whatever it still owns (its planned column for that arm is untouched); it resets
     // only when nothing is left. See flattenInitMotionWaypointColumn for why the released
@@ -12149,6 +12180,23 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             }
         }
 
+        // Queue-sync settling hold: see qsync_hold_blocks. Held ticks are not part of the
+        // move, so they must not be charged to the execution budget or the stall window
+        // (a 45 s budget survives 0.74 s, but the 6 s stall window would be spending it on
+        // a hold that is by definition making no progress).
+        const bool qsync_held = qsync_hold_blocks(ex);
+        if (qsync_held) {
+            const uint64_t hold_now_ns = nowSteadyNs();
+            ex.start_ns = hold_now_ns;
+            ex.last_progress_ns = hold_now_ns;
+            if (!ex.qsync_hold_announced) {
+                ex.qsync_hold_announced = true;
+                std::cerr << "[INFO] JointTarget init_motion: holding at rest until the "
+                             "control-box queue reaches track (queue_sync warmup/drain); "
+                             "planning continues meanwhile\n";
+            }
+        }
+
         // Runaway bound (progress-aware): a committed sequence gives up (Failed -> hold) so a
         // permanently barrier-blocked corner cannot hold motion authority forever. A move that
         // keeps CLOSING on the goal is not killed by the wall-clock budget (a slow escape that
@@ -12237,6 +12285,14 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 std::cerr << "[WARN] JointTarget init_motion: planning failed (" << result.message
                           << "); holding (fail-closed)\n";
             }
+        }
+
+        // The plan above was polled and committed even while held, so the queue-sync wait
+        // costs nothing: when it lifts, the waypoints are already there and the arm
+        // departs once, from rest.
+        if (qsync_held) {
+            hold_selected(command, ex);
+            return;
         }
 
         switch (ex.status) {
@@ -12478,6 +12534,14 @@ bool initMotionRequestIsFresh(
         }
     }
     return false;
+}
+
+bool initMotionQsyncHoldBlocks(
+    bool exec_drives_left,
+    bool exec_drives_right,
+    bool left_hold_active,
+    bool right_hold_active) {
+    return (exec_drives_left && left_hold_active) || (exec_drives_right && right_hold_active);
 }
 
 bool initMotionRequestIsCombined(
@@ -13024,6 +13088,16 @@ bool DualArmServoLoop::qsyncSettlingHoldActive(ArmId arm) const {
     if (!worker) return false;
     const std::string phase = worker->queueSyncDecision().phase;
     return phase == "warmup" || phase == "drain";
+}
+
+bool DualArmServoLoop::initMotionSequenceCommitted() const {
+    for (const InitMotionExec* ex : {&left_init_motion_exec_, &right_init_motion_exec_}) {
+        if (ex->status == InitMotionStatus::Planning ||
+            ex->status == InitMotionStatus::Executing) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool DualArmServoLoop::motionAllowed() const {

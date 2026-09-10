@@ -457,6 +457,29 @@ A packet that carries NO init_motion profile on either arm is an explicit cancel
 resets every non-idle exec (the arm holds where it is); the deadman's synthetic Hold is
 not — a committed move drives to completion across command staleness.
 
+A committed sequence does not start streaming while its arm's control-box queue is still
+in queue-sync `warmup`/`drain` (`queue_sync.hold_motion_until_track`). That hold pins the
+output at `prev_sent`, so streaming into it produced a false start, a hard stop one tick
+later, and a saturated discharge when it lifted ~0.74 s afterwards. The arm now stands
+still until the queue reaches `track` and departs once, from rest; planning runs during
+the wait, so nothing is serialized behind it. Only the first arm to move after a program
+start sees this. Because the hold only advances while setpoints keep flowing, a committed
+init sequence ARMS the servo stream even while it is emitting Hold — otherwise the
+sequencer and the queue would wait on each other.
+
+### `joint_target_smd` departure taper
+
+`safety.joint_target_smd.max_jerk_deg_s3` bounds how fast the profile's acceleration
+demand may change, by slewing the goal the second-order filter chases — never by clamping
+its output. It is the departure-side partner of `arrival_taper_enable`. Shaping the input
+keeps every guarantee of the unmodified filter (no overshoot, straight-line joint path,
+unchanged equilibrium speed); a slew on the output acceleration is phase lag inside the
+loop and measurably breaks critical damping. The slew rate is `max_jerk / wn^2`, so the
+value must exceed `wn^3 * execution_lookahead_deg / (2*zeta)` or the effective goal cannot
+follow the InitMotion pursuit carrot and the cruise speed is throttled; the config loader
+warns below that threshold. It is a PROFILE limit — `safety.ddq_max_deg_s2` and the
+`ddq_max_decel_ratio` emergency-decel path are untouched.
+
 ### `TcpPoseTarget`
 
 Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. Final TCP pose is targeted, but the intermediate TCP path is not guaranteed to be linear. Real mode is open through the real-mode gates plus `cartesian_control.allow_in_real: true`, and has been validated on the dual-arm physical Cartesian circle.

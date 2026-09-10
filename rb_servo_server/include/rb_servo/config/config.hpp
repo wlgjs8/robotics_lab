@@ -1040,6 +1040,22 @@ struct JointTargetSmdConfig {
     bool arrival_taper_enable = false;
     double arrival_decel_deg_s2 = 200.0;
     double arrival_min_speed_deg_s = 3.0;
+    // DEPARTURE TAPER — the symmetric partner of the arrival taper above, and the only
+    // bound on how fast the profile's ACCELERATION may change. Without it the tracker's
+    // acceleration is a step: a goal placed L degrees ahead of a resting arm makes
+    // ddq jump 0 -> wn^2*L in ONE tick. MEASURED 2026-09-10 across every InitMotion of
+    // the day (12 of 12, e.g. servo_log_20260910_134846.csv tick 53690): the commanded
+    // velocity went 0 -> 2.40 deg/s in one 2 ms tick — 1199 deg/s^2 = wn^2 * the pursuit
+    // lookahead (199.85 * 6.0), at a jerk of 600,000 deg/s^3. That single tick is larger
+    // than the peak command acceleration of a whole 50 s policy run (p99 242, max 1030),
+    // and it is what the operator hears as a hard "clack" at the start of every move.
+    // Limiting the per-tick change of the commanded acceleration turns that step into a
+    // ramp; the steady-state speed (v_eq ~ wn*L/2*zeta) is untouched, so the move is
+    // just as fast. 0 disables (the pre-2026-09-10 behavior).
+    //
+    // This is a PROFILE limit, not a safety clamp: safety.ddq_max_deg_s2 and the
+    // ddq_max_decel_ratio emergency-decel path are unaffected and still bound every tick.
+    double max_jerk_deg_s3 = 0.0;
 };
 
 // Collision-free JointTarget init_motion profile planner (server-side). A direct

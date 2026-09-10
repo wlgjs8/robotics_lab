@@ -417,6 +417,11 @@ private:
     // again where the hold is applied later in the same tick, so the plan and
     // the output can never disagree about whether the arm is held.
     bool qsyncSettlingHoldActive(ArmId arm) const;
+    // True while either exec holds a COMMITTED init sequence (Planning or Executing).
+    // The queue-sync settling hold only advances while setpoints keep flowing, so an
+    // InitMotion that is waiting for `track` must still arm the servo stream even though
+    // it is emitting Hold — otherwise the hold waits for a phase that can never advance.
+    bool initMotionSequenceCommitted() const;
     bool motionAllowed() const;
     bool isRealMode() const;
     std::string currentSendPolicy() const;
@@ -690,6 +695,8 @@ private:
         std::vector<std::pair<JointArray, JointArray>> waypoints;
         std::size_t index = 0;
         int escape_waypoints = 0;  // leading sub-threshold escape waypoints (follow precisely)
+        // One-shot log latch for the queue-sync settling hold (see applyInitMotionSequencer).
+        bool qsync_hold_announced = false;
         std::string message;
         InitMotionPlanResult::FailMode fail_mode = InitMotionPlanResult::FailMode::None;
         double start_clear_m = std::numeric_limits<double>::quiet_NaN();
@@ -1552,6 +1559,17 @@ void flattenInitMotionWaypointColumn(
     std::size_t index,
     bool flatten_left,
     bool flatten_right);
+
+// Does the queue-sync settling hold block THIS exec from streaming? Only the arms the
+// exec actually drives count: at a program start both control boxes enter warmup
+// together, so testing "either arm is held" would pin a single-arm InitMotion behind the
+// PEER arm's queue even when its own is already at `track`. Stateless, so it is
+// unit-testable in isolation (see test_init_motion_pursuit).
+bool initMotionQsyncHoldBlocks(
+    bool exec_drives_left,
+    bool exec_drives_right,
+    bool left_hold_active,
+    bool right_hold_active);
 
 // Brake-before-plan helpers (see InitMotionPlannerConfig::brake_before_plan). Stateless so
 // they are unit-testable in isolation (test_init_motion_pursuit).

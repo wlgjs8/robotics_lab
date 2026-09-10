@@ -1840,6 +1840,27 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(js.natural_frequency_hz, "safety.joint_target_smd.natural_frequency_hz");
         validatePositiveFiniteArray(js.max_velocity_deg_s, "safety.joint_target_smd.max_velocity_deg_s");
         validatePositiveFiniteArray(js.max_accel_deg_s2, "safety.joint_target_smd.max_accel_deg_s2");
+        validateNonNegativeFinite(js.max_jerk_deg_s3, "safety.joint_target_smd.max_jerk_deg_s3");
+        // The departure taper slews the GOAL at max_jerk/wn^2. When that rate is below the
+        // profile's own equilibrium speed v_eq = wn*L/(2*zeta), the effective goal cannot
+        // keep up with the InitMotion pursuit carrot and the whole move runs slow — a
+        // silent tuning regression, not an error, so it warns with the threshold. Measured
+        // 2026-09-10 on the shipped real profile (fn 2.25, L 6.0): 8,000 deg/s^3 cost 6 %
+        // of cruise (42.4 -> 40.0 deg/s); 12,000 (1.42x the threshold) cost none.
+        if (js.max_jerk_deg_s3 > 0.0 && cfg.safety.init_motion_planner.enable &&
+            js.damping_ratio > 0.0) {
+            const double wn = 2.0 * M_PI * js.natural_frequency_hz;
+            const double lookahead = cfg.safety.init_motion_planner.execution_lookahead_deg;
+            const double floor_jerk = wn * wn * wn * lookahead / (2.0 * js.damping_ratio);
+            if (js.max_jerk_deg_s3 < floor_jerk) {
+                std::cerr << "[WARN] safety.joint_target_smd.max_jerk_deg_s3 "
+                          << js.max_jerk_deg_s3
+                          << " deg/s^3 is below wn^3*execution_lookahead_deg/(2*zeta) = "
+                          << floor_jerk
+                          << "; the departure taper will throttle the InitMotion cruise "
+                             "speed (the goal slew cannot follow the pursuit carrot)\n";
+            }
+        }
         if (js.arrival_taper_enable) {
             validatePositiveFinite(js.arrival_decel_deg_s2, "safety.joint_target_smd.arrival_decel_deg_s2");
             validateNonNegativeFinite(js.arrival_min_speed_deg_s, "safety.joint_target_smd.arrival_min_speed_deg_s");
@@ -4345,6 +4366,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "arrival_taper_enable",
                 "arrival_decel_deg_s2",
                 "arrival_min_speed_deg_s",
+                "max_jerk_deg_s3",
             }, "safety.joint_target_smd");
             if (has(js, "enable")) {
                 cfg.safety.joint_target_smd.enable =
@@ -4377,6 +4399,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(js, "arrival_min_speed_deg_s")) {
                 cfg.safety.joint_target_smd.arrival_min_speed_deg_s =
                     asDouble(js["arrival_min_speed_deg_s"], "safety.joint_target_smd.arrival_min_speed_deg_s");
+            }
+            if (has(js, "max_jerk_deg_s3")) {
+                cfg.safety.joint_target_smd.max_jerk_deg_s3 =
+                    asDouble(js["max_jerk_deg_s3"], "safety.joint_target_smd.max_jerk_deg_s3");
             }
         }
         if (has(sec, "init_motion_planner")) {

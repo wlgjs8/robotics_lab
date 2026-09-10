@@ -379,6 +379,248 @@ bool testTrajectoryFilterRebaselinesAfterExternalMove() {
     return true;
 }
 
+// ---------------------------------------------------------------------------------
+// DEPARTURE TAPER (max_jerk_deg_s3), 2026-09-10.
+//
+// Regression target: without it the tracker's ACCELERATION is a step. A resting arm
+// handed a goal L degrees away commands ddq = wn^2*L on its very first tick — for the
+// shipped real profile (fn 2.25 Hz, pursuit lookahead 6 deg) 1199 deg/s^2 reached in one
+// 2 ms tick, a jerk of 600,000 deg/s^3. Measured on all 12 InitMotions of 2026-09-10
+// (e.g. servo_log_20260910_134846.csv tick 53690: command velocity 0 -> 2.40 deg/s in one
+// tick); larger than the peak command acceleration of a whole 50 s policy run.
+//
+// The taper shapes the INPUT (slews the goal), never the output. These tests pin both
+// halves of that choice: the step is gone, AND the filter's own guarantees — no
+// overshoot, straight-line joint path, unchanged cruise speed — all survive.
+// ---------------------------------------------------------------------------------
+
+// The shipped real joint_target_smd profile, so the numbers below are the ones the
+// hardware actually sees.
+JointTargetSmdConfig realProfile() {
+    JointTargetSmdConfig cfg;
+    cfg.enable = true;
+    cfg.damping_ratio = 1.0;
+    cfg.natural_frequency_hz = 2.25;
+    cfg.max_velocity_deg_s = JointArray{60, 60, 60, 80, 80, 100};
+    cfg.max_accel_deg_s2 = JointArray{1300, 1300, 1300, 1900, 1900, 2400};
+    cfg.arrival_taper_enable = true;
+    cfg.arrival_decel_deg_s2 = 40.0;
+    cfg.arrival_min_speed_deg_s = 3.0;
+    return cfg;
+}
+constexpr double kShippedJerk = 12000.0;   // stack_real.yaml
+constexpr double kLookahead = 6.0;         // safety.init_motion_planner.execution_lookahead_deg
+
+struct MoveProfile {
+    double first_tick_accel = 0.0;
+    double peak_accel = 0.0;
+    double peak_jerk = 0.0;
+    double cruise = 0.0;
+    double overshoot = 0.0;
+    int settle_tick = -1;
+};
+
+// Drives joint 0 the way applyInitMotionSequencer does: the pursuit carrot is kept
+// `kLookahead` ahead of the filter output, the final stop is latched for the arrival
+// taper, and the move runs to `distance`.
+MoveProfile pursue(double max_jerk_deg_s3, double distance, int ticks = 3000) {
+    JointTargetSmdConfig cfg = realProfile();
+    cfg.max_jerk_deg_s3 = max_jerk_deg_s3;
+    JointSmdTracker smd(cfg);
+    smd.reset(JointArray{}, JointArray{});
+    JointArray stop{};
+    stop[0] = distance;
+    smd.setArrivalStop(stop);
+    MoveProfile out;
+    double prev_q = 0.0, prev_v = 0.0, prev_a = 0.0;
+    for (int t = 0; t < ticks; ++t) {
+        JointArray carrot{};
+        carrot[0] = std::min(prev_q + kLookahead, distance);
+        smd.setGoal(carrot);
+        const JointArray q = smd.step(kDt);
+        const double v = (q[0] - prev_q) / kDt;
+        const double a = (v - prev_v) / kDt;
+        const double j = (a - prev_a) / kDt;
+        if (t == 0) out.first_tick_accel = std::abs(a);
+        out.peak_accel = std::max(out.peak_accel, std::abs(a));
+        out.peak_jerk = std::max(out.peak_jerk, std::abs(j));
+        out.cruise = std::max(out.cruise, v);
+        out.overshoot = std::max(out.overshoot, q[0] - distance);
+        if (out.settle_tick < 0 && std::abs(q[0] - distance) < 0.05) out.settle_tick = t;
+        prev_q = q[0]; prev_v = v; prev_a = a;
+    }
+    return out;
+}
+
+bool testDepartureTaperRemovesTheStartStep() {
+    const MoveProfile before = pursue(0.0, 40.0);
+    const MoveProfile after = pursue(kShippedJerk, 40.0);
+
+    // Baseline reproduces the measured hardware step: wn^2 * L = 199.85 * 6.0.
+    RB_CHECK(std::abs(before.first_tick_accel - 1199.1) < 5.0);
+    RB_CHECK(before.peak_jerk > 500000.0);
+
+    // The step is gone. The goal slew is max_jerk/wn^2 per second, so the first tick's
+    // acceleration demand is wn^2 * (slew * dt) = max_jerk * dt.
+    RB_CHECK(std::abs(after.first_tick_accel - kShippedJerk * kDt) < 1.0);   // 24 deg/s^2
+    RB_CHECK(after.first_tick_accel < before.first_tick_accel / 40.0);
+    RB_CHECK(after.peak_jerk < before.peak_jerk / 40.0);
+
+    // THE POINT: the move is not slowed down. Cruise is the profile's equilibrium speed
+    // wn*L/(2*zeta) and must survive the taper; only the ramp-in costs time.
+    RB_CHECK(after.cruise > before.cruise * 0.999);
+    RB_CHECK(after.settle_tick > 0);
+    RB_CHECK(after.settle_tick < before.settle_tick + 60);   // < +120 ms on a 1.56 s move
+    return true;
+}
+
+// Why the taper shapes the input: a slew on the OUTPUT acceleration is phase lag inside
+// the loop and destroys the critical damping this filter exists to provide. Measured
+// while developing this, an output slew overshot by 1.53 deg on an 8.6 deg step.
+bool testDepartureTaperNeverOvershoots() {
+    // With an arrival stop (InitMotion) and without (plain PTP / waypoint replay, which
+    // never latches one), across the range where an output slew was worst.
+    for (double d = 0.5; d <= 60.0; d += 0.5) {
+        RB_CHECK(pursue(kShippedJerk, d).overshoot <= 1e-9);
+
+        JointTargetSmdConfig cfg = realProfile();
+        cfg.max_jerk_deg_s3 = kShippedJerk;
+        JointSmdTracker smd(cfg);
+        smd.reset(JointArray{}, JointArray{});
+        JointArray goal{};
+        goal[0] = d;
+        smd.setGoal(goal);   // fixed goal, NO arrival stop
+        double worst = 0.0;
+        for (int t = 0; t < 4000; ++t) worst = std::max(worst, smd.step(kDt)[0] - d);
+        RB_CHECK(worst <= 1e-9);
+    }
+    return true;
+}
+
+// The slew is applied uniformly across joints, so a synchronized PTP still traces a
+// straight line in joint space — the same rule the arrival taper follows. Travel is kept
+// small enough that no per-joint velocity/accel clamp bites, since a saturating clamp
+// bends the path on its own (that is what testStraightLinePathWhenUnclamped covers, and
+// it is unchanged by the taper).
+bool testDepartureTaperPreservesStraightLine() {
+    JointTargetSmdConfig cfg = realProfile();
+    cfg.max_jerk_deg_s3 = kShippedJerk;
+    JointSmdTracker smd(cfg);
+    smd.reset(JointArray{}, JointArray{});
+    const JointArray goal{2.0, -5.0, 8.0, 1.0, -3.0, 4.0};
+    smd.setGoal(goal);
+    for (int t = 0; t < 3000; ++t) {
+        const JointArray q = smd.step(kDt);
+        if (std::abs(q[2]) < 1e-9) continue;   // before motion starts
+        // Every joint keeps the same fraction of its own travel.
+        const double reference = q[2] / goal[2];
+        for (int i = 0; i < kDof; ++i) {
+            RB_CHECK(std::abs(q[i] / goal[i] - reference) < 1e-9);
+        }
+    }
+    return true;
+}
+
+// A handover seeds a VELOCITY (brake-before-plan, jog -> InitMotion). reset() must also
+// restart the effective goal at the seed pose, or the first tick after a reseed steps.
+bool testDepartureTaperResetsTheEffectiveGoal() {
+    JointTargetSmdConfig cfg = realProfile();
+    cfg.max_jerk_deg_s3 = kShippedJerk;
+    JointSmdTracker smd(cfg);
+    smd.reset(JointArray{}, JointArray{});
+    JointArray far{};
+    far[0] = 40.0;
+    smd.setGoal(far);
+    for (int t = 0; t < 200; ++t) smd.step(kDt);   // effective goal has marched out
+
+    JointArray at_rest{};
+    smd.reset(at_rest, JointArray{});
+    JointArray carrot{};
+    carrot[0] = kLookahead;
+    smd.setGoal(carrot);
+    const JointArray q1 = smd.step(kDt);
+    const double first_accel = std::abs(q1[0] / (kDt * kDt));
+    RB_CHECK(first_accel <= kShippedJerk * kDt + 1.0);
+    return true;
+}
+
+// A continuity reseed must be invisible to the departure taper. TrajectoryFilter
+// re-seeds whenever the SMD output and prev_sent differ by more than 0.02 deg — measured
+// at 122 of 673 ticks during an InitMotion (servo_log 2026-09-10). If each reseed
+// collapsed the effective goal onto the position (what reset() does, correctly, for a
+// FRESH activation), the taper would never build its lead and the move would crawl:
+// measured 42.4 -> 3.0 deg/s of cruise at that reset rate.
+bool testDepartureTaperSurvivesContinuityReseeds() {
+    const double unreseeded = pursue(kShippedJerk, 200.0, 3000).cruise;
+    for (int period : {100, 20, 6, 3, 1}) {
+        JointTargetSmdConfig cfg = realProfile();
+        cfg.max_jerk_deg_s3 = kShippedJerk;
+        JointSmdTracker smd(cfg);
+        smd.reset(JointArray{}, JointArray{});
+        JointArray stop{};
+        stop[0] = 200.0;
+        smd.setArrivalStop(stop);
+        double prev_q = 0.0, prev_v = 0.0, cruise = 0.0;
+        for (int t = 0; t < 3000; ++t) {
+            if (t > 0 && t % period == 0) {
+                JointArray at{}, dq{};
+                at[0] = prev_q;
+                dq[0] = prev_v;
+                smd.reseed(at, dq);
+            }
+            JointArray carrot{};
+            carrot[0] = std::min(prev_q + kLookahead, 200.0);
+            smd.setGoal(carrot);
+            const JointArray q = smd.step(kDt);
+            const double v = (q[0] - prev_q) / kDt;
+            cruise = std::max(cruise, v);
+            prev_q = q[0]; prev_v = v;
+        }
+        RB_CHECK(std::abs(cruise - unreseeded) < 0.01);
+    }
+
+    // reset() keeps its own contract: a FRESH activation still latches the goal at the
+    // seed pose, so a genuinely new move ramps from zero instead of inheriting a lead.
+    JointTargetSmdConfig cfg = realProfile();
+    cfg.max_jerk_deg_s3 = kShippedJerk;
+    JointSmdTracker smd(cfg);
+    smd.reset(JointArray{}, JointArray{});
+    JointArray far{};
+    far[0] = 60.0;
+    smd.setGoal(far);
+    for (int t = 0; t < 300; ++t) smd.step(kDt);
+    JointArray elsewhere{};
+    elsewhere[0] = 100.0;
+    smd.reset(elsewhere, JointArray{});
+    JointArray carrot{};
+    carrot[0] = 100.0 + kLookahead;
+    smd.setGoal(carrot);
+    const JointArray q1 = smd.step(kDt);
+    RB_CHECK(std::abs((q1[0] - 100.0) / (kDt * kDt)) <= kShippedJerk * kDt + 1.0);
+    return true;
+}
+
+// Disabled (0) must be bit-for-bit the pre-2026-09-10 behavior.
+bool testDepartureTaperDisabledIsUnchanged() {
+    JointTargetSmdConfig legacy = realProfile();
+    RB_CHECK(legacy.max_jerk_deg_s3 == 0.0);   // the field defaults to off
+    JointTargetSmdConfig off = realProfile();
+    off.max_jerk_deg_s3 = 0.0;
+    JointSmdTracker a(off), b(legacy);
+    a.reset(JointArray{}, JointArray{});
+    b.reset(JointArray{}, JointArray{});
+    JointArray goal{};
+    goal[0] = 25.0;
+    a.setGoal(goal);
+    b.setGoal(goal);
+    for (int t = 0; t < 600; ++t) {
+        const JointArray qa = a.step(kDt);
+        const JointArray qb = b.step(kDt);
+        for (int i = 0; i < kDof; ++i) RB_CHECK(qa[i] == qb[i]);
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -389,6 +631,12 @@ int main() {
     if (!testArrivalTaperGentlerButPreservesCruiseAndSettles()) return 1;
     if (!testArrivalTaperPreservesStraightLine()) return 1;
     if (!testArrivalTaperInertWhenNoStopOrDisabled()) return 1;
+    if (!testDepartureTaperRemovesTheStartStep()) return 1;
+    if (!testDepartureTaperNeverOvershoots()) return 1;
+    if (!testDepartureTaperPreservesStraightLine()) return 1;
+    if (!testDepartureTaperResetsTheEffectiveGoal()) return 1;
+    if (!testDepartureTaperSurvivesContinuityReseeds()) return 1;
+    if (!testDepartureTaperDisabledIsUnchanged()) return 1;
     if (!testTrajectoryFilterDisabledKeepsLegacyRamp()) return 1;
     if (!testTrajectoryFilterSmdProfile()) return 1;
     if (!testTrajectoryFilterRebaselinesAfterExternalMove()) return 1;

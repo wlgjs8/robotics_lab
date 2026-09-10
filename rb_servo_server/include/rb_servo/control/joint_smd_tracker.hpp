@@ -12,6 +12,22 @@
 // limits the zeta/fn dynamics are exact. With damping_ratio >= 1.0 and zero
 // initial velocity the response has no overshoot, and identical zeta/fn across
 // joints traces a straight line in joint space (synchronized-PTP path).
+//
+// The position output is continuous, but the ACCELERATION is not: on the tick a
+// resting arm is given a goal L degrees away, ddq steps from 0 to wn^2*L. That step
+// is an impulsive torque command — the audible clack at the start of every move
+// (measured 2026-09-10: 1199 deg/s^2 / 600,000 deg/s^3 in one 2 ms tick, on all 12
+// InitMotions of the day). config.max_jerk_deg_s3 removes it by SLEWING THE GOAL the
+// filter chases, not by clamping the filter's output: ddq = wn^2*(goal - q) is then a
+// ramp because `goal` is, and the second-order dynamics above are untouched.
+//
+// Shaping the input rather than the output is the whole point. A slew rate on ddq is
+// phase lag INSIDE the loop: it eats the damping the zeta/fn pair was chosen for, and a
+// critically damped profile starts overshooting (measured while developing this: up to
+// 1.53 deg of overshoot on an 8.6 deg step, 21 mm at the TCP, on a filter whose entire
+// contract is "no overshoot"). Slewing the goal cannot do that — every guarantee of the
+// unmodified filter survives, including the monotone approach and the straight-line
+// joint path (the slew is applied uniformly across joints, like the arrival taper).
 
 #include <algorithm>
 #include <cmath>
@@ -38,15 +54,37 @@ public:
             const double dq = std::isfinite(dq_deg_s[i]) ? dq_deg_s[i] : 0.0;
             dq_[i] = std::clamp(dq, -config_.max_velocity_deg_s[i], config_.max_velocity_deg_s[i]);
         }
+        // A handover seeds a VELOCITY, never an acceleration demand: the effective goal
+        // restarts at the seed pose so the first tick after any (re)seed cannot step.
         goal_ = q_;
+        goal_cmd_ = q_;
         active_ = true;
+    }
+
+    // CONTINUITY RESEED — re-anchor the state at a sent target that moved out from under
+    // the filter (safety clamp, output MA, a Cartesian mode running in between) WITHOUT
+    // discarding the departure taper's progress. reset() latches the effective goal at q,
+    // which is right for a fresh activation and wrong here: TrajectoryFilter re-seeds
+    // whenever its output and prev_sent differ by more than 0.02 deg, measured at 122 of
+    // 673 ticks during an InitMotion (servo_log 2026-09-10). Collapsing the goal that
+    // often means the taper never builds its lead and the whole move crawls — measured
+    // 42.4 -> 3.0 deg/s of cruise at that reset rate. Keeping the goal's LEAD over the
+    // position instead makes a reseed invisible to the ramp.
+    void reseed(const JointArray& q_deg, const JointArray& dq_deg_s) {
+        JointArray lead{};
+        if (active_) {
+            for (int i = 0; i < kDof; ++i) lead[i] = goal_[i] - q_[i];
+        }
+        reset(q_deg, dq_deg_s);
+        for (int i = 0; i < kDof; ++i) goal_[i] = q_[i] + lead[i];
+        goal_cmd_ = goal_;
     }
 
     void deactivate() { active_ = false; clearArrivalStop(); }
 
     // Latest-wins goal: a new JointTarget packet just moves the goal, so both
     // one-shot PTP and streaming jog targets get the same smooth profile.
-    void setGoal(const JointArray& goal_deg) { goal_ = goal_deg; }
+    void setGoal(const JointArray& goal_deg) { goal_cmd_ = goal_deg; }
 
     // Arrival-decel taper: latch the true final stop pose so step() eases the
     // per-step velocity into it as sqrt(2*arrival_decel*d). goal_ (the pursuit
@@ -66,6 +104,28 @@ public:
             return q_;
         }
         const double wn = 2.0 * M_PI * config_.natural_frequency_hz;
+        // DEPARTURE TAPER — slew the effective goal toward the commanded one. The
+        // acceleration demand is wn^2*(goal - q), so bounding the goal's rate of change
+        // bounds that demand's rate of change: a goal step of L no longer lands as
+        // ddq = wn^2*L on one tick. The budget is expressed as the jerk it produces
+        // (jerk = wn^2 * dgoal/dt), which is the quantity the operator hears and the one
+        // measured in the logs. Applied UNIFORMLY over joints — the largest per-joint
+        // move sets the scale and the rest are scaled by the same factor — so the
+        // straight-line joint path of a synchronized PTP is preserved exactly, the same
+        // rule the arrival taper below follows.
+        if (config_.max_jerk_deg_s3 > 0.0 && std::isfinite(config_.max_jerk_deg_s3) && wn > 0.0) {
+            const double goal_slew = config_.max_jerk_deg_s3 * dt_sec / (wn * wn);
+            double worst = 0.0;
+            for (int i = 0; i < kDof; ++i) {
+                worst = std::max(worst, std::abs(goal_cmd_[i] - goal_[i]));
+            }
+            const double scale = worst > goal_slew ? goal_slew / worst : 1.0;
+            for (int i = 0; i < kDof; ++i) {
+                goal_[i] += scale * (goal_cmd_[i] - goal_[i]);
+            }
+        } else {
+            goal_ = goal_cmd_;
+        }
         for (int i = 0; i < kDof; ++i) {
             double ddq = wn * wn * (goal_[i] - q_[i]) - 2.0 * config_.damping_ratio * wn * dq_[i];
             ddq = std::clamp(ddq, -config_.max_accel_deg_s2[i], config_.max_accel_deg_s2[i]);
@@ -109,7 +169,10 @@ private:
     bool active_ = false;
     JointArray q_{};
     JointArray dq_{};
+    // goal_ is the EFFECTIVE goal the filter chases; goal_cmd_ is what setGoal() was
+    // handed. They are identical unless the departure taper is slewing between them.
     JointArray goal_{};
+    JointArray goal_cmd_{};
     JointArray arrival_stop_{};
     bool has_arrival_stop_ = false;
 };
