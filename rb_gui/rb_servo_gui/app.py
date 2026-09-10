@@ -6476,9 +6476,12 @@ def update_gui(
     # swap the drawn arms to them once (no-op on sim / before the first state).
     ensure_calibrated_arm_urdfs(handles.get("scene", {}), latest)
     # After markers: the collision overlay may override ghost/solid visibility.
-    update_self_collision_overlay(handles.get("scene", {}), latest)
+    # The debug checkbox widens the yellow band highlight back to "every pair inside
+    # its d_slow"; always-on yellow means "the barrier is actually braking this pair".
     toggle = handles.get("self_collision_capsules_toggle")
     _self_collision_show = bool(getattr(toggle, "value", False))
+    update_self_collision_overlay(handles.get("scene", {}), latest,
+                                  show_watched=_self_collision_show)
     update_self_collision_near_pairs(
         handles.get("scene", {}),
         latest,

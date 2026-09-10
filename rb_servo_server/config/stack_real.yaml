@@ -926,7 +926,30 @@ safety:
       # the right wrist -- applied corrections up to 4.7 / 5.9 deg/s. Those poses sit
       # at 30 mm clearance or more under the 30 mm floor. The last two runs' closest
       # self pair was 63.9 mm.
-      d_hard_m: 0.030
+      # 2026-09-10: 0.030 -> 0.020, and this line now moves ONLY arm<->arm. Every other
+      # class pins its own pair (arm_stand 20/62, environment 20/62, gripper_gripper
+      # 20/62, intra_arm 5/15, external 3.5/15), so the self set is no longer a shared
+      # default -- that is what the arm<->stand class split earlier today bought.
+      # WHY 20 IS THE RIGHT NUMBER HERE, measured on the 2026-09-10 15:56 run where this
+      # floor bound for 8.3 s (703 ticks, 489 clamps, held at exactly 30.00 mm):
+      #   * the binding pair is left_pika_gripper_base <-> right_link3_1, recovered by
+      #     re-probing the recorded q_sent at the live jaw opening. NOT the finger pair,
+      #     which only binds with the jaw fully open.
+      #   * the model is NOT padded there. Re-evaluating those 25 poses with the REAL
+      #     gripper meshes (BVH) instead of their convex hulls moves the answer by
+      #     p50 0.00 / max 0.23 mm -- the "base hull over-approximates by up to 45.5 mm"
+      #     figure is a worst case elsewhere on the hull, not at the contact region. So
+      #     29.3 mm was real geometry and the floor was the whole constraint.
+      #   * unsafe-direction budget: arm-to-arm model error 1.14 mm mean, centred
+      #     (+0.06), residual RMS 1.06 / leave-one-out 1.51 mm (27 contact poses,
+      #     b5ac8c5). 20 mm is 13x that. Against the more conservative box DH oracle
+      #     term (5.4 mm at the TCP) it is 3.7x -- the same ratio arm_stand took.
+      #   * the 2026-09-05 reason for a wide floor here ("arm<->arm carries ~20 mm of
+      #     dual-arm relative error") is gone: that error was what b5ac8c5 removed.
+      #   * three runs of 2026-09-10: zero ticks below 25 mm on any of them.
+      # Consistency: the same left gripper base is now checked at 20 mm against the
+      # other gripper AND against the other arm, which it was not before.
+      d_hard_m: 0.020
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # 2026-08-26: THIS INVARIANT WAS BEING VIOLATED, and the comment below it had gone
@@ -947,7 +970,18 @@ safety:
       # chatter") is unchanged and still argues for the wider zone, not the narrower one.
       # 2026-09-07: 0.090 -> 0.075 with the floor (see d_hard_m above). Band width
       # 45 mm, need 40 mm at 0.60 m/s / 4.5 m/s^2.
-      d_slow_m: 0.075
+      # 2026-09-10: 0.075 -> 0.062 with the floor. NOT narrower, and the operator asked
+      # for 30 mm (1.5x d_hard) -- it is not reachable: 10 mm of braking distance needs
+      # a_brake = 0.60^2/(2*0.010) = 18 m/s^2, above the follower's own 12 m/s^2 linear
+      # acceleration limit, and an a_brake the arm cannot deliver does not narrow the
+      # band, it just stops the barrier from being able to hold the floor. 40 mm (2x)
+      # would need 9.0, i.e. 75% of that limit, at the cost of twice the deceleration
+      # whenever it engages. What made 62 acceptable instead is that band WIDTH is not
+      # what slows the robot: the allowance is sqrt(2*a*(d - d_hard)), which at the
+      # 62 mm edge is 0.615 m/s -- above the 0.60 m/s command ceiling, so the row is
+      # inert there. A 0.15 m/s approach is unrestricted down to 22.5 mm. The band is
+      # where the check is ARMED, not where braking starts.
+      d_slow_m: 0.062
       # 2026-09-06: 3.0 -> 4.5 m/s^2 (both self-collision families). The loader requires
       # d_slow >= d_hard + v_max^2 / (2 a_brake) against the highest commanded TCP
       # ceiling; that ceiling rose 0.50 -> 0.60 m/s (flow_infer max_linear_velocity),
@@ -1117,9 +1151,24 @@ safety:
       # TCP ceiling or the shared a_brake would make the loader refuse to start. 2 mm
       # keeps that from being a tripwire, and it matches the environment class, which
       # sits at the same 20/62 for the same reason.
+      #
+      # 2026-09-10 (later, operator): 0.020/0.062 -> 0.010/0.052. d_slow follows from
+      # the invariant, it is not a free choice: 0.010 + 0.60^2/(2*4.5) = 0.050, plus the
+      # same 2 mm of headroom the other classes keep. NOTE what does NOT change -- the
+      # band MARGIN (d_slow - d_hard) is 42 mm before and after, so the braking ramp is
+      # identical and the whole band simply shifts 10 mm closer to the stand; the arm is
+      # not braked any harder or any earlier relative to the floor.
+      # WHAT THIS SPENDS. 10 mm is 6.1x the measured arm-to-stand fit spread (1.64 mm,
+      # leave-one-out 1.51 mm) but only 1.85x the box DH oracle term (5.4 mm at the TCP,
+      # left arm, 2026-09-07) -- down from 3.7x at 20 mm. That DH term is the binding
+      # one and has not been re-measured since. Working in its favour: the 40-hull stand
+      # decomposition over-approximates by up to 5.97 mm (measured, 1500 poses), which
+      # is the CONSERVATIVE direction and adds back margin wherever it applies -- but it
+      # is ~0 at most contact regions, so it cannot be counted on as margin.
+      # RE-MEASURE THE DH ORACLE before going below 10.
       arm_stand:
-        d_hard_m: 0.020
-        d_slow_m: 0.062
+        d_hard_m: 0.010
+        d_slow_m: 0.052
         recover_speed_m_s: 0.0
       extra_collision: []
       #   - { name: left_wrist_camera,  shape: box, parent_frame: dual_rb3_730e_left_attachment_site,

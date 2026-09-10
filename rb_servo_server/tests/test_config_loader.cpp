@@ -157,7 +157,11 @@ bool testRepositoryConfigsParse() {
             RB_CHECK(env.a_brake_m_s2 < 0.0);   // inherits the self ramp
             RB_CHECK(env.hyst_m < 0.0);         // inherits the self hysteresis
             RB_CHECK(env.recover_speed_m_s == 0.0);
-            RB_CHECK(env.d_hard_m < stack_real.safety.self_collision.mesh.d_hard_m);
+            // 2026-09-10: arm<->arm followed this class down to 20 mm, so the two are
+            // equal again. What is pinned is that env keeps its OWN pair -- it must not
+            // become an inherit (-1), which is how it would silently start tracking a
+            // future self retune it has no measurement to justify.
+            RB_CHECK(env.d_hard_m == stack_real.safety.self_collision.mesh.d_hard_m);
         }
         {
             // arm<->stand: its own class since 2026-09-10, and TIGHTER than the self
@@ -168,13 +172,20 @@ bool testRepositoryConfigsParse() {
             // 5.4 mm box DH oracle) 3.7x; see the yaml for the full budget.
             const auto& as_ = stack_real.safety.self_collision.mesh.arm_stand;
             const auto& mesh = stack_real.safety.self_collision.mesh;
-            RB_CHECK(as_.d_hard_m == 0.020);
-            RB_CHECK(as_.d_slow_m == 0.062);
-            RB_CHECK(as_.d_hard_m < mesh.d_hard_m);   // tighter than arm<->arm
+            RB_CHECK(as_.d_hard_m == 0.010);
+            RB_CHECK(as_.d_slow_m == 0.052);
+            // TIGHTER than arm<->arm, which is the whole point of the split: this class
+            // went 30 -> 20 -> 10 on its own measurements while arm<->arm stopped at 20.
+            RB_CHECK(as_.d_hard_m < mesh.d_hard_m);
             RB_CHECK(as_.d_slow_m < mesh.d_slow_m);
+            // The band MARGIN is the same as the self set's, so the braking ramp is
+            // identical and only the floor moved: the band shifts, it does not narrow.
+            RB_CHECK(near(as_.d_slow_m - as_.d_hard_m, mesh.d_slow_m - mesh.d_hard_m));
             // The braking invariant with the INHERITED ramp: 0.020 + 0.60^2/(2*4.5)
             // = 0.060, so 0.062 is the band with 2 mm of headroom, not a round number.
             RB_CHECK(as_.d_slow_m >= as_.d_hard_m + 0.36 / (2.0 * mesh.a_brake_m_s2));
+            // And the self set itself satisfies it, which is what makes the equality safe.
+            RB_CHECK(mesh.d_slow_m >= mesh.d_hard_m + 0.36 / (2.0 * mesh.a_brake_m_s2));
             RB_CHECK(as_.a_brake_m_s2 < 0.0);   // inherits the self ramp
             RB_CHECK(as_.hyst_m < 0.0);         // inherits the self hysteresis
             RB_CHECK(as_.recover_speed_m_s == 0.0);

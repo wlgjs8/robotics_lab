@@ -205,6 +205,16 @@ double nearPairSlowBandM(const CollisionMonitorConfig& cfg, const CollisionNearP
                               : cfg.d_slow_m;
 }
 
+double nearPairABrakeMS2(const CollisionMonitorConfig& cfg, const CollisionNearPair& p) {
+    return p.external_box     ? cfg.external_box_a_brake_m_s2
+         : p.external         ? cfg.external_a_brake_m_s2
+         : p.intra_arm        ? cfg.intra_arm_a_brake_m_s2
+         : p.gripper_gripper  ? cfg.gripper_gripper_a_brake_m_s2
+         : p.environment      ? cfg.environment_a_brake_m_s2
+         : p.arm_stand        ? armStandOr(cfg.arm_stand_a_brake_m_s2, cfg.a_brake_m_s2)
+                              : cfg.a_brake_m_s2;
+}
+
 void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
                                double verdict_age_s, std::vector<VelocityConstraint>& out,
                                std::unordered_set<std::uint64_t>* engaged_pairs) {
@@ -261,13 +271,10 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
                                                  : nearPairHardFloorM(cfg, p);
         const double d_slow = grip_covered_floor ? cfg.gripper_gripper_covered_d_hard_m
                                                  : nearPairSlowBandM(cfg, p);
-        const double a_brake = p.external_box ? cfg.external_box_a_brake_m_s2
-                             : p.external     ? cfg.external_a_brake_m_s2
-                             : p.intra_arm    ? cfg.intra_arm_a_brake_m_s2
-                             : grip           ? cfg.gripper_gripper_a_brake_m_s2
-                             : p.environment   ? cfg.environment_a_brake_m_s2
-                             : p.arm_stand    ? armStandOr(cfg.arm_stand_a_brake_m_s2, cfg.a_brake_m_s2)
-                                              : cfg.a_brake_m_s2;
+        // grip here is the EXCLUSION-aware gripper flag, so the covered case keeps its
+        // own ramp; everything else resolves through the shared accessor.
+        const double a_brake = grip ? cfg.gripper_gripper_a_brake_m_s2
+                                    : nearPairABrakeMS2(cfg, p);
         const double recover = p.external_box ? cfg.external_box_recover_speed_m_s
                              : p.external     ? cfg.external_recover_speed_m_s
                              : p.intra_arm    ? cfg.intra_arm_recover_speed_m_s

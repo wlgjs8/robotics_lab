@@ -6411,6 +6411,8 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         # own colour, so it has to be restored exactly when the violation clears.
         handles = self._split_handles()
         handles["environment_names"] = ["env_stand_riser", "env_work_table"]
+        # Only the riser is CHECKED; env_work_table is <visual>-only furniture.
+        handles["environment_checked"] = ["env_stand_riser"]
         handles["environment_rgb"] = {"env_stand_riser": (51, 51, 54),
                                       "env_work_table": (90, 90, 90)}
         handles["environment_env_stand_riser"] = RecordingSceneHandle()
@@ -6720,6 +6722,8 @@ class SelfCollisionOverlayTest(unittest.TestCase):
     def test_slow_band_riser_pair_paints_the_cell_structure_yellow(self):
         handles = self._split_handles()
         handles["environment_names"] = ["env_stand_riser", "env_work_table"]
+        # Only the riser is CHECKED; env_work_table is <visual>-only furniture.
+        handles["environment_checked"] = ["env_stand_riser"]
         handles["environment_rgb"] = {"env_stand_riser": (51, 51, 54),
                                       "env_work_table": (90, 90, 90)}
         handles["environment_env_stand_riser"] = RecordingSceneHandle()
@@ -6738,6 +6742,65 @@ class SelfCollisionOverlayTest(unittest.TestCase):
             violated=False, physical_real=True, q_actual=[1, 2, 3, 4, 5, 6], q_sent=None))
         self.assertEqual(handles["environment_env_stand_riser"].color, (51, 51, 54))
         self.assertFalse(handles["left_base_collision"].visible)
+
+    def _env_handles(self):
+        """Split handles plus the four env_* boxes the cell actually draws. Only the
+        riser and the spacer are CHECKED; both work tables are <visual>-only."""
+        handles = self._split_handles()
+        handles["environment_names"] = ["env_stand_riser", "env_stand_spacer",
+                                        "env_work_table", "env_work_table_2"]
+        handles["environment_checked"] = ["env_stand_riser", "env_stand_spacer"]
+        handles["environment_rgb"] = {"env_stand_riser": (51, 51, 54),
+                                      "env_stand_spacer": (89, 89, 92),
+                                      "env_work_table": (90, 90, 90),
+                                      "env_work_table_2": (90, 90, 90)}
+        for k in handles["environment_names"]:
+            handles[f"environment_{k}"] = RecordingSceneHandle()
+        return handles
+
+    def test_only_the_named_env_box_is_highlighted(self):
+        """The work tables are not in the collision model at all, and the spacer is a
+        different box from the riser. Before 2026-09-10 one colour was painted over
+        every env_* box, so a riser highlight turned both tables yellow -- reported by
+        the operator as "the table and the floor go yellow"."""
+        handles = self._env_handles()
+        latest = self._latest(
+            violated=False, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_link3_1", "env_stand_riser_0",
+                                        clearance_m=0.030, d_slow_m=0.062, environment=True)],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        yellow = scene._rgb_opacity(scene._SELF_COLLISION_SLOW_RGBA)[0]
+        self.assertEqual(handles["environment_env_stand_riser"].color, yellow)
+        # everything else keeps its URDF colour
+        self.assertEqual(handles["environment_env_stand_spacer"].color, (89, 89, 92))
+        self.assertEqual(handles["environment_env_work_table"].color, (90, 90, 90))
+        self.assertEqual(handles["environment_env_work_table_2"].color, (90, 90, 90))
+
+    def test_a_truncated_verdict_never_lights_the_unchecked_tables(self):
+        # No usable near pair at all -> the coarse fallback lights the CHECKED cell
+        # structure, and only that. The tables can never take part in a collision.
+        handles = self._env_handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair="all",
+            manifest=self._MANIFEST, q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        red = scene._rgb_opacity(scene._SELF_COLLISION_RGBA)[0]
+        self.assertEqual(handles["environment_env_stand_riser"].color, red)
+        self.assertEqual(handles["environment_env_stand_spacer"].color, red)
+        self.assertEqual(handles["environment_env_work_table"].color, (90, 90, 90))
+        self.assertEqual(handles["environment_env_work_table_2"].color, (90, 90, 90))
+
+    def test_env_geom_name_maps_onto_the_drawn_box(self):
+        drawn = ["env_stand_riser", "env_stand_spacer", "env_work_table"]
+        self.assertEqual(scene._environment_key_for_geom("env_stand_riser_0", drawn),
+                         "env_stand_riser")
+        self.assertEqual(scene._environment_key_for_geom("env_stand_spacer_0", drawn),
+                         "env_stand_spacer")
+        # not env_*, or never drawn -> no box to paint
+        self.assertIsNone(scene._environment_key_for_geom("dual_rb5_850e_left_link3_1", drawn))
+        self.assertIsNone(scene._environment_key_for_geom("env_not_drawn_0", drawn))
+        self.assertIsNone(scene._environment_key_for_geom(None, drawn))
 
     def test_unsplittable_urdf_keeps_the_red_only_behavior(self):
         # Without per-link mesh handles the overlay cannot be recoloured, so a d_slow
@@ -6824,6 +6887,56 @@ class SelfCollisionSlowGroupsTest(unittest.TestCase):
                  "clearance_m": 0.010, "d_slow_m": 0.045, "external_box": True},
             ]),
             set())
+
+    # --- the allowance rule (2026-09-10) -------------------------------------
+    # Inside d_slow is NOT the trigger any more: the barrier's allowance is
+    # sqrt(2*a_brake*(clearance - d_hard)), and at a 62 mm band the outer half of it
+    # never limits anything. Yellow now means "closing faster than that", i.e. the
+    # barrier is actually taking speed off this pair.
+
+    @staticmethod
+    def _pair(clearance_m, rate_m_s, d_hard_m=0.020, d_slow_m=0.062, a_brake_m_s2=4.5, **kw):
+        p = {"name_a": "dual_rb5_850e_left_link3_0", "name_b": "dual_rb5_850e_right_link3_0",
+             "clearance_m": clearance_m, "d_hard_m": d_hard_m, "d_slow_m": d_slow_m,
+             "a_brake_m_s2": a_brake_m_s2, "rate_m_s": rate_m_s}
+        p.update(kw)
+        return p
+
+    def test_inside_the_band_but_stoppable_is_not_lit(self):
+        # 50 mm clearance, 30 mm of margin -> allowance sqrt(2*4.5*0.030) = 0.520 m/s.
+        # Closing at 0.20 m/s is well inside that: the barrier is not limiting anything.
+        self.assertEqual(self.groups([self._pair(0.050, -0.20)]), set())
+
+    def test_closing_faster_than_the_allowance_is_lit(self):
+        # Same clearance, 0.60 m/s of closing: above the 0.520 m/s allowance.
+        self.assertEqual(self.groups([self._pair(0.050, -0.60)]), {"left_arm", "right_arm"})
+
+    def test_the_band_edge_never_lights_on_its_own(self):
+        # At the 62 mm edge the allowance is 0.615 m/s, ABOVE the 0.60 m/s command
+        # ceiling -- which is the whole reason the wide band costs nothing.
+        self.assertEqual(self.groups([self._pair(0.0619, -0.60)]), set())
+
+    def test_receding_and_parked_pairs_are_dark(self):
+        self.assertEqual(self.groups([self._pair(0.025, +0.30)]), set())
+        self.assertEqual(self.groups([self._pair(0.025, 0.0)]), set())
+
+    def test_inside_its_own_floor_is_lit_whatever_the_rate(self):
+        # No margin left: the barrier is holding, not braking. (Red will usually own
+        # this group too -- update_self_collision_overlay resolves that -- but the
+        # yellow set must not go dark just because the rate reads zero.)
+        self.assertEqual(self.groups([self._pair(0.015, 0.0)]), {"left_arm", "right_arm"})
+
+    def test_debug_view_widens_back_to_the_whole_band(self):
+        sc = {"manifest": self.MANIFEST, "near_pairs": [self._pair(0.050, -0.20)]}
+        self.assertEqual(scene._self_collision_slow_groups(sc), set())
+        self.assertEqual(scene._self_collision_slow_groups(sc, in_band_only=True),
+                         {"left_arm", "right_arm"})
+
+    def test_a_server_without_a_brake_keeps_the_wider_rule(self):
+        # Over-lights rather than under-lights.
+        p = self._pair(0.050, -0.20)
+        p.pop("a_brake_m_s2")
+        self.assertEqual(self.groups([p]), {"left_arm", "right_arm"})
 
     def test_missing_or_malformed_telemetry_is_dark(self):
         self.assertEqual(scene._self_collision_slow_groups(None), set())

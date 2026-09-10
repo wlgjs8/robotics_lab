@@ -1738,6 +1738,11 @@ struct SelfCollisionNearPairViz {
     // structural pairs red and names the wrong parts as the colliding ones.
     double d_hard_m = 0.0;
     double d_slow_m = 0.0;
+    // This pair's class emergency decel. With it a viewer can evaluate the barrier's
+    // own allowance, sqrt(2*a*(clearance - d_hard)), and so distinguish "inside the
+    // band" from "actually being braked" -- which at a 62 mm band are very different
+    // sets, because the allowance at the band edge exceeds the command ceiling.
+    double a_brake_m_s2 = 0.0;
     // Signed clearance rate of THIS pair, + = separating. Published so a viewer can
     // tell a pair the barrier is ACTING on from one that merely sits inside the band
     // forever: the RB5's shoulders park link1 at 82-84 mm against the 90 mm self slow

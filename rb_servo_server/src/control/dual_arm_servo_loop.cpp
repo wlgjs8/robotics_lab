@@ -4233,6 +4233,7 @@ void DualArmServoLoop::loopMain() {
                         p.intra_arm, p.gripper_gripper, p.environment, p.arm_stand,
                         nearPairHardFloorM(collision_monitor_cfg_, p),
                         nearPairSlowBandM(collision_monitor_cfg_, p),
+                        nearPairABrakeMS2(collision_monitor_cfg_, p),
                         p.rate_m_s});
                 }
             }

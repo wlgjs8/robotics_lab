@@ -1691,16 +1691,27 @@ def _is_plane_or_box_geom(name: Any) -> bool:
     return lowered.endswith("plane") or lowered.endswith("box") or lowered.startswith("external_box")
 
 
-def _self_collision_slow_pair(pair: Mapping[str, Any]) -> bool:
-    """True for a near pair the guard is watching: inside ITS OWN d_slow band, and not
-    one of the excluded *plane / *box classes.
+def _self_collision_slow_pair(pair: Mapping[str, Any], *, in_band_only: bool = False) -> bool:
+    """True for a near pair the yellow layer must light, excluding the *plane / *box
+    classes either way.
 
-    NO closing filter, unlike the close-call tubes (_near_pair_band, which paints blue
-    only while rate_m_s < 0). The tubes answer "which pair is the barrier braking right
-    now"; this overlay answers the operator's debugging question "which parts is the
-    guard checking against each other", so a pair parked inside the band is exactly
-    what must show. That is also why it costs nothing to be wrong about the rate: a
-    stale/absent rate_m_s cannot hide a part here."""
+    TWO regimes, because "inside d_slow" turned out to be a bad proxy for danger. The
+    barrier's allowance is sqrt(2*a_brake*(clearance - d_hard)); at the RB5's 62 mm band
+    that is 0.615 m/s at the band EDGE, above the 0.60 m/s command ceiling, so the outer
+    half of the band never limits anything and a 0.15 m/s approach is unrestricted down
+    to 22.5 mm. Painting the whole band yellow therefore said "danger" about a region
+    the guard is only WATCHING, which is what a band is for (operator, 2026-09-10).
+
+    Default: the pair is CLOSING FASTER THAN ITS OWN ALLOWANCE -- the barrier is
+    actually taking speed off it. Same arithmetic the barrier runs, with the same
+    per-pair a_brake the server publishes, so the highlight cannot drift from it.
+
+    in_band_only=True is the old rule (anything inside its d_slow), kept for the debug
+    view: "what is the guard checking against what" is still worth a display, it is
+    just not the always-on one.
+
+    A pair with no usable a_brake_m_s2 / rate_m_s (older server) falls back to the
+    in-band rule, which over-lights rather than under-lights."""
     if pair.get("external") or pair.get("external_box"):
         return False
     if _is_plane_or_box_geom(pair.get("name_a")) or _is_plane_or_box_geom(pair.get("name_b")):
@@ -1709,10 +1720,30 @@ def _self_collision_slow_pair(pair: Mapping[str, Any]) -> bool:
     d_slow = pair.get("d_slow_m")
     if not _is_finite(clearance) or not _is_finite(d_slow):
         return False
-    return float(clearance) < float(d_slow)
+    if float(clearance) >= float(d_slow):
+        return False
+    if in_band_only:
+        return True
+    d_hard = pair.get("d_hard_m")
+    a_brake = pair.get("a_brake_m_s2")
+    rate = pair.get("rate_m_s")
+    if not (_is_finite(d_hard) and _is_finite(a_brake) and float(a_brake) > 0.0
+            and _is_finite(rate)):
+        return True
+    margin = float(clearance) - float(d_hard)
+    if margin <= 0.0:
+        # Inside its own floor: the barrier is HOLDING this pair, and holding does not
+        # need a closing rate to be happening. Tested before the rate so a stationary
+        # breach cannot read as "nothing going on".
+        return True
+    closing = -float(rate)
+    if closing <= _NEAR_PAIR_CLOSING_EPS_M_S:
+        return False
+    return closing > math.sqrt(2.0 * float(a_brake) * margin)
 
 
-def _self_collision_slow_groups(sc: Mapping[str, Any] | None) -> set[str]:
+def _self_collision_slow_groups(sc: Mapping[str, Any] | None, *,
+                                in_band_only: bool = False) -> set[str]:
     """Which of _SELF_COLLISION_GROUPS the yellow d_slow overlay must light up.
 
     Every near pair inside its own published d_slow band names its two body groups;
@@ -1723,6 +1754,9 @@ def _self_collision_slow_groups(sc: Mapping[str, Any] | None) -> set[str]:
     both over- and under-reports. A pair with no published band is skipped rather than
     guessed at -- the red overlay owns the conservative fallbacks, and this layer must
     not paint the whole robot yellow against an older server.
+
+    in_band_only widens it back to every pair inside its band (the debug view); see
+    _self_collision_slow_pair for why that is not the default.
 
     Unlike the red set there is NO all-groups fallback on truncation: near_pairs sheds
     slow pairs before hard ones under datagram pressure (state_publisher.cpp), and
@@ -1737,9 +1771,70 @@ def _self_collision_slow_groups(sc: Mapping[str, Any] | None) -> set[str]:
         return set()
     groups: set[str] = set()
     for pair in pairs:
-        if isinstance(pair, Mapping) and _self_collision_slow_pair(pair):
+        if isinstance(pair, Mapping) and _self_collision_slow_pair(pair, in_band_only=in_band_only):
             groups |= _near_pair_groups(pair, left_prefix, right_prefix)
     return groups
+
+
+def _environment_key_for_geom(name: Any, drawn: Any) -> str | None:
+    """Map ONE monitor geometry name onto the env_* box the GUI drew for it.
+
+    pinocchio names a link's geometries "<link>_<index>", and the viewer keys its boxes
+    by the link name (first visual) or "<link>_<index>" (later ones), so an exact match
+    is tried before stripping the suffix. None when the geometry is not env_* or the
+    viewer never drew it."""
+    if not isinstance(name, str) or not name.startswith(_ENVIRONMENT_GEOM_PREFIX):
+        return None
+    keys = set(drawn) if isinstance(drawn, (list, tuple, set)) else set()
+    if name in keys:
+        return name
+    base = name.rsplit("_", 1)[0] if name.rsplit("_", 1)[-1].isdigit() else name
+    return base if base in keys else None
+
+
+def _self_collision_env_keys(
+    sc: Mapping[str, Any] | None, drawn: Any, *, in_band_only: bool
+) -> tuple[set[str], set[str]]:
+    """(red, yellow) env_* box keys, named by the pairs themselves.
+
+    Per BOX, not per group: the cell structure shares one barrier class but is drawn as
+    several separate boxes, and lighting all of them because one is close says the wrong
+    thing about the others. The riser going yellow used to take the spacer with it.
+
+    Red follows the SAME graded/ungraded split as _self_collision_red_groups, so the two
+    cannot disagree about which pairs are breaching: with per-pair floors published,
+    `clearance < d_hard`; without them (older server), near_pairs[0]."""
+    red: set[str] = set()
+    slow: set[str] = set()
+    if not isinstance(sc, Mapping):
+        return red, slow
+    pairs = sc.get("near_pairs")
+    if not isinstance(pairs, (list, tuple)):
+        return red, slow
+    pairs = [p for p in pairs if isinstance(p, Mapping)]
+
+    def _keys(pair: Mapping[str, Any]) -> set[str]:
+        return {k for k in (_environment_key_for_geom(pair.get("name_a"), drawn),
+                            _environment_key_for_geom(pair.get("name_b"), drawn))
+                if k is not None}
+
+    graded = any(_is_finite(p.get("clearance_m")) and _is_finite(p.get("d_hard_m"))
+                 for p in pairs)
+    for pair in pairs:
+        keys = _keys(pair)
+        if not keys:
+            continue
+        clearance = pair.get("clearance_m")
+        d_hard = pair.get("d_hard_m")
+        if graded:
+            if _is_finite(clearance) and _is_finite(d_hard) and float(clearance) < float(d_hard):
+                red |= keys
+                continue
+        if _self_collision_slow_pair(pair, in_band_only=in_band_only):
+            slow |= keys
+    if not graded and pairs:
+        red |= _keys(pairs[0])   # the ungraded fallback: nearest pair names the breach
+    return red, slow
 
 
 def _self_collision_red_groups(
@@ -1940,7 +2035,8 @@ def _highlight_rgba(
     return None
 
 
-def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:
+def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any,
+                                  *, show_watched: bool = False) -> None:
     """Paint the PARTS the self-collision guard is acting on: translucent RED while
     self_collision.violated (a pair below its own d_hard), warning YELLOW one band out
     (a pair inside its own d_slow, _self_collision_slow_groups). Red wins per group.
@@ -1973,7 +2069,7 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
     red = _self_collision_red_groups(sc, violated, box_collision)
     # Red wins per group: a part named by both a breaching and a merely-close pair is
     # in the worse state, and the two bands must never be drawn on the same meshes.
-    slow = _self_collision_slow_groups(sc) - red
+    slow = _self_collision_slow_groups(sc, in_band_only=show_watched) - red
     physical_real = latest is not None and (
         getattr(latest.left, "physical_motion_expected", None) is True
         or getattr(latest.right, "physical_motion_expected", None) is True
@@ -2053,31 +2149,60 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
         scene_handles["_stand_collision_rgba"] = stand_rgba
     _set_visible(stand_handle, stand_rgba is not None)
     _set_visible(scene_handles.get("stand_mesh"), stand_rgba is None)
-    _set_environment_highlight(scene_handles, _highlight_rgba("environment", red, slow))
+    # Cell structure: per BOX, from the pairs' own geometry names. The group sets above
+    # only say "some env_* box is involved"; which one is in the near pair.
+    drawn = scene_handles.get("environment_names") or ()
+    env_red, env_slow = _self_collision_env_keys(sc, drawn, in_band_only=show_watched)
+    env_slow -= env_red
+    # Fallbacks, and they are why environment_checked exists: a red verdict whose
+    # breaching pair fell outside the published near list (truncation) or that only
+    # carries the coarse `pair` category still has to light SOMETHING, and it must be
+    # the checked boxes only -- never the <visual>-only work tables.
+    checked = set(scene_handles.get("environment_checked") or ())
+    if "environment" in red and not env_red:
+        env_red = checked
+        env_slow = set()
+    elif "environment" in slow and not env_slow:
+        env_slow = checked - env_red
+    _set_environment_highlight(scene_handles, env_red, env_slow)
 
 
 def _set_environment_highlight(
-    scene_handles: dict[str, Any], rgba: tuple[float, float, float, float] | None
+    scene_handles: dict[str, Any],
+    red_keys: set[str] | None = None,
+    slow_keys: set[str] | None = None,
 ) -> None:
-    """Recolour the env_* cell-structure boxes (the riser) for the self-collision
-    highlight: hard-violation red, d_slow yellow, or back to the URDF colour.
+    """Recolour the env_* cell-structure boxes PER BOX: hard-violation red, d_slow
+    yellow, everything else back to its URDF colour.
 
     These are add_box handles, not URDF meshes, so there is no translucent duplicate to
     swap in the way the arms and the stand have — the box IS the drawing, and the
     highlight is its colour (opacity is not a box prop, so only the RGB is taken). The
     nominal colour comes back from environment_rgb, so a cleared highlight restores
-    exactly what the URDF asked for."""
+    exactly what the URDF asked for.
+
+    2026-09-10: this used to take ONE colour and paint every env_* box with it. Two
+    things were wrong with that. The work tables are <visual>-only furniture that the
+    monitor never checks, so they were being highlighted for a collision they cannot
+    take part in — the reported symptom was "the table and the floor go yellow". And the
+    riser and the spacer are separate boxes: lighting both because one is close is a
+    claim about geometry that was never evaluated."""
     names = scene_handles.get("environment_names")
     if not isinstance(names, (list, tuple)):
         return
     nominal = scene_handles.get("environment_rgb")
     nominal = nominal if isinstance(nominal, Mapping) else {}
-    highlight = _rgb_opacity(rgba)[0] if rgba is not None else None
+    red_keys = red_keys or set()
+    slow_keys = slow_keys or set()
+    red_rgb = _rgb_opacity(_SELF_COLLISION_RGBA)[0]
+    slow_rgb = _rgb_opacity(_SELF_COLLISION_SLOW_RGBA)[0]
     for key in names:
         handle = scene_handles.get(f"environment_{key}")
         if handle is None:
             continue
-        colour = highlight if highlight is not None else nominal.get(key)
+        colour = (red_rgb if key in red_keys
+                  else slow_rgb if key in slow_keys
+                  else nominal.get(key))
         if colour is None:
             continue
         try:
@@ -2794,8 +2919,15 @@ def _environment_visuals_from_urdf(urdf_path: Path) -> list[dict[str, Any]]:
         if link_pose is None:
             out.append({"name": name, "error": "not fixed to the stand link"})
             continue
+        # Whether the monitor checks this link at all. Drawn != checked: the two work
+        # tables are <visual>-only furniture (make_rb5_850e_urdfs.py ENVIRONMENT, no
+        # "collision": True), so they can never be named by a near pair and must never
+        # be highlighted. Before 2026-09-10 the highlight recoloured every env_* box
+        # together, which turned both tables yellow whenever the riser lit.
+        checked = bool(link.findall("collision"))
         for index, visual in enumerate(link.findall("visual")):
-            entry: dict[str, Any] = {"name": name if index == 0 else f"{name}_{index}"}
+            entry: dict[str, Any] = {"name": name if index == 0 else f"{name}_{index}",
+                                     "checked": checked}
             try:
                 xyz, rpy = _urdf_origin(visual)
                 pose = _multiply_transform(link_pose, _urdf_transform(xyz, rpy))
@@ -2873,6 +3005,7 @@ def _add_environment_visuals(server: Any, handles: dict[str, Any]) -> None:
     """Draw the env_* furniture from the unified URDF under /stand/env_*."""
     entries = _environment_visuals_from_urdf(_unified_urdf_path())
     names: list[str] = []
+    checked: list[str] = []
     nominal: dict[str, tuple] = {}
     rgb: dict[str, tuple] = {}
     for entry in entries:
@@ -2927,7 +3060,12 @@ def _add_environment_visuals(server: Any, handles: dict[str, Any]) -> None:
         nominal[key] = (tuple(entry.get("dimensions", ())), tuple(entry["position"]))
         rgb[key] = tuple(entry["rgb"])
         names.append(key)
+        if entry.get("checked"):
+            checked.append(key)
     handles["environment_names"] = names
+    # The subset the monitor actually checks. The highlight never paints anything
+    # outside it -- see _environment_visuals_from_urdf.
+    handles["environment_checked"] = checked
     handles["environment_nominal"] = nominal
     # Kept separately from `nominal` (which set_riser_height_m unpacks positionally):
     # the colour is what update_self_collision_overlay swaps to red and back.

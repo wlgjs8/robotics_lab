@@ -423,6 +423,13 @@ struct VelocityConstraint {
 // buildCollisionConstraints and the state publisher's near-pair telemetry both read
 // them here so the two cannot drift apart.
 double nearPairHardFloorM(const CollisionMonitorConfig& cfg, const CollisionNearPair& p);
+// The emergency deceleration THIS pair's class assumes. Same selection order as the
+// two above. Exposed because the barrier's allowance, sqrt(2*a*(d - d_hard)), is the
+// only way a consumer can tell a pair that is merely INSIDE its band from one the
+// barrier is actually taking speed off -- and at the RB5's 62 mm band the two are very
+// different sets: the allowance at the band edge is 0.615 m/s, above the command
+// ceiling, so the outer half of the band never limits anything.
+double nearPairABrakeMS2(const CollisionMonitorConfig& cfg, const CollisionNearPair& p);
 double nearPairSlowBandM(const CollisionMonitorConfig& cfg, const CollisionNearPair& p);
 
 // Build the self-collision velocity constraints from a verdict (per near pair within

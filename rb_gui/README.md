@@ -78,9 +78,19 @@ the pair names light up:
 
 So two grippers touching lights the two grippers, not two whole arms, and an arm
 folding onto the stand leaves that arm's gripper normal. `env_*` boxes are `add_box`
-handles rather than URDF meshes, so their highlight is the box's own colour swapped to
-red and restored from `environment_rgb`; they share one group because the server gives
-them one barrier class.
+handles rather than URDF meshes, so their highlight is the box's own colour swapped and
+restored from `environment_rgb`.
+
+**Cell structure is highlighted PER BOX** (2026-09-10), from the geometry names in the
+near pair, not per group. Two reasons, both bugs that were live before: the two work
+tables are `<visual>`-only furniture the monitor never checks (`make_rb5_850e_urdfs.py`
+ENVIRONMENT, no `"collision": True`) yet the old code painted every `env_*` box one
+colour, so a riser highlight turned both tables yellow — the operator saw it as "the
+table and the floor go yellow"; and the riser and the spacer are separate boxes, so
+lighting both because one is close is a claim about geometry that was never evaluated.
+`environment_checked` records the checked subset and is the ONLY set the coarse
+fallbacks (near-pair truncation, or a server that publishes only the `pair` category)
+are allowed to light.
 
 The groups come from the geometry NAMES of the near pairs that are IN HARD
 VIOLATION — `clearance_m < d_hard_m`, each pair against **its own** published floor.
@@ -91,18 +101,32 @@ and the articulated gripper has `<right_prefix>pika_finger_left`.
 ### The `d_slow` band: warning yellow (2026-09-09)
 
 One band out, the same overlay paints **warning yellow** (`_SELF_COLLISION_SLOW_RGBA`):
-every part named by a near pair inside **its own** `d_slow_m`. Same groups, same
-per-pair band logic, same always-on rule as red — no debug checkbox — because the
-question it answers is the operator's: *which parts is the guard actually checking
-against each other right now.* Red wins per group, so a part named by both a breaching
-and a merely-close pair is drawn in the worse state.
+every part named by a near pair the barrier is **actually braking**. Same groups, same
+always-on rule as red — no debug checkbox. Red wins per group, so a part named by both
+a breaching and a merely-close pair is drawn in the worse state.
+
+**"Actually braking", not "inside `d_slow`" (2026-09-10).** The trigger used to be band
+membership, and that was a bad proxy: the barrier's allowance is
+`sqrt(2*a_brake*(clearance - d_hard))`, which at the RB5's 62 mm band is **0.615 m/s at
+the band edge** — above the 0.60 m/s command ceiling — so the outer half of the band
+never limits anything, and a 0.15 m/s approach is unrestricted down to 22.5 mm. A band
+is where the check is ARMED, not where braking starts, and painting all of it yellow
+said "danger" about a region the guard is only watching. The rule is now the barrier's
+own arithmetic, using the per-pair `a_brake_m_s2` the server publishes alongside
+`d_hard_m`/`d_slow_m`, so display and enforcement cannot drift. A pair inside its own
+floor lights regardless of rate (the barrier is holding it, and holding needs no
+closing speed). A server that does not publish `a_brake_m_s2` falls back to the old
+band rule, which over-lights rather than under-lights.
+
+The **"자기충돌 검사 표시"** checkbox widens yellow back to every pair inside its band —
+"what is the guard checking against what" is still worth a display, it is just not the
+always-on one.
 
 Three deliberate differences from the close-call tubes:
 
-- **No closing filter.** The tubes go blue only while `rate_m_s < 0` (the barrier is
-  braking that pair). This layer lights a pair *parked* inside the band too — a pair
-  that sits at 30 mm and never moves is exactly what a geometry-debugging session needs
-  to see, and a stale/absent rate then cannot hide a part.
+- **A stricter test than the tubes.** The tubes go blue on `rate_m_s < 0` alone (any
+  closing). This layer needs the closing speed to exceed the pair's own allowance, so
+  it lights a smaller set: the pairs the barrier is really acting on.
 - **`*plane` / `*box` are excluded** (`_is_plane_or_box_geom`): the injected whole-arm
   floor (`ground_plane`) and the runtime keep-out boxes (`external_box_*`). Neither is
   self-collision — each has its own barrier class with a floor an order of magnitude
@@ -154,8 +178,8 @@ magnitude apart:
 
 | band | floor (`stack_real.yaml`) |
 | --- | --- |
-| self — arm↔arm | 30 mm |
-| arm↔stand (own class since 2026-09-10, tightened with the stand hull refinement) | 20 mm |
+| self — arm↔arm | 20 mm |
+| arm↔stand (own class since 2026-09-10, tightened with the stand hull refinement) | 10 mm |
 | cell structure (`env_*`) | 20 mm |
 | gripper↔gripper | 20 mm |
 | intra-arm (same arm folding) | 5 mm |
