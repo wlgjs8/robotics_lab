@@ -177,12 +177,21 @@ double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorC
     return scale < 0.0 ? 0.0 : (scale > 1.0 ? 1.0 : scale);
 }
 
+// arm<->stand inherits the self value when left at 0 (see CollisionMonitorConfig): the
+// class was split out of the self set, so a caller that never heard of it has to keep
+// getting the behaviour it had. recover_speed uses -1 because 0 is a real setting there.
+double armStandOr(double value, double self_value) { return value > 0.0 ? value : self_value; }
+double armStandRecoverOr(double value, double self_value) {
+    return value >= 0.0 ? value : self_value;
+}
+
 double nearPairHardFloorM(const CollisionMonitorConfig& cfg, const CollisionNearPair& p) {
     return p.external_box     ? cfg.external_box_d_hard_m
          : p.external         ? cfg.external_d_hard_m
          : p.intra_arm        ? cfg.intra_arm_d_hard_m
          : p.gripper_gripper  ? cfg.gripper_gripper_d_hard_m
          : p.environment      ? cfg.environment_d_hard_m
+         : p.arm_stand        ? armStandOr(cfg.arm_stand_d_hard_m, cfg.d_hard_m)
                               : cfg.d_hard_m;
 }
 
@@ -192,6 +201,7 @@ double nearPairSlowBandM(const CollisionMonitorConfig& cfg, const CollisionNearP
          : p.intra_arm        ? cfg.intra_arm_d_slow_m
          : p.gripper_gripper  ? cfg.gripper_gripper_d_slow_m
          : p.environment      ? cfg.environment_d_slow_m
+         : p.arm_stand        ? armStandOr(cfg.arm_stand_d_slow_m, cfg.d_slow_m)
                               : cfg.d_slow_m;
 }
 
@@ -256,18 +266,21 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
                              : p.intra_arm    ? cfg.intra_arm_a_brake_m_s2
                              : grip           ? cfg.gripper_gripper_a_brake_m_s2
                              : p.environment   ? cfg.environment_a_brake_m_s2
+                             : p.arm_stand    ? armStandOr(cfg.arm_stand_a_brake_m_s2, cfg.a_brake_m_s2)
                                               : cfg.a_brake_m_s2;
         const double recover = p.external_box ? cfg.external_box_recover_speed_m_s
                              : p.external     ? cfg.external_recover_speed_m_s
                              : p.intra_arm    ? cfg.intra_arm_recover_speed_m_s
                              : grip           ? cfg.gripper_gripper_recover_speed_m_s
                              : p.environment   ? cfg.environment_recover_speed_m_s
+                             : p.arm_stand    ? armStandRecoverOr(cfg.arm_stand_recover_speed_m_s, cfg.recover_speed_m_s)
                                               : cfg.recover_speed_m_s;
         const double hyst = p.external_box ? cfg.external_box_hyst_m
                           : p.external     ? cfg.external_hyst_m
                           : p.intra_arm    ? cfg.intra_arm_hyst_m
                           : grip           ? cfg.gripper_gripper_hyst_m
                           : p.environment   ? cfg.environment_hyst_m
+                          : p.arm_stand    ? armStandOr(cfg.arm_stand_hyst_m, cfg.hyst_m)
                                            : cfg.hyst_m;
         double d_now;
         if (extrapolate_by_q) {
@@ -505,6 +518,7 @@ struct CollisionMonitor::Impl {
     std::vector<char> pair_gripper_;
     // arm<->cell-structure pairs (env_* geometry; environment_* barrier class)
     std::vector<char> pair_environment_;
+    std::vector<char> pair_arm_stand_;
 
     // True if the pair at index k should be considered for the given active-arm set.
     // Both-included is the unmasked fast path; otherwise keep only pairs that touch an
@@ -1086,6 +1100,7 @@ struct CollisionMonitor::Impl {
         pair_right_.clear();
         pair_gripper_.clear();
         pair_environment_.clear();
+        pair_arm_stand_.clear();
         std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0, n_external = 0;
         std::size_t n_external_box = 0, n_disabled = 0, n_gripper = 0, n_environment = 0;
         const auto tryAddPair = [&](std::size_t a, std::size_t b, PairCategory category) {
@@ -1107,6 +1122,7 @@ struct CollisionMonitor::Impl {
             pair_intra_.push_back(category == PairCategory::IntraArm ? 1 : 0);
             pair_gripper_.push_back(category == PairCategory::GripperGripper ? 1 : 0);
             pair_environment_.push_back(category == PairCategory::Environment ? 1 : 0);
+            pair_arm_stand_.push_back(category == PairCategory::ArmStand ? 1 : 0);
             pair_category_.push_back(categoryString(category));
             const Side sa = classify(a);
             const Side sb = classify(b);
@@ -1212,6 +1228,7 @@ struct CollisionMonitor::Impl {
         double ext_box_min = std::numeric_limits<double>::infinity();
         double grip_min = std::numeric_limits<double>::infinity();
         double env_min = std::numeric_limits<double>::infinity();
+        double arm_stand_min = std::numeric_limits<double>::infinity();
         std::vector<double> ext_box_clearance(
             external_box_indices_.size(), std::numeric_limits<double>::infinity());
         bool hard = false;
@@ -1229,6 +1246,7 @@ struct CollisionMonitor::Impl {
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
             const bool grip = k < pair_gripper_.size() && pair_gripper_[k];
             const bool env = k < pair_environment_.size() && pair_environment_[k];
+            const bool arm_stand = k < pair_arm_stand_.size() && pair_arm_stand_[k];
             if (ext_box) {
                 if (d < ext_box_min) ext_box_min = d;
                 const auto& cp = geom.collisionPairs[k];
@@ -1270,6 +1288,19 @@ struct CollisionMonitor::Impl {
                 if (d < env_min) env_min = d;
                 if (d < cfg.environment_d_hard_m) { hard = true; hard_non_gripper = true; }
                 in_band[k] = d < cfg.environment_d_slow_m + cfg.environment_hyst_m;
+            } else if (arm_stand) {
+                if (d < arm_stand_min) arm_stand_min = d;
+                // AND self_min: self_min_clearance_m keeps meaning "arm<->arm or
+                // arm<->stand, whichever is closer", because the InitMotion planner
+                // gates on it (init_motion_planner.cpp) and narrowing it here would
+                // silently drop arm<->stand out of that gate. The barrier itself does
+                // not read self_min -- it bands every pair against its OWN floor above.
+                if (d < self_min) self_min = d;
+                if (d < armStandOr(cfg.arm_stand_d_hard_m, cfg.d_hard_m)) {
+                    hard = true; hard_non_gripper = true;
+                }
+                in_band[k] = d < armStandOr(cfg.arm_stand_d_slow_m, cfg.d_slow_m) +
+                                     armStandOr(cfg.arm_stand_hyst_m, cfg.hyst_m);
             } else {
                 if (d < self_min) self_min = d;
                 if (d < cfg.d_hard_m) { hard = true; hard_non_gripper = true; }
@@ -1283,6 +1314,7 @@ struct CollisionMonitor::Impl {
         v.external_box_min_clearance_m = ext_box_min;
         v.gripper_gripper_min_clearance_m = grip_min;
         v.environment_min_clearance_m = env_min;
+        v.arm_stand_min_clearance_m = arm_stand_min;
         v.external_box_clearance_m = std::move(ext_box_clearance);
         v.hard_violation = hard;
         v.hard_violation_non_gripper = hard_non_gripper;
@@ -1351,6 +1383,7 @@ struct CollisionMonitor::Impl {
             p.intra_arm = k < pair_intra_.size() && pair_intra_[k];
             p.gripper_gripper = k < pair_gripper_.size() && pair_gripper_[k];
             p.environment = k < pair_environment_.size() && pair_environment_[k];
+            p.arm_stand = k < pair_arm_stand_.size() && pair_arm_stand_[k];
             // d_dot = n^T (v_b - v_a) = J_n * qdot. Slice into command left/right cols.
             const pinocchio::JointIndex ja = geom.geometryObjects[cp.first].parentJoint;
             const pinocchio::JointIndex jb = geom.geometryObjects[cp.second].parentJoint;
@@ -1453,6 +1486,12 @@ struct CollisionMonitor::Impl {
             } else if (env) {
                 if (d < s.environment_min_clearance_m) s.environment_min_clearance_m = d;
                 if (d < cfg.environment_d_hard_m) s.hard_violation = true;
+            } else if (k < pair_arm_stand_.size() && pair_arm_stand_[k]) {
+                if (d < s.arm_stand_min_clearance_m) s.arm_stand_min_clearance_m = d;
+                // self_min_clearance_m keeps including arm<->stand -- see the same note
+                // in reduce(). The InitMotion planner gates on this summary.
+                if (d < s.self_min_clearance_m) s.self_min_clearance_m = d;
+                if (d < armStandOr(cfg.arm_stand_d_hard_m, cfg.d_hard_m)) s.hard_violation = true;
             } else {
                 if (d < s.self_min_clearance_m) s.self_min_clearance_m = d;
                 if (d < cfg.d_hard_m) s.hard_violation = true;
@@ -1509,6 +1548,14 @@ struct CollisionMonitor::Impl {
                 : ext     ? std::max(external_thresh_m, cfg.external_d_hard_m)
                 : intra   ? std::max(intra_arm_thresh_m, cfg.intra_arm_d_hard_m)
                 : env     ? std::max(environment_thresh_m, cfg.environment_d_hard_m)
+                // arm<->stand takes the CALLER's self threshold, with its own floor as
+                // the lower bound. The planner has one "self" knob and arm<->stand used
+                // to live under it; keeping it there means splitting the barrier class
+                // cannot loosen InitMotion's gate as a side effect. The floor term is
+                // per class, so a tighter arm_stand_d_hard_m still lets the planner
+                // accept poses this class now allows.
+                : (k < pair_arm_stand_.size() && pair_arm_stand_[k])
+                          ? std::max(self_thresh_m, armStandOr(cfg.arm_stand_d_hard_m, cfg.d_hard_m))
                           : std::max(self_thresh_m, cfg.d_hard_m);
             if (d <= threshold) return false;
         }
@@ -1634,7 +1681,14 @@ void CollisionMonitor::setGripperOpenPercent(ArmId arm, double percent) {
 bool CollisionMonitor::hasArticulatedGripper() const { return impl_->articulated_; }
 
 CollisionVerdict CollisionMonitor::evalOnce(const JointArray& left_deg, const JointArray& right_deg) {
+    // Timed exactly like the monitor thread's own path (threadMain: around evalLocked,
+    // outside publish), so an offline caller's eval_ms is comparable to the servo log's
+    // selfcol_eval_ms. Before this it was left at 0 for every synchronous caller, which
+    // reads as "free" rather than "not measured".
+    const auto t0 = std::chrono::steady_clock::now();
     CollisionVerdict v = impl_->evalLocked(left_deg, right_deg);
+    v.eval_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     impl_->publish(v);
     return v;
 }

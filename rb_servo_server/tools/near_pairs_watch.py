@@ -50,7 +50,8 @@ def _xyz_mm(v: Any) -> str:
 
 
 def _cls(p: dict[str, Any]) -> str:
-    for key in ("external_box", "external", "environment", "gripper_gripper", "intra_arm"):
+    for key in ("external_box", "external", "environment", "gripper_gripper", "intra_arm",
+                "arm_stand"):
         if p.get(key):
             return key
     return "self"

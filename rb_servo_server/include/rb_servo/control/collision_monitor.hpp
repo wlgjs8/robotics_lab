@@ -147,6 +147,27 @@ struct CollisionMonitorConfig {
     double external_recover_speed_m_s = 0.0;
     double external_latency_s = 0.010;
 
+    // ---- ARM<->STAND velocity-barrier params (2026-09-10) ----
+    // Its own class, split out of the self set. arm<->arm and arm<->stand had shared
+    // one pair of thresholds since the mesh guard existed, but they are not the same
+    // problem: arm<->arm carries the DUAL-ARM relative error (two mount calibrations
+    // and two DH chains between the two witness points), while arm<->stand carries one
+    // arm's error against a fixed structure that the same calibration fitted directly.
+    // Sharing a floor therefore sized both by the worse of the two.
+    //
+    // 0 = INHERIT the self value, and unlike the other classes that is resolved where
+    // the value is USED, not by the YAML layer alone. The reason is that this class was
+    // carved OUT of an existing one: every caller that builds this struct directly and
+    // sets only d_hard_m/d_slow_m -- offline tools, the tests, anything written before
+    // the split -- would otherwise have arm<->stand silently drop to this struct's own
+    // default and stop enforcing what it used to. Inheriting at use keeps the split
+    // invisible to them, and 0 can never mean a 0 floor.
+    double arm_stand_d_hard_m = 0.0;
+    double arm_stand_d_slow_m = 0.0;
+    double arm_stand_a_brake_m_s2 = 0.0;
+    double arm_stand_hyst_m = 0.0;
+    double arm_stand_recover_speed_m_s = -1.0;   // -1 = inherit (0 is a real setting)
+
     // ---- INTRA-ARM self-collision velocity-barrier params ----
     // Applied only to same-arm non-adjacent link pairs. Arm<->arm and arm<->stand
     // keep the self set above.
@@ -254,6 +275,9 @@ struct CollisionNearPair {
     // True for a cross-arm pair of two gripper hulls (gripper_gripper_* params;
     // excludable by the servo loop when force control covers both arms).
     bool gripper_gripper = false;
+    // True for an arm<->STAND pair (arm_stand_* params). Distinct from `environment`
+    // (the cell furniture) and from a plain arm<->arm pair, which keeps the self set.
+    bool arm_stand = false;
     // Per-pair clearance Jacobian rows (Stage 1): d(clearance)/dt = J_n * qdot,
     // split into this command's actuated left/right joint columns (command order,
     // idx_v mapping). For an arm<->stand pair only the arm's row is non-zero, so the
@@ -280,6 +304,11 @@ struct CollisionVerdict {
     double external_box_min_clearance_m = std::numeric_limits<double>::infinity();
     double gripper_gripper_min_clearance_m = std::numeric_limits<double>::infinity();
     double environment_min_clearance_m = std::numeric_limits<double>::infinity();
+    // arm<->stand only. self_min_clearance_m deliberately still INCLUDES these pairs:
+    // the InitMotion planner gates on it (init_motion_planner.cpp) and narrowing it
+    // would silently drop arm<->stand out of that gate. This is the narrower figure,
+    // for telemetry and for tuning the class against its own floor.
+    double arm_stand_min_clearance_m = std::numeric_limits<double>::infinity();
     // Per preallocated external box slot (slot 0=green, slot 1=gray).
     // +inf means no finite/active pair for that slot.
     std::vector<double> external_box_clearance_m;
@@ -497,6 +526,7 @@ struct CollisionDistanceSummary {
     double intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
     double environment_min_clearance_m = std::numeric_limits<double>::infinity();
+    double arm_stand_min_clearance_m = std::numeric_limits<double>::infinity();
     std::string nearest_name_a;
     std::string nearest_name_b;
     double nearest_distance_m = std::numeric_limits<double>::infinity();

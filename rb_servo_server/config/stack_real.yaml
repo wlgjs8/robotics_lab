@@ -1086,6 +1086,41 @@ safety:
         d_hard_m: 0.020
         d_slow_m: 0.062
         recover_speed_m_s: 0.0
+      # ARM <-> STAND (2026-09-10). Split out of the self set above so the two can be
+      # tuned independently. They are not the same problem: an arm<->arm clearance is
+      # measured between two witness points that carry TWO mount calibrations and TWO DH
+      # chains, while an arm<->stand clearance carries one arm's error against a fixed
+      # structure that the very same 27-contact calibration fitted directly (arm-to-arm
+      # 1.14 mm mean vs arm-to-stand spread 1.64 mm, 2026-09-06). Sharing one floor
+      # sized both by the worse case.
+      #
+      # 2026-09-10, in the same session as the split: 0.030/0.075 (the self set these
+      # pairs came from) -> 0.020/0.062. The error budget on THIS class, all
+      # unsafe-direction terms:
+      #   * left arm box DH oracle           5.4 mm at the TCP (server.log 2026-09-07)
+      #   * arm-to-stand fit spread          1.64 mm, leave-one-out 1.51 mm
+      #                                      (27 contact poses, mount calibration b5ac8c5)
+      # so 0.020 covers the worst of them 3.7x. What made that defensible is the stand
+      # hull refinement earlier the same day (20 -> 40 CoACD hulls, threshold 0.08 ->
+      # 0.03): the model's over-approximation of the stand, which is padding stacked on
+      # top of this floor, went from 10.82 mm worst-case to 5.97 mm over 1500 poses
+      # (tools/stand_hull_sweep.py). Lowering the floor before that would have been
+      # spending a margin the geometry was still eating.
+      # NOT lower than 0.020: the DH oracle term is the binding one and it has not been
+      # re-measured since 2026-09-07.
+      # arm<->arm keeps 0.030/0.075 and did NOT follow this down -- that class carries
+      # the dual-arm relative error between its two witness points, which is a different
+      # (and less well pinned) budget. Splitting the class is what made this possible.
+      #
+      # d_slow 0.062, not 0.060: the invariant needs d_hard + v_max^2/(2*a_brake) =
+      # 0.020 + 0.60^2/9 = 0.060 EXACTLY, i.e. zero headroom, so any later change to the
+      # TCP ceiling or the shared a_brake would make the loader refuse to start. 2 mm
+      # keeps that from being a tripwire, and it matches the environment class, which
+      # sits at the same 20/62 for the same reason.
+      arm_stand:
+        d_hard_m: 0.020
+        d_slow_m: 0.062
+        recover_speed_m_s: 0.0
       extra_collision: []
       #   - { name: left_wrist_camera,  shape: box, parent_frame: dual_rb3_730e_left_attachment_site,
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }

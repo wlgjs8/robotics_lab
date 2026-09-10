@@ -2020,6 +2020,10 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             finite_or_null(snapshot.self_collision_intra_arm_min_clearance_m);
         self_collision["gripper_min_clearance_m"] =
             finite_or_null(snapshot.self_collision_gripper_min_clearance_m);
+        self_collision["arm_stand_min_clearance_m"] =
+            finite_or_null(snapshot.self_collision_arm_stand_min_clearance_m);
+        self_collision["environment_min_clearance_m"] =
+            finite_or_null(snapshot.self_collision_environment_min_clearance_m);
         self_collision["gripper_excluded"] = snapshot.self_collision_gripper_excluded;
         self_collision["clamp_count"] = snapshot.self_collision_clamp_count;
         self_collision["left_bone"] = snapshot.self_collision_left_bone;
@@ -2056,6 +2060,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
                 entry["intra_arm"] = p.intra_arm;
                 entry["gripper_gripper"] = p.gripper_gripper;
                 entry["environment"] = p.environment;
+                entry["arm_stand"] = p.arm_stand;
                 // This pair's OWN barrier band. The near list is ordered by raw
                 // clearance, so `clearance_m < d_hard_m` is the only way a consumer can
                 // tell which pairs are actually in hard violation — nearest != violating

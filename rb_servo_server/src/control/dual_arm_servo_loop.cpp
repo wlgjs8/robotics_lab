@@ -2347,6 +2347,18 @@ DualArmServoLoop::DualArmServoLoop(
             inherit(m.environment.recover_speed_m_s, m.recover_speed_m_s);
         collision_monitor_cfg_.environment_latency_s =
             inherit(m.environment.latency_s, m.latency_s);
+        // arm<->stand, split out of the self set 2026-09-10. Unset -> the live self
+        // value, so an absent block reproduces the pre-split behaviour exactly.
+        collision_monitor_cfg_.arm_stand_d_hard_m =
+            inherit(m.arm_stand.d_hard_m, m.d_hard_m);
+        collision_monitor_cfg_.arm_stand_d_slow_m =
+            inherit(m.arm_stand.d_slow_m, m.d_slow_m);
+        collision_monitor_cfg_.arm_stand_a_brake_m_s2 =
+            inherit(m.arm_stand.a_brake_m_s2, m.a_brake_m_s2);
+        collision_monitor_cfg_.arm_stand_hyst_m =
+            inherit(m.arm_stand.hyst_m, m.hyst_m);
+        collision_monitor_cfg_.arm_stand_recover_speed_m_s =
+            inherit(m.arm_stand.recover_speed_m_s, m.recover_speed_m_s);
         collision_monitor_cfg_.external_boxes.enable = m.external_boxes.enable;
         collision_monitor_cfg_.external_boxes.max_count = m.external_boxes.max_count;
         collision_monitor_cfg_.external_boxes.size_m = m.external_boxes.size_m;
@@ -4163,6 +4175,10 @@ void DualArmServoLoop::loopMain() {
                 last_collision_verdict_.intra_arm_min_clearance_m;
             latest_snapshot_.self_collision_gripper_min_clearance_m =
                 last_collision_verdict_.gripper_gripper_min_clearance_m;
+            latest_snapshot_.self_collision_arm_stand_min_clearance_m =
+                last_collision_verdict_.arm_stand_min_clearance_m;
+            latest_snapshot_.self_collision_environment_min_clearance_m =
+                last_collision_verdict_.environment_min_clearance_m;
             latest_snapshot_.self_collision_gripper_excluded =
                 safety_projection_telemetry_.selfcol_gripper_excluded;
             latest_snapshot_.self_collision_clamp_count = self_collision_clamp_count_;
@@ -4214,7 +4230,7 @@ void DualArmServoLoop::loopMain() {
                         {p.p_a.x(), p.p_a.y(), p.p_a.z()},
                         {p.p_b.x(), p.p_b.y(), p.p_b.z()},
                         p.d_m, p.external, p.external_box,
-                        p.intra_arm, p.gripper_gripper, p.environment,
+                        p.intra_arm, p.gripper_gripper, p.environment, p.arm_stand,
                         nearPairHardFloorM(collision_monitor_cfg_, p),
                         nearPairSlowBandM(collision_monitor_cfg_, p),
                         p.rate_m_s});
@@ -9123,6 +9139,10 @@ ServoTarget DualArmServoLoop::applySafety(
                 safety_projection_telemetry_.selfcol_self_min_clearance_m = v.self_min_clearance_m;
                 safety_projection_telemetry_.selfcol_intra_arm_min_clearance_m =
                     v.intra_arm_min_clearance_m;
+                safety_projection_telemetry_.selfcol_arm_stand_min_clearance_m =
+                    v.arm_stand_min_clearance_m;
+                safety_projection_telemetry_.selfcol_environment_min_clearance_m =
+                    v.environment_min_clearance_m;
                 safety_projection_telemetry_.selfcol_gripper_min_clearance_m =
                     v.gripper_gripper_min_clearance_m;
             }

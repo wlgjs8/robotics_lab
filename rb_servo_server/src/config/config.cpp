@@ -1752,6 +1752,23 @@ void validateConfig(const DualArmConfig& cfg) {
                     ") cannot brake the commanded TCP ceiling " + std::to_string(v_max) +
                     " m/s before its d_hard_m: need >= " + std::to_string(need(ev_hard, ev_a)));
             }
+            // arm<->stand: same two invariants as the self set it was split from. This
+            // class IS approached at TCP speed -- the arms work down the front of the
+            // stand -- so a band that cannot brake the commanded ceiling before its own
+            // floor is not a band.
+            const double as_hard = m.arm_stand.d_hard_m > 0.0 ? m.arm_stand.d_hard_m : m.d_hard_m;
+            const double as_slow = m.arm_stand.d_slow_m > 0.0 ? m.arm_stand.d_slow_m : m.d_slow_m;
+            const double as_a = m.arm_stand.a_brake_m_s2 > 0.0 ? m.arm_stand.a_brake_m_s2 : m.a_brake_m_s2;
+            if (as_slow < as_hard) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.arm_stand.d_slow_m must be >= d_hard_m");
+            }
+            if (v_max > 0.0 && as_slow + 1e-9 < need(as_hard, as_a)) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.arm_stand.d_slow_m (" + std::to_string(as_slow) +
+                    ") cannot brake the commanded TCP ceiling " + std::to_string(v_max) +
+                    " m/s before its d_hard_m: need >= " + std::to_string(need(as_hard, as_a)));
+            }
             // Intra-arm keeps a deliberately tight zone (structural pairs sit at
             // 22.5 mm all run); its closing speeds are joint-bounded, not TCP-bounded,
             // so this is reported, not refused.
@@ -1776,7 +1793,12 @@ void validateConfig(const DualArmConfig& cfg) {
                  std::pair<double, const char*>{m.environment.a_brake_m_s2, "safety.self_collision.mesh.environment.a_brake_m_s2"},
                  std::pair<double, const char*>{m.environment.hyst_m, "safety.self_collision.mesh.environment.hyst_m"},
                  std::pair<double, const char*>{m.environment.recover_speed_m_s, "safety.self_collision.mesh.environment.recover_speed_m_s"},
-                 std::pair<double, const char*>{m.environment.latency_s, "safety.self_collision.mesh.environment.latency_s"}}) {
+                 std::pair<double, const char*>{m.environment.latency_s, "safety.self_collision.mesh.environment.latency_s"},
+                 std::pair<double, const char*>{m.arm_stand.d_hard_m, "safety.self_collision.mesh.arm_stand.d_hard_m"},
+                 std::pair<double, const char*>{m.arm_stand.d_slow_m, "safety.self_collision.mesh.arm_stand.d_slow_m"},
+                 std::pair<double, const char*>{m.arm_stand.a_brake_m_s2, "safety.self_collision.mesh.arm_stand.a_brake_m_s2"},
+                 std::pair<double, const char*>{m.arm_stand.hyst_m, "safety.self_collision.mesh.arm_stand.hyst_m"},
+                 std::pair<double, const char*>{m.arm_stand.recover_speed_m_s, "safety.self_collision.mesh.arm_stand.recover_speed_m_s"}}) {
             if (!std::isfinite(v)) throw std::runtime_error(std::string(name) + " must be finite");
         }
         if (m.monitor_realtime_priority < 0 || m.monitor_realtime_priority > 99) {
@@ -3765,6 +3787,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "projection_tol_rad_s",
                     "gripper_gripper",
                     "environment",
+                    "arm_stand",
                     "viz_near_pairs_m",
                     "extra_collision",
                     "ground_plane",
@@ -3875,6 +3898,20 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     if (has(g, "hyst_m")) gg.hyst_m = asDouble(g["hyst_m"], "safety.self_collision.mesh.gripper_gripper.hyst_m");
                     if (has(g, "recover_speed_m_s")) gg.recover_speed_m_s = asDouble(g["recover_speed_m_s"], "safety.self_collision.mesh.gripper_gripper.recover_speed_m_s");
                     if (has(g, "covered_d_hard_m")) gg.covered_d_hard_m = asDouble(g["covered_d_hard_m"], "safety.self_collision.mesh.gripper_gripper.covered_d_hard_m");
+                }
+                if (has(m, "arm_stand")) {
+                    const YAML::Node a = m["arm_stand"];
+                    if (!a.IsMap()) fail("safety.self_collision.mesh.arm_stand must be a map", a);
+                    validateAllowedKeys(a, {
+                        "d_hard_m", "d_slow_m", "a_brake_m_s2",
+                        "hyst_m", "recover_speed_m_s",
+                    }, "safety.self_collision.mesh.arm_stand");
+                    auto& as_ = mc.arm_stand;
+                    if (has(a, "d_hard_m")) as_.d_hard_m = asDouble(a["d_hard_m"], "safety.self_collision.mesh.arm_stand.d_hard_m");
+                    if (has(a, "d_slow_m")) as_.d_slow_m = asDouble(a["d_slow_m"], "safety.self_collision.mesh.arm_stand.d_slow_m");
+                    if (has(a, "a_brake_m_s2")) as_.a_brake_m_s2 = asDouble(a["a_brake_m_s2"], "safety.self_collision.mesh.arm_stand.a_brake_m_s2");
+                    if (has(a, "hyst_m")) as_.hyst_m = asDouble(a["hyst_m"], "safety.self_collision.mesh.arm_stand.hyst_m");
+                    if (has(a, "recover_speed_m_s")) as_.recover_speed_m_s = asDouble(a["recover_speed_m_s"], "safety.self_collision.mesh.arm_stand.recover_speed_m_s");
                 }
                 if (has(m, "environment")) {
                     const YAML::Node e = m["environment"];

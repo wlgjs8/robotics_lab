@@ -759,6 +759,20 @@ struct SelfCollisionConfig {
         // a 40 mm floor would clamp_hold 1.1% of the postures the cell already uses.
         // Meanwhile the external set (3/25 mm) belongs to the whole-arm floor plane
         // and is far too tight to share.
+        // ARM<->STAND (2026-09-10). Split out of the self set so the two can be tuned
+        // independently: arm<->arm carries the dual-arm relative error (two mounts, two
+        // DH chains between the witness points), arm<->stand carries one arm's error
+        // against a structure the same calibration fitted directly. -1 = inherit the
+        // self value, so an absent block is behaviour-identical to before the split.
+        struct ArmStandConfig {
+            double d_hard_m = -1.0;
+            double d_slow_m = -1.0;
+            double a_brake_m_s2 = -1.0;
+            double hyst_m = -1.0;
+            double recover_speed_m_s = -1.0;
+        };
+        ArmStandConfig arm_stand;
+
         struct EnvironmentConfig {
             double d_hard_m = -1.0;
             double d_slow_m = -1.0;

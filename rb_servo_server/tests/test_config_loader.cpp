@@ -159,6 +159,26 @@ bool testRepositoryConfigsParse() {
             RB_CHECK(env.recover_speed_m_s == 0.0);
             RB_CHECK(env.d_hard_m < stack_real.safety.self_collision.mesh.d_hard_m);
         }
+        {
+            // arm<->stand: its own class since 2026-09-10, and TIGHTER than the self
+            // set it was split from (20/62 vs 30/75). The point of the split is that
+            // these two can differ, so this pins the DIVERGENCE -- if a future edit
+            // quietly puts them back in step, that is a decision, not a default.
+            // 0.020 covers this class's worst unsafe-direction term (the left arm's
+            // 5.4 mm box DH oracle) 3.7x; see the yaml for the full budget.
+            const auto& as_ = stack_real.safety.self_collision.mesh.arm_stand;
+            const auto& mesh = stack_real.safety.self_collision.mesh;
+            RB_CHECK(as_.d_hard_m == 0.020);
+            RB_CHECK(as_.d_slow_m == 0.062);
+            RB_CHECK(as_.d_hard_m < mesh.d_hard_m);   // tighter than arm<->arm
+            RB_CHECK(as_.d_slow_m < mesh.d_slow_m);
+            // The braking invariant with the INHERITED ramp: 0.020 + 0.60^2/(2*4.5)
+            // = 0.060, so 0.062 is the band with 2 mm of headroom, not a round number.
+            RB_CHECK(as_.d_slow_m >= as_.d_hard_m + 0.36 / (2.0 * mesh.a_brake_m_s2));
+            RB_CHECK(as_.a_brake_m_s2 < 0.0);   // inherits the self ramp
+            RB_CHECK(as_.hyst_m < 0.0);         // inherits the self hysteresis
+            RB_CHECK(as_.recover_speed_m_s == 0.0);
+        }
         RB_CHECK(stack_real.servo.send_servo_commands);
         RB_CHECK(stack_real.servo.allow_real_motion_with_suspect_diagnostics);
         RB_CHECK(!stack_real.servo.allow_controller_simulation_motion);

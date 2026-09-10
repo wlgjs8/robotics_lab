@@ -247,8 +247,15 @@ MOUNT_CALIBRATION_M = {           # added to upstream's stand_<side>_arm_base or
 
 STAND_VISUAL_XYZ = "0.0 0.0 0.0"
 STAND_VISUAL_RPY = "0.0 0.0 0.0"
+# 2026-09-10: 20 -> 40 hulls (CoACD threshold 0.08 -> 0.03). The count and the
+# rationale live in that directory's coacd_params.json; the short version is that the
+# decomposition's over-approximation of the stand is what a tighter d_hard_m would have
+# to cover, it was never measured per parameter set, and at 20 hulls its tail was
+# 10.82 mm against a 30 mm floor. 40 hulls halves that to 5.97 mm and is the finest set
+# whose per-eval p99 stays under the 2 ms servo tick, i.e. the finest one that still
+# gives the async monitor a verdict every tick. Measured by tools/stand_hull_sweep.py.
 STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver1/stand_hull_{i:03d}.stl"
-               for i in range(20)]
+               for i in range(40)]
 
 # ---------------------------------------------------------------------------
 # CELL FURNITURE (env_* links): the work table, and the riser that carries the
@@ -504,7 +511,7 @@ def build(src: Path) -> ET.ElementTree:
     # ver1 ships the raw 38 k-triangle stand mesh as the stand's ONLY <collision>.
     # coal cannot hull a non-convex mesh, so it would be kept as a BVH: correct
     # distances, but far outside the per-eval budget the monitor's contract assumes.
-    # Drop it here; step (3) below re-adds the same surface as 20 CoACD hulls.
+    # Drop it here; step (3) below re-adds the same surface as CoACD hulls.
     dropped_stand_cols = 0
     for col in stand_link.findall("collision"):
         stand_link.remove(col)

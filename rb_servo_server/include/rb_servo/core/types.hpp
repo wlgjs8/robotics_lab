@@ -1294,6 +1294,11 @@ struct SafetyProjectionTelemetry {
     double selfcol_self_min_clearance_m = std::numeric_limits<double>::infinity();
     double selfcol_intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
     double selfcol_gripper_min_clearance_m = std::numeric_limits<double>::infinity();
+    // arm<->stand and arm<->cell-structure (env_*). Logged since 2026-09-10: both
+    // enforce their OWN d_hard_m, and neither had a column, so how close the cell
+    // actually comes to the riser or to the stand was not answerable from a run.
+    double selfcol_arm_stand_min_clearance_m = std::numeric_limits<double>::infinity();
+    double selfcol_environment_min_clearance_m = std::numeric_limits<double>::infinity();
     bool selfcol_gripper_excluded = false; // gripper<->gripper rows left to force control
     bool selfcol_stale = false;            // verdict older than max_staleness_s (hold)
     int sweeps = 0;                        // Gauss-Seidel sweeps the solve ran
@@ -1720,9 +1725,11 @@ struct SelfCollisionNearPairViz {
     bool intra_arm = false;     // same-arm non-adjacent link pair
     bool gripper_gripper = false;  // cross-arm pair of two Pika hulls
     bool environment = false;      // arm<->cell structure (env_* geometry)
+    bool arm_stand = false;        // arm<->stand (its own barrier class since 2026-09-10)
     // THIS PAIR'S OWN barrier thresholds, resolved by the same per-category selection
     // the monitor enforces with (collision_monitor.cpp: external_box -> external ->
-    // intra_arm -> gripper_gripper -> self). Published because a consumer CANNOT derive
+    // intra_arm -> gripper_gripper -> environment -> arm_stand -> self). Published
+    // because a consumer CANNOT derive
     // them: the near list is sorted by RAW clearance, so "nearest" is not "violating"
     // when the categories have different floors — on the RB5 the structural intra-arm
     // link3<->link5 pair sits at ~23 mm (floor 5 mm) and owns near[0] on 99% of ticks,
@@ -1797,6 +1804,11 @@ struct ServoSnapshot {
     double self_collision_self_min_clearance_m = std::numeric_limits<double>::infinity();
     double self_collision_intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
     double self_collision_gripper_min_clearance_m = std::numeric_limits<double>::infinity();
+    // arm<->stand and arm<->cell-structure minima. Both were computed by the monitor
+    // and thrown away here, which left the two classes with per-pair floors of their
+    // own and no way to see how close the cell actually gets to them.
+    double self_collision_arm_stand_min_clearance_m = std::numeric_limits<double>::infinity();
+    double self_collision_environment_min_clearance_m = std::numeric_limits<double>::infinity();
     bool self_collision_gripper_excluded = false;
     uint64_t self_collision_clamp_count = 0;
     double self_collision_margin_m = 0.0;

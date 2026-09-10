@@ -154,9 +154,10 @@ magnitude apart:
 
 | band | floor (`stack_real.yaml`) |
 | --- | --- |
-| self — arm↔arm, arm↔stand | 40 mm |
-| cell structure (`env_*`) | 25 mm |
-| gripper↔gripper | 25 mm |
+| self — arm↔arm | 30 mm |
+| arm↔stand (own class since 2026-09-10, tightened with the stand hull refinement) | 20 mm |
+| cell structure (`env_*`) | 20 mm |
+| gripper↔gripper | 20 mm |
 | intra-arm (same arm folding) | 5 mm |
 | external (floor / `ground_plane`) | 3 mm |
 | external keep-out box | 10 mm |

@@ -798,7 +798,9 @@ void ServoLogger::writeHeader() {
     // the verdict is valid, not only when a row engaged.
     file_ << ",selfcol_eval_ms,selfcol_near_count,selfcol_near_band_count"
              ",selfcol_self_min_clearance_m,selfcol_intra_arm_min_clearance_m"
-             ",selfcol_gripper_min_clearance_m,selfcol_gripper_excluded,selfcol_stale"
+             ",selfcol_gripper_min_clearance_m"
+             ",selfcol_arm_stand_min_clearance_m,selfcol_environment_min_clearance_m"
+             ",selfcol_gripper_excluded,selfcol_stale"
              ",projection_sweeps,projection_converged,projection_tightest_dir_change_deg"
              ",self_collision_clamp_count";
     // REACH SHELL (safety.reach_constraint), 2026-09-04. This layer had no column
@@ -1748,6 +1750,8 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sample.safety_projection.selfcol_self_min_clearance_m
           << ',' << sample.safety_projection.selfcol_intra_arm_min_clearance_m
           << ',' << sample.safety_projection.selfcol_gripper_min_clearance_m
+          << ',' << sample.safety_projection.selfcol_arm_stand_min_clearance_m
+          << ',' << sample.safety_projection.selfcol_environment_min_clearance_m
           << ',' << sample.safety_projection.selfcol_gripper_excluded
           << ',' << sample.safety_projection.selfcol_stale
           << ',' << sample.safety_projection.sweeps

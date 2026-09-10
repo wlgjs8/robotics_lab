@@ -130,7 +130,7 @@ static bool run() {
     // the arms approach — 35.7 mm measured), so it is a checked stand-side geometry in
     // its own `environment` barrier class. The stand contributes hulls ONLY since
     // 2026-09-06: upstream ver1 has no primitive stand boxes (ver2's 7 went with it).
-    RB_CHECK(mon.numGeometries() == 46);  // see the breakdown in runArticulatedGripper
+    RB_CHECK(mon.numGeometries() == 66);  // see the breakdown in runArticulatedGripper
     RB_CHECK(mon.numPairs() > 0);
 
     {
@@ -990,16 +990,20 @@ static bool runArticulatedGripper() {
     // RB5-850E, derived rather than guessed:
     //   per arm  11 link hulls (link0,1,4,5,6 single + link2,link3 CoACD x3)
     //          +  3 gripper (base + 2 fingers)                    = 14
-    //   stand    20 CoACD hulls + 1 env_stand_riser + 1 env_stand_spacer = 22
-    //   total    14 x 2 + 22                                      = 50
-    // The single-hull baseline replaces the 3 gripper geoms with 1, so 46.
+    //   stand    40 CoACD hulls + 1 env_stand_riser + 1 env_stand_spacer = 42
+    //   total    14 x 2 + 42                                      = 70
+    // The single-hull baseline replaces the 3 gripper geoms with 1, so 66.
+    // 2026-09-10: the stand went 20 -> 40 hulls (CoACD threshold 0.08 -> 0.03). These
+    // counts are asserted rather than derived at runtime ON PURPOSE -- they are how a
+    // silent geometry swap gets caught -- so a deliberate one updates them here and in
+    // the STAND_HULLS range of make_rb5_850e_urdfs.py together.
     // The gripper bolts straight to the flange -- the F/T sensor is inside
     // pika_gripper.STL, not a separate body (docs/reference/pika_tool_geometry.md).
     // The stand is hulls ONLY since the 2026-09-06 ver2 -> ver1 switch: upstream ver1
     // ships no primitive stand boxes, and its raw stand mesh is dropped by the
     // generator because a non-convex BVH blows the per-eval budget.
     std::cout << "articulated geoms=" << mon.numGeometries() << "\n";
-    RB_CHECK(mon.numGeometries() == 50);
+    RB_CHECK(mon.numGeometries() == 70);
 
     const JointArray init = kInitPose;
     auto fingerClears = [](const CollisionVerdict& v) {
@@ -1430,7 +1434,70 @@ static bool runCellStructurePairs() {
     return true;
 }
 
+// arm<->stand is its OWN barrier class since 2026-09-10, split out of the self set so
+// the two can be tuned apart. This pins the split itself: the classification, that the
+// class resolves to its own floor/band, that nothing else claims it, and that
+// self_min_clearance_m still INCLUDES these pairs (the InitMotion planner gates on it).
+bool runArmStandClass() {
+    CollisionMonitorConfig cfg = makeConfig(workspaceRoot());
+    if (!fs::is_regular_file(cfg.unified_urdf)) {
+        std::cout << "SKIP: unified URDF not found (" << cfg.unified_urdf << ")\n";
+        return true;
+    }
+    cfg.max_near_pairs = 10000;
+    // Deliberately unlike the self set, so a pair banded against the wrong one shows up.
+    cfg.d_hard_m = 0.030;
+    cfg.d_slow_m = 0.075;
+    cfg.arm_stand_d_hard_m = 0.012;
+    cfg.arm_stand_d_slow_m = 0.048;
+    CollisionMonitor mon(cfg);
+    const CollisionVerdict v = mon.evalOnce(kInitPose, kInitPose);
+    RB_CHECK(v.valid);
+
+    bool saw_arm_stand = false;
+    bool saw_arm_arm = false;
+    double arm_stand_min = std::numeric_limits<double>::infinity();
+    for (const auto& p : v.near) {
+        const bool a_stand = p.name_a.rfind("stand", 0) == 0;
+        const bool b_stand = p.name_b.rfind("stand", 0) == 0;
+        const bool stand_pair = (a_stand != b_stand);
+        if (p.environment || p.intra_arm || p.gripper_gripper || p.external || p.external_box) {
+            RB_CHECK(!p.arm_stand);   // the classes are exclusive
+            continue;
+        }
+        if (stand_pair) {
+            saw_arm_stand = true;
+            RB_CHECK(p.arm_stand);
+            RB_CHECK(nearPairHardFloorM(cfg, p) == cfg.arm_stand_d_hard_m);
+            RB_CHECK(nearPairSlowBandM(cfg, p) == cfg.arm_stand_d_slow_m);
+            arm_stand_min = std::min(arm_stand_min, p.d_m);
+        } else {
+            saw_arm_arm = true;
+            RB_CHECK(!p.arm_stand);   // arm<->arm keeps the self set
+            RB_CHECK(nearPairHardFloorM(cfg, p) == cfg.d_hard_m);
+            RB_CHECK(nearPairSlowBandM(cfg, p) == cfg.d_slow_m);
+        }
+    }
+    RB_CHECK(saw_arm_stand);
+    RB_CHECK(saw_arm_arm);
+    RB_CHECK(std::isfinite(v.arm_stand_min_clearance_m));
+    RB_CHECK(std::abs(v.arm_stand_min_clearance_m - arm_stand_min) < 1e-9);
+    // self_min_clearance_m still covers arm<->stand: it is what the InitMotion planner
+    // gates on, and narrowing it here would drop the class out of that gate silently.
+    RB_CHECK(v.self_min_clearance_m <= v.arm_stand_min_clearance_m + 1e-12);
+    // The summary path (InitMotion's oracle) has to agree with the verdict path.
+    const CollisionDistanceSummary s = mon.evalDistancesOnly(kInitPose, kInitPose);
+    RB_CHECK(std::abs(s.arm_stand_min_clearance_m - v.arm_stand_min_clearance_m) < 1e-9);
+    RB_CHECK(s.self_min_clearance_m <= s.arm_stand_min_clearance_m + 1e-12);
+    std::cout << "arm<->stand class OK (min " << v.arm_stand_min_clearance_m * 1e3 << " mm)\n";
+    return true;
+}
+
 int main() {
+    if (!runArmStandClass()) {
+        std::cerr << "test_collision_monitor (arm<->stand class) FAILED\n";
+        return 1;
+    }
     if (!runExternalBoxFeedLiveness()) {
         std::cerr << "test_collision_monitor (external box feed liveness) FAILED\n";
         return 1;
