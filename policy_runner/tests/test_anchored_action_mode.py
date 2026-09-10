@@ -204,3 +204,16 @@ def test_dynamic_rtc_params_clamps():
     shift, delay = s._dynamic_rtc_params(4)
     assert shift == 16                             # 4 * replan cap
     assert delay == 3                              # static configured, replan-clamped
+
+
+
+def test_dynamic_rtc_params_prefers_activated_chunk_and_request_snapshot():
+    # 2026-09-09: the shift is measured from the observation of the chunk the robot is
+    # EXECUTING (last activated) to THIS request's snapshotted observation step, so a
+    # discarded result or a moving live counter cannot re-base the freeze on the wrong row.
+    s = _bare_source(rtc_inference_delay=3, rtc_delay_policy="static",
+                     _stream_emitted_policy_steps=99,          # live counter (ignored)
+                     _rtc_prev_obs_step_seq=10,                # executing chunk observed at 10
+                     _rtc_request_obs_step_seq=13)             # this request observed at 13
+    shift, delay = s._dynamic_rtc_params(4)
+    assert (shift, delay) == (3, 3)

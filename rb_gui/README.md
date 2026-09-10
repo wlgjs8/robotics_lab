@@ -65,8 +65,9 @@ still makes the authoritative accept/reject decision.
 ## Self-Collision Highlight
 
 While `self_collision.violated`, the viewer paints the colliding parts
-translucent red. The collision model has FIVE body groups and only the ones the
-violating pair names light up:
+translucent red; one band out, parts inside their pair's `d_slow_m` are painted
+warning yellow (see below). The collision model has FIVE body groups and only the ones
+the pair names light up:
 
 | group | monitor geometry |
 | --- | --- |
@@ -86,6 +87,51 @@ VIOLATION — `clearance_m < d_hard_m`, each pair against **its own** published 
 Side is decided by the manifest's `left_prefix`/`right_prefix`, not by searching for
 the words "left"/"right": the unified URDF has stand links named `stand_left_arm_base`,
 and the articulated gripper has `<right_prefix>pika_finger_left`.
+
+### The `d_slow` band: warning yellow (2026-09-09)
+
+One band out, the same overlay paints **warning yellow** (`_SELF_COLLISION_SLOW_RGBA`):
+every part named by a near pair inside **its own** `d_slow_m`. Same groups, same
+per-pair band logic, same always-on rule as red — no debug checkbox — because the
+question it answers is the operator's: *which parts is the guard actually checking
+against each other right now.* Red wins per group, so a part named by both a breaching
+and a merely-close pair is drawn in the worse state.
+
+Three deliberate differences from the close-call tubes:
+
+- **No closing filter.** The tubes go blue only while `rate_m_s < 0` (the barrier is
+  braking that pair). This layer lights a pair *parked* inside the band too — a pair
+  that sits at 30 mm and never moves is exactly what a geometry-debugging session needs
+  to see, and a stale/absent rate then cannot hide a part.
+- **`*plane` / `*box` are excluded** (`_is_plane_or_box_geom`): the injected whole-arm
+  floor (`ground_plane`) and the runtime keep-out boxes (`external_box_*`). Neither is
+  self-collision — each has its own barrier class with a floor an order of magnitude
+  smaller — and neither is drawn as a body part, so both classify as "stand": without
+  the cut, the stand would go yellow on every pick and every place.
+- **Yellow, not blue.** The reference ghost is already translucent blue
+  (`_REFERENCE_GHOST_RGBA`), so a blue part highlight reads as "ghost".
+Both bands are translucent at **alpha 0.6** (2026-09-10; yellow went 0.45 → opaque →
+0.5 → 0.6, red 0.6 → 0.5 → 0.6), so they differ in hue and nothing else, and neither
+hides what is behind it. `_set_mesh_rgba` writes an alpha of 1.0 as viser's `opacity=None` — the
+opaque material, since `transparent = props.opacity !== null` in the client, so a
+fully-opaque *transparent* material would still render in the transparent pass. That
+rule is dormant at 0.5 and is what keeps "make a band opaque" a one-number change.
+
+Implementation: the per-arm collision overlay's mesh nodes are **recoloured in place**
+(viser props are assignable) rather than adding a fourth arm URDF per side, and the
+colour is written only when the band changes — `update_gui` runs at 10 Hz and every
+assignment queues one websocket message per mesh node. Where the arm URDF cannot be
+split into per-link mesh nodes, the overlay cannot be recoloured and degrades to the
+**red-only** behaviour: a `d_slow` warning must never be drawn in hard-violation red.
+There is no all-groups fallback on `near_pairs` truncation either (the state publisher
+sheds slow pairs before hard ones) — "everything yellow" would destroy the signal.
+
+Not everything checked is drawable: the pairs that are *excluded from checking* are the
+same-arm adjacent links (`intra_arm_min_chain_separation: 2`), the explicit
+`disabled_collision_pairs` globs (`link0↔link2`, `link4↔link6` per arm), and arm
+`link0` against the stand (`stand_ignore_arm_substrings`). To see the full checked
+geometry regardless of clearance, use the "자기충돌 검사 표시 (반투명)" checkbox, which
+draws the monitor's own collision hulls.
 
 The close-call tubes are coloured per pair: **red** below the pair's own `d_hard_m`,
 **blue** inside its own `d_slow_m` *while closing* — the barrier is braking that pair —

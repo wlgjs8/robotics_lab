@@ -140,6 +140,10 @@ struct PreviewSolveDiagnostics {
   // physical derivatives. Coupling is needed only when independent optima fail it.
   bool angular_norm_coupled{false};
   std::size_t angular_norm_cuts{0};
+  // Cutting-plane rounds (one coupled QP each) and the wall time spent inside qpOASES
+  // init/hotstart for them, to separate solver cost from setup/certification cost.
+  int angular_norm_rounds{0};
+  double angular_norm_qp_time_sec{0.0};
   double max_angular_chart_velocity_norm{0.0};
   double max_angular_chart_acceleration_norm{0.0};
   bool contact_constrained{false};

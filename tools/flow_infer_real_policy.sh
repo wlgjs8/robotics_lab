@@ -152,8 +152,22 @@ if [ "${FLOW_INFER_RTC:-0}" = "1" ]; then
   #   guidance weight, zeros = hard freeze only (no mixing).
   # Blend window width = H - 2*execute + kick_at (0 = no soft zone).
   RTC_SCHEDULE="${FLOW_INFER_RTC_SCHEDULE:-exp}"
-  RTC_ARGS+=(--stream-prefetch-at "$RTC_PREFETCH_AT" --rtc-inference-delay "$RTC_DELAY" --rtc-schedule "$RTC_SCHEDULE")
-  echo "[flow-infer] RTC: execute=$CHUNK_EXECUTE_STEPS kick_at=$RTC_PREFETCH_AT frozen_prefix(d)=$RTC_DELAY schedule=$RTC_SCHEDULE"
+  if [ "$CHUNK_ACTIVATION_MODE" = "ready_event" ]; then
+    # ready_event + RTC (2026-09-09): the kick is at activation (no explicit kick point,
+    # which the validator rejects here) and the realized delay is ceil(latency/policy_dt),
+    # so the freeze depth is PREDICTED per request from the measured request->activation
+    # time (p90/policy_dt + FLOW_INFER_RTC_DELAY_MARGIN, clipped to FLOW_INFER_RTC_DELAY_MAX);
+    # the prev-chunk shift and execute_horizon sent to the server are the measured
+    # observation spacing. $RTC_DELAY (default 3) only seeds the first few chunks.
+    RTC_DELAY_POLICY="${FLOW_INFER_RTC_DELAY_POLICY:-adaptive}"
+    RTC_DELAY_MARGIN="${FLOW_INFER_RTC_DELAY_MARGIN:-0}"
+    RTC_DELAY_MAX="${FLOW_INFER_RTC_DELAY_MAX:-8}"
+    RTC_ARGS+=(--rtc-delay-policy "$RTC_DELAY_POLICY" --rtc-delay-margin-steps "$RTC_DELAY_MARGIN" --rtc-delay-max-steps "$RTC_DELAY_MAX" --rtc-inference-delay "$RTC_DELAY" --rtc-schedule "$RTC_SCHEDULE")
+    echo "[flow-infer] RTC (ready_event): delay_policy=$RTC_DELAY_POLICY margin=$RTC_DELAY_MARGIN max=$RTC_DELAY_MAX seed_d=$RTC_DELAY schedule=$RTC_SCHEDULE (kick at activation; shift/execute_horizon = measured observation spacing)"
+  else
+    RTC_ARGS+=(--stream-prefetch-at "$RTC_PREFETCH_AT" --rtc-inference-delay "$RTC_DELAY" --rtc-schedule "$RTC_SCHEDULE")
+    echo "[flow-infer] RTC: execute=$CHUNK_EXECUTE_STEPS kick_at=$RTC_PREFETCH_AT frozen_prefix(d)=$RTC_DELAY schedule=$RTC_SCHEDULE"
+  fi
 fi
 
 # Sequential (blocking) chunk verification mode — FLOW_INFER_SEQUENTIAL=1:

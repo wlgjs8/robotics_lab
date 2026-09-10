@@ -1507,6 +1507,52 @@ bool initMotionRequestIsFresh(
     uint64_t request_id_left = 0,
     uint64_t request_id_right = 0);
 
+// A packet whose BOTH arms carry the init_motion profile is one of two different things,
+// and the difference decides how many execs drive it:
+//
+//   COMBINED  - ONE both-arm request (the GUI "both" button, or a single arm_init start
+//               that selected both arms). Both arms must be planned TOGETHER in the
+//               combined 12-DOF configuration space, which is the only thing that keeps
+//               the two paths from colliding IN TIME.
+//   INDEPENDENT - TWO single-arm requests that merely share a packet, because
+//               policy_runner owns a single command channel and has to carry both arms in
+//               the same packet while both latches are up.
+//
+// Folding the INDEPENDENT case into one exec is what made a second single-arm press
+// disturb the arm already moving: the in-flight exec (left_active=true,
+// right_active=false) no longer matched the request (true,true), initMotionRequestIsFresh
+// called it a new press, and the moving arm braked and replanned as a both-arm move.
+//
+// Same logical request == same per-arm init_motion_request_id (policy_runner stamps ONE
+// id per arm_init start). Untagged clients (id 0) cannot express the independent case at
+// all — their per-arm packet carries the profile on ONE arm — so both-arms-untagged
+// stays COMBINED, which is also the pre-existing behavior.
+bool initMotionRequestIsCombined(
+    bool left_init,
+    bool right_init,
+    uint64_t request_id_left,
+    uint64_t request_id_right);
+
+// Release one arm from a multi-arm InitMotion plan so the exec can keep driving the arm
+// it still owns instead of being dropped (which strands the peer half-way to the init
+// pose). pursueWaypointsStep treats an INACTIVE arm as pinned at waypoints.back()'s
+// column, so a released column that still VARIES leaks a fake distance into the pursuit
+// chord and — worse — into segFraction's projection, which advances the progress pointer
+// of the arm that is still being driven. Flattening the released column to its value at
+// `index` reproduces exactly the shape of a single-arm plan (constant peer column), so
+// the remaining arm's path, lookahead and progress are all unchanged.
+//
+// The released column was collision-checked TOGETHER with the column that remains, and
+// after the release the peer arm goes somewhere else — so the remaining arm's path is no
+// longer verified against the peer's actual trajectory. That gap is covered by the same
+// thing that covers two independent single-arm execs: the reactive 500 Hz CollisionMonitor
+// barrier.
+void flattenInitMotionWaypointColumn(
+    std::vector<std::pair<JointArray, JointArray>>& waypoints,
+    std::size_t index,
+    bool flatten_left,
+    bool flatten_right);
+
 // Brake-before-plan helpers (see InitMotionPlannerConfig::brake_before_plan). Stateless so
 // they are unit-testable in isolation (test_init_motion_pursuit).
 //

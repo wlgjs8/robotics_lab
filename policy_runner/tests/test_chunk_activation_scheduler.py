@@ -200,6 +200,28 @@ class ChunkActivationSchedulerTest(unittest.TestCase):
         self.assertAlmostEqual(source._step_deadline, 1.0768)
         self.assertAlmostEqual(source._inference_timing_snapshot()["ready_wait_ms"], 14.0)
 
+    def test_ready_event_over_freeze_guard_lets_current_chunk_run_until_row_d(self):
+        # 2026-09-09: an RTC candidate whose frozen prefix (delay) is deeper than the rows
+        # emitted since its observation must NOT activate yet -- its first executed delta
+        # would straddle the frozen->guided seam. The current chunk (== those frozen rows)
+        # runs until the executed window starts at row `delay`.
+        source = OfflineStreamSource("ready_event")
+        source.start_ready()
+        source.complete_request(1.03)
+        source._stream_next_chunk_metadata["rtc_sent"] = {"policy": "adaptive", "delay": 3, "shift": 1}
+        source.tick(1.044)  # emitted - observed = 1 < 3 -> wait, current chunk advances
+        self.assertEqual(len(source.published), 1)
+        self.assertEqual(source._rtc_freeze_guard_waits, 1)
+        source.tick(1.077)  # 2 < 3 -> wait again
+        self.assertEqual(len(source.published), 1)
+        source.tick(1.111)  # 3 == 3 -> activate at row 3, all executed rows are guided rows
+        self.assertEqual(len(source.published), 2)
+        metadata = source.published[-1][2]
+        self.assertEqual(metadata["source_start_index"], 3)
+        self.assertEqual(metadata["freeze_guard_waits"], 2)
+        self.assertEqual(source._rtc_freeze_guard_waits, 0)
+        np.testing.assert_array_equal([row[1][0] for row in source.emitted], [0, 1, 2, 203])
+
     def test_late_result_holds_at_execute_limit_then_resumes_without_catchup(self):
         source = OfflineStreamSource("ready_event")
         source.start_ready()
@@ -406,6 +428,29 @@ class ChunkActivationSchedulerTest(unittest.TestCase):
         source = OfflineStreamSource()
         with self.assertRaises(ValueError):
             source.configure_chunk_activation("ready_event")
+
+    def test_ready_mode_accepts_rtc_only_with_adaptive_delay_policy(self):
+        # 2026-09-09: ready_event kicks at activation, so the freeze depth must be predicted
+        # per request; a static depth is still rejected, an explicit kick point stays rejected.
+        self.assertEqual(
+            validate_chunk_activation_mode("ready_event", rtc_enabled=True, rtc_delay_policy="adaptive"),
+            "ready_event",
+        )
+        with self.assertRaises(ValueError):
+            validate_chunk_activation_mode("ready_event", rtc_enabled=True, rtc_delay_policy="static")
+        with self.assertRaises(ValueError):
+            validate_chunk_activation_mode(
+                "ready_event", rtc_enabled=True, rtc_delay_policy="adaptive", prefetch_at=1
+            )
+        # configure_chunk_activation forwards the source's policy to the validator
+        bare = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        bare.rtc_enabled = True
+        bare.rtc_delay_policy = "adaptive"
+        bare.configure_chunk_activation("ready_event")
+        self.assertEqual(bare.chunk_activation_mode, "ready_event")
+        bare.rtc_delay_policy = "static"
+        with self.assertRaises(ValueError):
+            bare.configure_chunk_activation("ready_event")
 
 
 if __name__ == "__main__":

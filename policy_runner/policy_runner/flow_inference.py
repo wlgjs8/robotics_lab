@@ -61,6 +61,7 @@ def validate_chunk_activation_mode(
     anchor_source: str = "actual",
     prefetch_at: int | None = None,
     training_replay: bool = False,
+    rtc_delay_policy: str = "static",
 ) -> str:
     """Validate scheduling before constructing a source or contacting a model.
 
@@ -72,8 +73,11 @@ def validate_chunk_activation_mode(
         raise ValueError(f"unsupported chunk_activation_mode: {mode!r}")
     if mode == "ready_event":
         incompatible = []
-        if rtc_enabled:
-            incompatible.append("RTC")
+        if rtc_enabled and str(rtc_delay_policy) != "adaptive":
+            # A static freeze depth presumes a fixed kick point (fixed_steps: kick at K,
+            # freeze execute-K). ready_event kicks at activation and realizes
+            # ceil(latency / policy_dt) steps, so the depth must be predicted per request.
+            incompatible.append("RTC with a static delay (use --rtc-delay-policy adaptive)")
         if stitch_mode != "boundary":
             incompatible.append(f"chunk stitch mode {stitch_mode}")
         if sequential:
@@ -1249,6 +1253,7 @@ class FlowMatchingActionSource:
             anchor_source=str(getattr(self, "chunk_anchor_source", "actual")),
             prefetch_at=getattr(self, "stream_prefetch_at", None),
             training_replay=getattr(self, "episode_observation_provider", None) is not None,
+            rtc_delay_policy=str(getattr(self, "rtc_delay_policy", "static")),
         )
 
     def _try_ready_event_activation(self, now_monotonic: float) -> bool:
@@ -1258,10 +1263,35 @@ class FlowMatchingActionSource:
         Generation is checked again here so even a queued result cannot cross an
         InitMotion/reset boundary. The worker also rejects in-flight old work.
         """
+        # Over-freeze guard (2026-09-09). With RTC the first `delay` rows of the candidate
+        # are hard-frozen to the previous plan and row `delay` is the first inpainted one.
+        # The executed window starts at row (emitted - observation): if that is < delay,
+        # the first executed delta would straddle the frozen->guided boundary and turn the
+        # inpainting's residual gap into a one-step velocity spike (measured 4-13 mm/step).
+        # Let the current chunk (== the frozen rows, by construction) run one more row instead.
+        with self._stream_lock:
+            peek = self._stream_next_chunk_metadata if self._stream_next_chunk is not None else None
+        if isinstance(peek, dict):
+            sent = peek.get("rtc_sent")
+            if isinstance(sent, dict) and sent.get("delay") is not None:
+                emitted_now = int(getattr(self, "_stream_emitted_policy_steps", 0))
+                observed_at = int(peek.get("observation_step_seq", emitted_now))
+                if (
+                    emitted_now - observed_at < int(sent["delay"])
+                    and self._chunk is not None
+                    and self._chunk_index + 1 < self._current_chunk_execute_limit()
+                ):
+                    self._rtc_freeze_guard_waits = int(getattr(self, "_rtc_freeze_guard_waits", 0)) + 1
+                    return False
         chunk = self._take_prefetched()
         if chunk is None:
             return False
         metadata = dict(getattr(self, "_stream_activation_candidate_metadata", None) or {})
+        waited = int(getattr(self, "_rtc_freeze_guard_waits", 0))
+        if waited:
+            metadata["freeze_guard_waits"] = waited
+            self._stream_activation_candidate_metadata = metadata
+            self._rtc_freeze_guard_waits = 0
         generation = int(getattr(self, "_stream_generation", 0))
         emitted = int(getattr(self, "_stream_emitted_policy_steps", 0))
         observation = int(metadata.get("observation_step_seq", emitted))
@@ -1274,6 +1304,7 @@ class FlowMatchingActionSource:
             self._stream_ready_discard_count = int(getattr(self, "_stream_ready_discard_count", 0)) + 1
             self._stream_activation_candidate_metadata = None
             self._stream_activation_candidate_timing = None
+            self.on_rtc_chunk_discarded(metadata)  # never let a discarded plan seed the next freeze
             return False
         self._activate_chunk(chunk, now_monotonic, preserve_step_grid=True)
         return True
@@ -1538,6 +1569,19 @@ class FlowMatchingActionSource:
         except Exception:  # noqa: BLE001 - never let conditioning break the rollout
             return chunk
 
+    # ---- RTC bookkeeping hooks (no-ops here; OpenpiRemoteActionSource implements them) ----
+    def note_rtc_request_context(self, observation_step_seq: int, inference_seq: int) -> None:
+        return None
+
+    def clear_rtc_request_context(self) -> None:
+        return None
+
+    def on_rtc_chunk_activated(self, metadata: Any) -> None:
+        return None
+
+    def on_rtc_chunk_discarded(self, metadata: Any) -> None:
+        return None
+
     def _rtc_delay_telemetry(self) -> dict[str, Any] | None:
         """Configured vs realized RTC inference delay for the active chunk.
 
@@ -1556,18 +1600,43 @@ class FlowMatchingActionSource:
         replan = int(
             getattr(self, "rtc_replan_period", 0) or self._resolved_chunk_execute_steps()
         )
-        configured = int(
-            np.clip(int(getattr(self, "rtc_inference_delay", 0)), 0, max(0, replan))
-        )
+        # Per-chunk values the client actually SENT (adaptive policy) travel in the chunk
+        # metadata; without them fall back to the static configuration.
+        sent = metadata.get("rtc_sent")
+        sent = sent if isinstance(sent, dict) else None
+        policy = str((sent or {}).get("policy") or getattr(self, "rtc_delay_policy", "static"))
+        configured: int | None
+        execute_horizon: int | None
+        if sent is not None and sent.get("delay") is not None:
+            configured = int(sent["delay"])
+            execute_horizon = int(sent.get("execute_horizon", replan))
+        elif sent is not None and sent.get("cold_start"):
+            configured = None  # vanilla sample: nothing was frozen
+            execute_horizon = None
+        else:
+            configured = int(
+                np.clip(int(getattr(self, "rtc_inference_delay", 0)), 0, max(0, replan))
+            )
+            execute_horizon = replan
         realized = metadata.get("source_start_index")
         telemetry: dict[str, Any] = {
             "configured_delay": configured,
             "realized_delay": realized,
-            "execute_horizon": replan,
+            "execute_horizon": execute_horizon,
             "schedule": str(getattr(self, "rtc_prefix_attention_schedule", "")),
             "alignment_outcome": metadata.get("alignment_outcome"),
+            "delay_policy": policy,
+            "sent_shift": (sent or {}).get("shift"),
+            "prev_conditioned": (sent or {}).get("prev_conditioned"),
+            "freeze_guard_waits": metadata.get("freeze_guard_waits"),
+            # frozen rows that fell inside the executed window (over-freeze depth)
+            "frozen_rows_executed": (
+                max(0, int(configured) - int(realized))
+                if configured is not None and realized is not None else None
+            ),
         }
-        self._note_rtc_delay_divergence(configured, realized)
+        if configured is not None:
+            self._note_rtc_delay_divergence(configured, realized)
         return telemetry
 
     def _resolved_chunk_execute_steps(self) -> int:
@@ -1595,11 +1664,24 @@ class FlowMatchingActionSource:
         if streak < 8 or bool(getattr(self, "_rtc_delay_mismatch_warned", False)):
             return
         self._rtc_delay_mismatch_warned = True
-        direction = "over-freeze (stale replay)" if int(realized) < configured else "under-freeze (boundary jump)"
+        # ready_event/anchored semantics (2026-09-09): the executed window starts at row
+        # `realized`, composed from the command pose, so OVER-freeze (d > realized) executes the
+        # frozen->guided boundary delta -- the inpainting's residual gap as a one-step spike
+        # (measured 4-13 mm/step at d = realized + 1). UNDER-freeze only shortens the model's
+        # conditioning prefix; continuity of the executed rows then rests on the soft guidance.
+        direction = (
+            "over-freeze (frozen->guided seam executed: velocity spike)"
+            if int(realized) < configured
+            else "under-freeze (shorter conditioning prefix; executed rows rely on guidance)"
+        )
         print(
             f"[flow-infer] WARNING RTC inference_delay mismatch for {streak} consecutive "
             f"chunks: configured d={configured}, realized={int(realized)} -> {direction}. "
-            f"Pair --rtc-inference-delay with (chunk_execute_steps - stream_prefetch_at).",
+            + (
+                "Raise --rtc-delay-margin-steps (adaptive policy)."
+                if str(getattr(self, "rtc_delay_policy", "static")) == "adaptive"
+                else "Pair --rtc-inference-delay with (chunk_execute_steps - stream_prefetch_at)."
+            ),
             file=sys.stderr,
             flush=True,
         )
@@ -1788,6 +1870,7 @@ class FlowMatchingActionSource:
             }
             self._stream_activation_candidate_metadata = None
             self._chunk = None
+            self.on_rtc_chunk_discarded(self._active_chunk_metadata)
             return
         if source_start_index > 0:
             chunk = np.asarray(chunk[source_start_index:], dtype=chunk.dtype)
@@ -1802,6 +1885,8 @@ class FlowMatchingActionSource:
             "alignment_outcome": "aligned",
         }
         self._stream_activation_candidate_metadata = None
+        # The plan the robot will now execute becomes the one the next RTC freeze continues.
+        self.on_rtc_chunk_activated(self._active_chunk_metadata)
         self._overlay_chain_advance()
         self._chunk = chunk
         self._chunk_index = 0
@@ -2463,6 +2548,9 @@ class FlowMatchingActionSource:
                 request_ns = self._inference_now_ns()
                 observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
             worker_start_ns = self._inference_now_ns()
+            # RTC: the request's observation step and sequence, snapshotted at kick time,
+            # are what the prev-chunk shift and the result stash key off.
+            self.note_rtc_request_context(int(observation_step_seq), int(inference_seq))
             try:
                 chunk = self._sample_and_align_chunk(payload)
             except Exception as exc:  # noqa: BLE001 - inference must not kill the worker
@@ -2472,6 +2560,9 @@ class FlowMatchingActionSource:
                     flush=True,
                 )
                 chunk = None
+            finally:
+                rtc_sent = copy.deepcopy(getattr(self, "_rtc_last_sent", None))
+                self.clear_rtc_request_context()
             worker_end_ns = self._inference_now_ns()
             ready_ns = self._inference_now_ns()
             with self._stream_lock:
@@ -2497,6 +2588,7 @@ class FlowMatchingActionSource:
                         "generation": int(generation),
                         "inference_seq": int(inference_seq),
                         "observation_step_seq": observation_step_seq,
+                        "rtc_sent": rtc_sent,
                         "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
                         **self._inference_recovery_metadata(payload),
                         "proprio": copy.deepcopy(
@@ -2556,6 +2648,7 @@ class FlowMatchingActionSource:
                 "queue_wait_ms",
                 "inference_latency_ms",
                 "ready_wait_ms",
+                "request_to_activation_ms",
                 "inference_period_ms",
                 "inference_period_jitter_ms",
             )
@@ -2664,6 +2757,12 @@ class FlowMatchingActionSource:
         if lock is not None:
             with lock:
                 self._inference_timing_history["ready_wait_ms"].append(ready_wait_ms)
+                request_ns = activated.get("request_monotonic_ns")
+                if request_ns is not None:
+                    # kick -> activation, the quantity the adaptive RTC delay predicts
+                    self._inference_timing_history.setdefault(
+                        "request_to_activation_ms", deque(maxlen=64)
+                    ).append(max(0.0, (activation_ns - int(request_ns)) / 1_000_000.0))
                 self._inference_timing_latest = activated
                 for event in reversed(self._inference_diagnostics_events):
                     if int(event.get("seq", -1)) == int(activated.get("seq", -2)):

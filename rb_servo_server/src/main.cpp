@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/core/realtime.hpp"
 #include "rb_servo/core/shutdown.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
@@ -62,6 +63,21 @@ int main(int argc, char** argv) {
         if (check_config_only) {
             std::cout << "config OK: " << config_path << "\n";
             return 0;
+        }
+
+        // THE BLAS POOL (2026-09-10): qpOASES's LAPACK/BLAS calls (dpotrf/dgemv in the
+        // coupled angular-norm QP) run inside the 100 Hz preview worker, and OpenBLAS's
+        // default pool spread each call over its worker threads. Measured: 3-17 ms per
+        // coupled solve against the 8 ms request budget (14 of 25 refused, plan expiry,
+        // brake; servo_log_20260910_111012 @412 s, @433 s) versus <2 ms single-threaded.
+        // Pin before any solver object exists.
+        {
+            const int previous = rb_servo::pinBlasThreads(1);
+            if (previous < 0)
+                std::cerr << "[INFO] BLAS pool: no OpenBLAS runtime in this process (nothing to pin)\n";
+            else
+                std::cerr << "[INFO] BLAS pool: OpenBLAS threads " << previous
+                          << " -> 1 (qpOASES runs single-threaded inside the preview worker)\n";
         }
 
         // THE BOX DH CALIBRATION STAGE (2026-09-05): before anything is built. real

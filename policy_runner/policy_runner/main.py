@@ -2067,6 +2067,31 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="RTC guidance-weight clip (beta); 5.0 per the paper. Only used with --rtc.",
     )
     flow_infer.add_argument(
+        "--rtc-delay-policy",
+        choices=("static", "adaptive"),
+        default="static",
+        help="How the RTC freeze depth d is chosen per request. static (DEFAULT): "
+             "--rtc-inference-delay clipped to the replan period, execute_horizon = replan period "
+             "(the fixed_steps contract). adaptive: d = ceil(p90 of the measured "
+             "request->activation time / policy_dt) + --rtc-delay-margin-steps, clipped to "
+             "[1, --rtc-delay-max-steps]; the previous-chunk shift and execute_horizon are the "
+             "measured observation-to-observation spacing; the previous chunk is the last "
+             "ACTIVATED result. REQUIRED for --chunk-activation-mode ready_event with --rtc.",
+    )
+    flow_infer.add_argument(
+        "--rtc-delay-margin-steps",
+        type=int,
+        default=0,
+        help="adaptive policy: extra frozen rows on top of the p90 prediction (over-freeze is "
+             "safe = stale replay of one more row; under-freeze = boundary jump).",
+    )
+    flow_infer.add_argument(
+        "--rtc-delay-max-steps",
+        type=int,
+        default=8,
+        help="adaptive policy: upper clip of the predicted freeze depth.",
+    )
+    flow_infer.add_argument(
         "--chunk-crossfade-steps",
         type=int,
         default=2,
@@ -2535,6 +2560,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 anchor_source=args.chunk_anchor_source,
                 prefetch_at=args.stream_prefetch_at,
                 training_replay=args.training_episode_hdf5 is not None,
+                rtc_delay_policy=str(getattr(args, "rtc_delay_policy", "static")),
             )
             if args.velproprio_source == "servo_command":
                 if not str(args.checkpoint).startswith(OPENPI_CHECKPOINT_PREFIX):
@@ -2986,6 +3012,9 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     rtc_inference_delay=int(getattr(args, "rtc_inference_delay", 2)),
                     rtc_prefix_attention_schedule=str(getattr(args, "rtc_schedule", "exp")),
                     rtc_max_guidance_weight=float(getattr(args, "rtc_max_guidance_weight", 5.0)),
+                    rtc_delay_policy=str(getattr(args, "rtc_delay_policy", "static")),
+                    rtc_delay_margin_steps=int(getattr(args, "rtc_delay_margin_steps", 0)),
+                    rtc_delay_max_steps=int(getattr(args, "rtc_delay_max_steps", 8)),
                 )
             elif checkpoint_kind == "direct_bc":
                 source = DirectBcImageActionSource(

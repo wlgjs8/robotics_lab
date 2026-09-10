@@ -68,6 +68,11 @@ class LivePreviewExecution {
   bool requestRecovery(PreviewRecoveryCause cause);
   bool seedStationaryRecovery(double now_sec, const Pose6D& nominal,
                               bool stationary, PreviewRecoveryCause cause);
+  // Which seed precondition refuses (nullptr = the seed would be accepted). The
+  // coordinator puts this in the fault reason so a refused restart names its cause
+  // instead of the bare "cannot certify a stop".
+  const char* stationarySeedRefusal(double now_sec, const Pose6D& nominal,
+                                    bool stationary, PreviewRecoveryCause cause) const;
   LivePreviewOutput recoveryOutput(double now_sec);
   bool recoveryStopped() const;
   bool restartRecovery();
@@ -84,6 +89,7 @@ class LivePreviewExecution {
   bool failed() const { return faulted_; }
   bool hasPlan() const { return active_.accepted() || brake_trajectory_.valid; }
   bool braking() const { return brake_trajectory_.valid; }
+  bool contactClampActive() const { return contact_clamp_active_; }
   const PreviewMotionSample& sample() const { return sample_; }
   const PreviewMotionSample& acceptedSample() const { return accepted_sample_; }
   const Pose6D& acceptedPose() const { return accepted_epoch_?accepted_sample_.pose:cold_.pose; }
@@ -124,6 +130,14 @@ class LivePreviewExecution {
   LivePreviewAdmissionDiagnostics admission_diagnostics_{};
   std::uint64_t epoch_{1}, gate_revision_{1}, request_id_{0}, gauge_revision_{0};
   double initialized_at_{0}, last_time_{0}, next_request_at_{0};
+  // Refused closing displacement of the active plan (stand frame) not yet
+  // absorbed by an admitted plan. Every request carries it as the predicted
+  // dispatch offset; admission keeps only what was refused after that prediction.
+  Eigen::Vector3d contact_clamp_shift_{Eigen::Vector3d::Zero()};
+  bool contact_clamp_active_{false};
+  double servo_period_sec_{0};
+  void clampContact(double dt_sec, const FollowerOutputKinematics& raw,
+                    const Eigen::Vector3d& normal);
   double planning_starved_since_sec_{0};
   double brake_origin_sec_{0}, accepted_sample_time_sec_{0};
   std::uint64_t brake_plan_id_{0}, accepted_plan_id_{0};

@@ -1,9 +1,11 @@
 #include "rb_servo/control/live_preview_execution.hpp"
+#include "rb_servo/control/joint_stationarity.hpp"
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/math/se3.hpp"
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <string>
 #include <limits>
 #include <thread>
 
@@ -261,15 +263,71 @@ bool currentVelocityAuthority() {
   // This test explicitly freezes the canonical phase; it does not assume a
   // force gate instantly removes in-flight canonical Ruckig velocity.
   f.raw.setPlanRateGate(0);letWorkerRun();
+  const auto before_clamp=f.exec.sample();
   const auto stopped=f.step(true,.01,Eigen::Vector3d::UnitX());
   CHECK(f.raw.outputKinematics().velocity.x==0);
-  CHECK(stopped.active&&!stopped.fault&&f.exec.braking());
-  CHECK(f.exec.telemetry().contact_guard_count==1);
-  PreviewMotionSample expected_tick;CHECK(expected.sample(kDt,expected_tick));
-  CHECK(math::positionDistance(f.exec.sample().pose,expected_tick.pose)<1e-11);
-  CHECK((f.exec.sample().linear_velocity-expected_tick.linear_velocity).norm()<1e-10);
-  CHECK((f.exec.sample().linear_acceleration-expected_tick.linear_acceleration).norm()<1e-8);
+  // 2026-09-10: the active plan losing closing authority is CLAMPED, not braked.
+  // Its closing velocity is cut to the authority (0 here), the refused advance is
+  // held back, and the plan keeps executing until the constrained replan splices.
+  CHECK(stopped.active&&!stopped.fault&&!f.exec.braking());
+  CHECK(f.exec.telemetry().contact_guard_count==0);
+  CHECK(f.exec.telemetry().contact_clamp_count==1&&f.exec.contactClampActive());
+  const double tol=config().preview_execution.tracker.feasibility_tolerance;
+  CHECK(f.exec.sample().linear_velocity.x()<=tol);
+  CHECK(f.exec.sample().linear_acceleration.x()<=tol);
+  // held back: no advance into the contact beyond the refused displacement's
+  // second-order residual of one tick
+  CHECK(f.exec.sample().pose.x<=before_clamp.pose.x+1e-6);
+  CHECK(f.exec.telemetry().contact_clamp_shift_m>0);
   CHECK(f.accept(stopped));
+  // The constrained replan (contact knots at authority 0) takes over without a
+  // brake; the clamp retires with it and closing stays inside authority.
+  bool replanned=false;
+  for(int i=0;i<40&&!replanned;++i) {
+    letWorkerRun();const auto out=f.step(true,.01,Eigen::Vector3d::UnitX());
+    if(!(out.active&&!out.fault&&!f.exec.braking())) {
+      const auto& tl=f.exec.telemetry();
+      std::cerr<<"clamp loop i="<<i<<" status="<<tl.status<<" brake="<<tl.last_brake_reason
+               <<" clamp_shift="<<tl.contact_clamp_shift_m<<" clamps="<<tl.contact_clamp_count
+               <<" accepted="<<tl.accepted<<" rejected="<<tl.rejected<<" expired="<<tl.expired
+               <<" last_cancel="<<tl.last_staged_cancel_reason<<" worker="<<tl.last_worker_status
+               <<" solve="<<tl.last_solve_status<<" raw_v="<<f.raw.outputKinematics().velocity.x<<'\n';
+    }
+    CHECK(out.active&&!out.fault&&!f.exec.braking());
+    CHECK(f.exec.sample().linear_velocity.x()<=std::max(0.,f.raw.outputKinematics().velocity.x)+tol);
+    CHECK(f.accept(out));
+    replanned=!f.exec.contactClampActive();
+  }
+  CHECK(replanned);CHECK(f.exec.telemetry().contact_guard_count==0);
+  CHECK(f.exec.telemetry().contact_clamp_shift_m==0);
+  return true;
+}
+
+bool contactClampFallsBackToBrakeOnlyWhenNoReplanArrives() {
+  // Starve the worker: the clamp holds back the refused advance tick after tick
+  // and never executes a closing velocity; with no compliant replan admitted the
+  // violating plan expires inside max_result_age_sec and the finite brake remains
+  // the last resort. There is no separate displacement bound.
+  setExternalSteadyNs(kStartNs);Fixture f(.01);CHECK(f.engage());
+  bool moving=false;
+  for(int i=0;i<90&&!moving;++i) {
+    letWorkerRun();const auto out=f.step();CHECK(!out.fault&&!f.exec.braking());CHECK(f.accept(out));
+    moving=f.exec.sample().linear_velocity.x()>.08;
+  }
+  CHECK(moving);
+  f.raw.setPlanRateGate(0);
+  bool braked=false;std::uint64_t clamps=0;
+  for(int i=0;i<200&&!braked;++i) {
+    const auto out=f.step(true,0,Eigen::Vector3d::UnitX());  // no letWorkerRun: no replan can land
+    CHECK(!out.fault);CHECK(f.accept(out));
+    clamps=f.exec.telemetry().contact_clamp_count;
+    braked=f.exec.braking();
+    if(!braked)CHECK(f.exec.sample().linear_velocity.x()<=config().preview_execution.tracker.feasibility_tolerance);
+  }
+  CHECK(clamps>1);
+  // the plan expired (braking_expired): a brake, not a fault, and no clamp ever
+  // executed a closing velocity
+  CHECK(braked);CHECK(std::string(f.exec.telemetry().last_brake_reason)=="braking_expired");
   return true;
 }
 
@@ -821,6 +879,46 @@ bool recordedAngularExpiryStateHasFiniteBrake() {
 }
 
 }
+bool stationarySeedRefusalNamesThePredicate() {
+  // 2026-09-10: a refused restart must name its precondition (the same-process
+  // restart fault reported only "cannot certify a stop").
+  {
+    setExternalSteadyNs(kStartNs);Fixture f(0.,0.,false);
+    CHECK(std::string(f.exec.stationarySeedRefusal(f.now(),pose(.43),true,PreviewRecoveryCause::Peer))=="recovery_disabled");
+  }
+  {
+    setExternalSteadyNs(kStartNs);Fixture f(0.,0.,true);
+    auto invalid_pose=pose(.43);invalid_pose.rz=std::numeric_limits<double>::quiet_NaN();
+    CHECK(std::string(f.exec.stationarySeedRefusal(f.now(),pose(.43),true,PreviewRecoveryCause::None))=="cause_none");
+    CHECK(std::string(f.exec.stationarySeedRefusal(f.now(),pose(.43),false,PreviewRecoveryCause::Peer))=="not_stationary");
+    CHECK(std::string(f.exec.stationarySeedRefusal(f.now(),invalid_pose,true,PreviewRecoveryCause::Peer))=="nominal_not_finite");
+    CHECK(std::string(f.exec.stationarySeedRefusal(-1.,pose(.43),true,PreviewRecoveryCause::Peer))=="invalid_time");
+    CHECK(f.exec.stationarySeedRefusal(f.now(),pose(.43),true,PreviewRecoveryCause::Peer)==nullptr);
+    // the query has no side effects: the seed still succeeds afterwards, and then names itself initialized
+    CHECK(f.exec.seedStationaryRecovery(f.now(),pose(.43),true,PreviewRecoveryCause::Peer));
+    CHECK(std::string(f.exec.stationarySeedRefusal(f.now(),pose(.43),true,PreviewRecoveryCause::Peer))=="already_initialized");
+  }
+  return true;
+}
+
+bool sentJointStationarityUsesTolerance() {
+  using rb_servo::control::maxAbsJointDeltaDeg;
+  using rb_servo::control::sentJointsStationary;
+  using rb_servo::control::kSentJointStationaryToleranceDeg;
+  const JointArray a{-64.8019149,62.5795989,86.6957974,10.,-20.,30.};
+  JointArray b=a;
+  CHECK(sentJointsStationary(a,b));
+  b[2]+=1e-9;                      // the hold-ramp tail seen in the 2026-09-10 logs
+  CHECK(maxAbsJointDeltaDeg(a,b)<1e-8&&sentJointsStationary(a,b));
+  b[2]=a[2]+kSentJointStationaryToleranceDeg*0.5;
+  CHECK(sentJointsStationary(a,b));
+  b[2]=a[2]+1e-3;                  // a real 0.5 deg/s motion at 2 ms is not stationary
+  CHECK(!sentJointsStationary(a,b)&&std::abs(maxAbsJointDeltaDeg(a,b)-1e-3)<1e-12);
+  b[4]=std::numeric_limits<double>::quiet_NaN();
+  CHECK(!sentJointsStationary(a,b)&&!std::isfinite(maxAbsJointDeltaDeg(a,b)));
+  return true;
+}
+
 int main() {
   const bool ok=coldAndC2Splice()&&epochsAndContinuousGateIdentity()&&acceptedTransactionGaugeAndDeviation()&&
       frameShiftAndCanonicalIndependence()&&expiryAndDispatchRefusal()&&invalidInputAndContactStop()&&
@@ -832,7 +930,8 @@ int main() {
       recoveryDoesNotDowngradeSafetyFailures()&&stationaryRecoverySeedRefusalsAreTransactional()&&
       recoveryOutputRejectsNanosecondOverflowBoundary()&&recoverySeedSurvivesWaitingForStationaryDispatch()&&
       explicitResetCancelsPendingRecoverySeed()&&pendingRecoverySeedSharesGeometricFold()&&
-      recordedAngularExpiryStateHasFiniteBrake();
+      recordedAngularExpiryStateHasFiniteBrake()&&stationarySeedRefusalNamesThePredicate()&&
+      sentJointStationarityUsesTolerance()&&contactClampFallsBackToBrakeOnlyWhenNoReplanArrives();
   setExternalSteadyNs(0);
   if(!ok)return 1;
   std::cout<<"live preview execution: all checks passed (no hardware)\n";return 0;

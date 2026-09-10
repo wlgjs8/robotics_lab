@@ -228,8 +228,10 @@ class ArmInitOverrideController:
 
     @property
     def external_init_active(self) -> bool:
-        # An externally committed init survives synthetic deadman Hold. Sending
-        # even a peer-only policy packet would explicitly cancel that move.
+        # An externally committed init survives synthetic deadman Hold. Sending a
+        # peer-only POLICY packet would explicitly cancel that move, so policy traffic
+        # is suppressed for its duration -- but an InitMotion packet of OUR OWN is not a
+        # cancel and must still go out (see _external_init_intent).
         return any(r.on and r.external for r in (self._left, self._right))
 
     @property
@@ -442,9 +444,78 @@ class ArmInitOverrideController:
         self.changed = self.changed or changed
         return changed
 
+    def _external_init_intent(self, intent: CommandIntent | None) -> CommandIntent | None:
+        """What to send while ANOTHER client owns an in-flight InitMotion.
+
+        An externally committed init (the rb_gui button's direct one-shot) belongs to
+        the server: we must not retransmit it, and we must not cancel it. A packet with
+        NO init_motion profile on either arm IS a cancel -- the server's
+        applyInitMotionSequencer resets every non-idle exec on an explicit non-init
+        command -- so ordinary policy traffic stays suppressed exactly as before.
+
+        A packet that DOES carry OUR OWN arm's init_motion profile is not a cancel:
+        `is_init` is true, the peer's exec is continued by its own sequence_active
+        branch, and whatever we put on the peer arm is overwritten by that exec's
+        pursuit waypoint. Emitting it is what lets the operator start one arm's
+        InitMotion while the OTHER arm's init is still running.
+
+        MEASURED 2026-09-10 (logs/servo_log_20260910_111949.csv): returning None
+        unconditionally queued the second press behind the first. The right arm's
+        init_motion profile did not reach the server at all (right_joint_target_profile
+        _before_init_sequencer stayed `direct`) until 6.832 s -- 22 ms after the LEFT
+        arm's F/T auto-tare was accepted at 6.810 s and finally released the external
+        latch, 1.02 s after that arm had already reached the init pose. Same shape in
+        the 121-127 s pass.
+        """
+        ours = tuple(
+            arm
+            for arm in ("left", "right")
+            if self._runtime(arm).on
+            and not self._runtime(arm).external
+            and not self._runtime(arm).fail
+            and not self._runtime(arm).motion_done
+        )
+        if not ours:
+            # Nothing of ours to say. Silence keeps the peer's committed move alive: the
+            # server re-serves the last command and treats the deadman's synthetic Hold
+            # as a continuation, while any packet we could send here would be a cancel.
+            return None
+        missing = [arm for arm in ours if self._runtime(arm).q_deg is None]
+        if missing:
+            self.error = (
+                "missing_init_q_deg" if len(missing) > 1 else f"missing_{missing[0]}_init_q_deg"
+            )
+            return None
+        payloads: dict[str, dict[str, Any]] = {}
+        for arm in ("left", "right"):
+            runtime = self._runtime(arm)
+            if arm in ours and runtime.q_deg is not None:
+                payloads[arm] = _init_arm_payload(runtime.q_deg, runtime.request_id)
+            else:
+                # Hold on the peer arm: never OUR init profile on an arm we do not own
+                # (that would re-enter the peer's exec under our request id and relaunch
+                # it as a both-arm move), and never policy motion (every arm is
+                # suspended for the duration of an external init).
+                payloads[arm] = {"mode": "Hold"}
+        _dbg(
+            f"external init in flight; emitting OUR init for {ours} "
+            f"(left={payloads['left'].get('mode')} right={payloads['right'].get('mode')})"
+        )
+        return CommandIntent(
+            _mixed_top_mode(payloads["left"], payloads["right"]),
+            timeout_sec=intent.timeout_sec if intent is not None else self.timeout_sec,
+            left=payloads["left"],
+            right=payloads["right"],
+            coupled_timeout=intent.coupled_timeout if intent is not None else True,
+            tcp_target_profile=intent.tcp_target_profile if intent is not None else None,
+            metadata=copy.deepcopy(intent.metadata)
+            if intent is not None and intent.metadata is not None
+            else None,
+        )
+
     def compose_intent(self, intent: CommandIntent | None) -> CommandIntent | None:
         if self.external_init_active:
-            return None
+            return self._external_init_intent(intent)
         if _ARM_INIT_DEBUG:
             any_on = self.left_on or self.right_on
             if any_on != self._dbg_prev_any_on:
@@ -597,12 +668,22 @@ class ArmInitOverrideController:
             self.error = "missing_init_q_deg" if len(missing) > 1 else f"missing_{missing[0]}_init_q_deg"
             return False
         changed = False
+        # ONE id for every arm this press selected. The server tells a single both-arm
+        # request (both arms planned TOGETHER in the combined 12-DOF space, the only
+        # thing that keeps the two paths from colliding in TIME) apart from two
+        # single-arm presses that merely share a packet by comparing the arms'
+        # init_motion_request_id -- see initMotionRequestIsCombined in
+        # dual_arm_servo_loop.cpp. A per-arm id made both-arm presses indistinguishable
+        # from two independent single-arm presses.
+        request_id = max(
+            [time.monotonic_ns()] + [self._runtime(arm).request_id + 1 for arm in arms]
+        )
         for arm in arms:
             runtime = self._runtime(arm)
             was_on = runtime.on
             self._pending["started"].add(arm)
             changed = True
-            runtime.request_id = max(time.monotonic_ns(), runtime.request_id + 1)
+            runtime.request_id = request_id
             runtime.external = False
             runtime.motion_done = False
             # Keep the known F/T prerequisite across requests. A missing block

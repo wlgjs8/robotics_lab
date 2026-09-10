@@ -601,6 +601,133 @@ bool test_auto_tare_after_init() {
     return true;
 }
 
+// ---------------------------------------------------------------------------------
+// initMotionRequestIsCombined + flattenInitMotionWaypointColumn: two SINGLE-arm
+// InitMotion presses must run independently, even though policy_runner has one command
+// channel and therefore carries both arms' init_motion profile in the same packet.
+//
+// Regression target (2026-09-10, servo_log_20260910_111949.csv): pressing the second arm
+// while the first was still moving used to be folded into ONE both-arm exec. The in-flight
+// exec (left_active=true, right_active=false) no longer matched the request (true,true),
+// so initMotionRequestIsFresh called it a new press and the moving arm braked and
+// replanned. The request ids tell the two cases apart: policy_runner stamps ONE id per
+// arm_init start, so equal ids are one both-arm press and different ids are two presses.
+// ---------------------------------------------------------------------------------
+bool test_request_combined_vs_independent() {
+    // Only one arm carries the profile -> never combined, whatever the ids say.
+    RB_CHECK(!initMotionRequestIsCombined(true, false, 0, 0));
+    RB_CHECK(!initMotionRequestIsCombined(false, true, 7, 7));
+    RB_CHECK(!initMotionRequestIsCombined(false, false, 0, 0));
+
+    // Untagged one-shot client (rb_gui): both profiles in one packet can only be the
+    // both-arm button, so it stays a single combined 12-DOF plan.
+    RB_CHECK(initMotionRequestIsCombined(true, true, 0, 0));
+    // A half-tagged packet is not something any shipped client emits; fall back to the
+    // pre-existing combined behavior rather than splitting on a guess.
+    RB_CHECK(initMotionRequestIsCombined(true, true, 0, 42));
+    RB_CHECK(initMotionRequestIsCombined(true, true, 42, 0));
+
+    // Tagged client: one arm_init start that selected both arms -> ONE id -> combined.
+    RB_CHECK(initMotionRequestIsCombined(true, true, 12345, 12345));
+    // Two separate presses -> two ids -> independent (this is the bug's fix).
+    RB_CHECK(!initMotionRequestIsCombined(true, true, 12345, 12346));
+
+    // The independent split is exactly what keeps the arm already in flight OUT of the
+    // freshness test: its request footprint stays (left only) instead of becoming (both).
+    {
+        InitMotionRequestView ex;
+        ex.request_seen = true;
+        ex.request_seq = 100;
+        ex.request_id_left = 12345;
+        ex.sequence_active = true;
+        ex.has_target = true;
+        ex.left_active = true;
+        ex.right_active = false;
+        ex.target_left = q_of(30.0);
+        ex.target_right = q_of(0.0);
+        const JointArray left_goal = q_of(30.0);
+        const JointArray right_goal = q_of(40.0);
+        const bool combined = initMotionRequestIsCombined(true, true, 12345, 12346);
+        RB_CHECK(!combined);
+        // request_right == combined == false -> unchanged footprint -> NOT a new press.
+        RB_CHECK(!initMotionRequestIsFresh(
+            ex, 101, true, combined, left_goal, right_goal, 0.5, 12345, 12346));
+        // What the old routing did (request_right = right_init = true) -> spurious relaunch.
+        RB_CHECK(initMotionRequestIsFresh(
+            ex, 101, true, true, left_goal, right_goal, 0.5, 12345, 12346));
+    }
+    return true;
+}
+
+// Narrowing a combined plan when a single-arm press takes one of its arms away. The
+// released column MUST become constant: pursueWaypointsStep pins an inactive arm at
+// waypoints.back()'s column, so a still-varying released column leaks distance into the
+// pursuit chord and into segFraction's projection, which drives the progress pointer of
+// the arm that is still being followed.
+bool test_release_arm_flattens_peer_column() {
+    std::vector<WP> w;
+    for (int i = 0; i <= 10; ++i) {
+        JointArray l{};
+        JointArray r{};
+        l[0] = static_cast<double>(i);        // left advances 0..10
+        r[0] = static_cast<double>(i) * 2.0;  // right advances 0..20
+        w.emplace_back(l, r);
+    }
+    const std::vector<WP> before = w;
+    const std::size_t index = 3;
+
+    flattenInitMotionWaypointColumn(w, index, /*flatten_left=*/false, /*flatten_right=*/true);
+
+    // The kept (left) column is untouched: the remaining arm's planned path is preserved.
+    RB_CHECK(w.size() == before.size());
+    for (std::size_t i = 0; i < w.size(); ++i) {
+        RB_CHECK(std::abs(w[i].first[0] - before[i].first[0]) < 1e-12);
+    }
+    // The released (right) column is pinned at its value at `index`, everywhere.
+    for (const WP& wp : w) {
+        RB_CHECK(std::abs(wp.second[0] - before[index].second[0]) < 1e-12);
+    }
+
+    // With a constant released column, the pursuit is identical to a single-arm plan:
+    // the peer contributes 0 to both the chord and the projection, so the progress
+    // pointer follows the LEFT arm alone. Feed the pinned peer pose the sequencer uses
+    // for an inactive arm (waypoints.back()'s column).
+    {
+        std::size_t idx = index;
+        JointArray cur_left{};
+        cur_left[0] = 5.2;
+        const PursuitStep step =
+            pursueWaypointsStep(w, cur_left, w.back().second, idx, 0.5, 2.0, 0);
+        RB_CHECK(idx == 5);                          // the LEFT arm's own progress: past node 5
+        RB_CHECK(step.left[0] > 5.2);                // carrot leads forward
+        RB_CHECK(step.left[0] <= 5.2 + 2.0 + 1e-9);  // ...within the lookahead
+    }
+
+    // Un-flattened, the same call is corrupted by the peer column: the released arm sits
+    // at the plan's FINAL right value while the plan still ramps that column, so the
+    // projection is dominated by a distance the driven arm never travels and the progress
+    // pointer runs away from where the left arm actually is (regression guard).
+    {
+        std::vector<WP> raw = before;
+        std::size_t idx = index;
+        JointArray cur_left{};
+        cur_left[0] = 5.2;
+        pursueWaypointsStep(raw, cur_left, raw.back().second, idx, 0.5, 2.0, 0);
+        RB_CHECK(idx > 5);
+    }
+
+    // Degenerate inputs are no-ops rather than crashes.
+    {
+        std::vector<WP> empty;
+        flattenInitMotionWaypointColumn(empty, 0, true, true);
+        RB_CHECK(empty.empty());
+        std::vector<WP> one = {before[0]};
+        flattenInitMotionWaypointColumn(one, 99, true, true);  // index past the end
+        RB_CHECK(one.size() == 1);
+    }
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_brake_plan() && ok;
@@ -612,6 +739,8 @@ int main() {
     ok = test_degenerate_segment_is_passed() && ok;
     ok = test_escape_head_followed_precisely() && ok;
     ok = test_request_freshness() && ok;
+    ok = test_request_combined_vs_independent() && ok;
+    ok = test_release_arm_flattens_peer_column() && ok;
     ok = test_auto_tare_after_init() && ok;
     if (!ok) {
         std::cerr << "test_init_motion_pursuit: FAILED\n";

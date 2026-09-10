@@ -444,9 +444,35 @@ _REFERENCE_GHOST_RGBA = (0.25, 0.6, 1.0, 0.35)
 # URDF override through add_mesh_simple(opacity=a) — the same transparent
 # pipeline as the reference ghost — so the colliding pair reads as a red
 # see-through highlight instead of a solid replacement.
-_SELF_COLLISION_RGBA = (0.85, 0.08, 0.08, 0.6)
-_SELF_COLLISION_STAND_RGB = (217, 20, 20)
-_SELF_COLLISION_STAND_OPACITY = 0.6
+# 2026-09-10: 0.6 -> 0.5 -> 0.6 (operator calls, tracking the d_slow yellow below).
+_SELF_COLLISION_RGBA = (0.85, 0.08, 0.08, 1.0)
+_SELF_COLLISION_STAND_RGB = (217, 20, 20)  # == _SELF_COLLISION_RGBA's RGB as uint8
+# Bound to the tuple above, not repeated: this is the opacity the stand's red duplicate
+# is BUILT with, while a live highlight writes _SELF_COLLISION_RGBA through
+# _set_mesh_rgba. Two literals would let the first frame differ from every later one.
+_SELF_COLLISION_STAND_OPACITY = _SELF_COLLISION_RGBA[3]
+# WARNING YELLOW for the d_slow band ("the guard is watching / braking this part"),
+# the same overlay one band out from the red one. Yellow, not the blue of the
+# close-call tubes: the reference ghost is already translucent blue
+# (_REFERENCE_GHOST_RGBA), so a blue part highlight reads as "ghost" on a scene that
+# has the ghost enabled. Shown with NO debug checkbox, exactly like the red overlay --
+# a part the barrier is about to brake is not a debugging detail.
+_SELF_COLLISION_SLOW_RGB = (235, 185, 30)
+# Alpha history, all operator calls: 0.45 (first cut) -> 1.0 fully opaque (2026-09-10,
+# "겉에만 보이게" — at 0.45 the part showed its own far side and its internal link seams
+# through the near surface) -> 0.5 -> 0.6, the same alpha as the red band above, so the
+# two highlights differ only in hue and neither hides the robot behind it.
+# _set_mesh_rgba still maps an alpha of 1.0 to viser's opacity=None (the opaque
+# material, since `transparent = props.opacity !== null` in
+# client/src/mesh/MeshUtils.tsx); that rule is dormant below 1.0 and is what makes
+# going back to opaque a one-number change.
+_SELF_COLLISION_SLOW_OPACITY = 0.9
+_SELF_COLLISION_SLOW_RGBA = (
+    _SELF_COLLISION_SLOW_RGB[0] / 255.0,
+    _SELF_COLLISION_SLOW_RGB[1] / 255.0,
+    _SELF_COLLISION_SLOW_RGB[2] / 255.0,
+    _SELF_COLLISION_SLOW_OPACITY,
+)
 # Neutral mid-dark gray for the stand. (The RB3-730E URDF "dark_gray" material
 # reads near-black with a green-cyan cast, since its rgba 0.07227/0.09084/0.09759
 # is neither neutral nor light; this flat (90, 90, 90) is true gray and lighter.)
@@ -560,7 +586,7 @@ _USER_FLOOR_EDGE_RED = (255, 120, 120)
 # fingertips). Offsets are expressed in the TCP body frame, so the point cloud is
 # parented under /stand/<arm>_tcp and inherits the live TCP pose for free (no
 # per-tick transform math in the GUI). Mirrors the 4-point set in the real stack
-# config (rb_servo_server/config/stack_real.yaml: x +/-0.057, y +/-0.012);
+# config (rb_servo_server/config/stack_real.yaml: x +/-0.049, y +/-0.012);
 # the leading (0,0,0) is the TCP point. The GUI is a pure network client and the
 # server does not publish these offsets, so they live here as a constant — keep
 # BOTH the open and closed sets in sync with floor_constraint.tcp_offset_points
@@ -569,23 +595,33 @@ _USER_FLOOR_EDGE_RED = (255, 120, 120)
 # The server interpolates each fingertip between its gripper-OPEN (offset_m) and
 # gripper-CLOSED (offset_closed_m) position by the live gripper open percent;
 # update_floor_check_points() mirrors that here so the orange dots track the jaws.
-# CLOSED set: x +/-0.010 = open x +/-0.057 - URDF finger travel 0.047 m (jaw axis
-# = TCP x); the TCP point and y/z stay put. Rendered as orange dots, hidden until
-# the operator enables the GUI toggle.
+# The TCP point and y/z stay put; only the jaw axis (TCP x) moves.
+#
+# 2026-09-10: +/-0.057 -> +/-0.049 open, +/-0.010 -> 0.000 closed, following the
+# same correction in stack_real.yaml (all three tcp_offset_points blocks). The old
+# pair descended from a 2026-06-25 tape measurement on the RB3-730E with the FACTORY
+# tips (tip-to-tip 118 mm), and its closed value was derived from the RB3 URDF's
+# 0.047 m travel, never measured. The printed PLA+TPU v15 tips now on the robot were
+# caliper-measured 2026-09-04: full-open gap 98.00 mm (= +/-0.049) closing to contact
+# (= 0). That measurement is what places the self-collision finger meshes, sets the
+# URDF joint limit and gripper_finger_travel_m (0.049) and _GRIPPER_FINGER_TRAVEL_M
+# below, so these points have to come from it too or the two halves of the safety
+# stack model the same tip 20 mm apart. See make_pika_tool_meshes.py's header.
+# Rendered as orange dots, hidden until the operator enables the GUI toggle.
 _FLOOR_CHECK_POINT_ORANGE = (255, 140, 0)
 _FLOOR_CHECK_POINTS_TCP_FRAME = (
     (0.0, 0.0, 0.0),        # tcp (the TCP point checked against the floor)
-    (0.057, 0.012, 0.0),    # gripper_tip_a_yp (OPEN)
-    (0.057, -0.012, 0.0),   # gripper_tip_a_yn (OPEN)
-    (-0.057, 0.012, 0.0),   # gripper_tip_b_yp (OPEN)
-    (-0.057, -0.012, 0.0),  # gripper_tip_b_yn (OPEN)
+    (0.049, 0.012, 0.0),    # gripper_tip_a_yp (OPEN)
+    (0.049, -0.012, 0.0),   # gripper_tip_a_yn (OPEN)
+    (-0.049, 0.012, 0.0),   # gripper_tip_b_yp (OPEN)
+    (-0.049, -0.012, 0.0),  # gripper_tip_b_yn (OPEN)
 )
 _FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED = (
     (0.0, 0.0, 0.0),        # tcp (unchanged)
-    (0.010, 0.012, 0.0),    # gripper_tip_a_yp (CLOSED)
-    (0.010, -0.012, 0.0),   # gripper_tip_a_yn (CLOSED)
-    (-0.010, 0.012, 0.0),   # gripper_tip_b_yp (CLOSED)
-    (-0.010, -0.012, 0.0),  # gripper_tip_b_yn (CLOSED)
+    (0.0, 0.012, 0.0),      # gripper_tip_a_yp (CLOSED — the tips meet at the jaw axis)
+    (0.0, -0.012, 0.0),     # gripper_tip_a_yn (CLOSED)
+    (0.0, 0.012, 0.0),      # gripper_tip_b_yp (CLOSED)
+    (0.0, -0.012, 0.0),     # gripper_tip_b_yn (CLOSED)
 )
 
 
@@ -1624,6 +1660,88 @@ def _self_collision_geom_group(
     return f"{side}_gripper" if _GRIPPER_GEOM_MARKER in name else f"{side}_arm"
 
 
+def _near_pair_groups(
+    pair: Mapping[str, Any], left_prefix: str, right_prefix: str
+) -> set[str]:
+    """The body groups one near pair names (0, 1 or 2 of _SELF_COLLISION_GROUPS)."""
+    return {
+        group
+        for group in (
+            _self_collision_geom_group(pair.get("name_a"), left_prefix, right_prefix),
+            _self_collision_geom_group(pair.get("name_b"), left_prefix, right_prefix),
+        )
+        if group is not None
+    }
+
+
+def _is_plane_or_box_geom(name: Any) -> bool:
+    """True for the barrier's *plane / *box geometry: the injected whole-arm floor
+    (`ground_plane`) and the runtime keep-out boxes (`external_box_0/1`).
+
+    Excluded from the yellow d_slow highlight by operator request (2026-09-09). Two
+    reasons it is the right cut: neither is SELF-collision (the monitor gives each its
+    own barrier class with a much smaller floor -- 3.5 mm for the plane), and neither is
+    drawn as a body part, so _self_collision_geom_group files both under "stand" -- a
+    yellow stand every time an arm descends toward the floor, which is every pick and
+    every place. The category FLAGS are the primary test; the name test is the fallback
+    for a server that does not publish them."""
+    if not isinstance(name, str):
+        return False
+    lowered = name.lower()
+    return lowered.endswith("plane") or lowered.endswith("box") or lowered.startswith("external_box")
+
+
+def _self_collision_slow_pair(pair: Mapping[str, Any]) -> bool:
+    """True for a near pair the guard is watching: inside ITS OWN d_slow band, and not
+    one of the excluded *plane / *box classes.
+
+    NO closing filter, unlike the close-call tubes (_near_pair_band, which paints blue
+    only while rate_m_s < 0). The tubes answer "which pair is the barrier braking right
+    now"; this overlay answers the operator's debugging question "which parts is the
+    guard checking against each other", so a pair parked inside the band is exactly
+    what must show. That is also why it costs nothing to be wrong about the rate: a
+    stale/absent rate_m_s cannot hide a part here."""
+    if pair.get("external") or pair.get("external_box"):
+        return False
+    if _is_plane_or_box_geom(pair.get("name_a")) or _is_plane_or_box_geom(pair.get("name_b")):
+        return False
+    clearance = pair.get("clearance_m")
+    d_slow = pair.get("d_slow_m")
+    if not _is_finite(clearance) or not _is_finite(d_slow):
+        return False
+    return float(clearance) < float(d_slow)
+
+
+def _self_collision_slow_groups(sc: Mapping[str, Any] | None) -> set[str]:
+    """Which of _SELF_COLLISION_GROUPS the yellow d_slow overlay must light up.
+
+    Every near pair inside its own published d_slow band names its two body groups;
+    *plane / *box pairs are dropped (see _is_plane_or_box_geom). Each pair is banded
+    against ITS OWN d_slow_m for the same reason the red overlay uses its own d_hard_m:
+    the five classes' bands differ by an order of magnitude (RB5 2026-09-09: self 75 mm,
+    gripper<->gripper 62 mm, environment 62 mm, intra-arm 15 mm), so a single threshold
+    both over- and under-reports. A pair with no published band is skipped rather than
+    guessed at -- the red overlay owns the conservative fallbacks, and this layer must
+    not paint the whole robot yellow against an older server.
+
+    Unlike the red set there is NO all-groups fallback on truncation: near_pairs sheds
+    slow pairs before hard ones under datagram pressure (state_publisher.cpp), and
+    "everything yellow" would destroy exactly the debugging signal this is for."""
+    if not isinstance(sc, Mapping):
+        return set()
+    manifest = sc.get("manifest") if isinstance(sc.get("manifest"), Mapping) else {}
+    left_prefix = str(manifest.get("left_prefix") or "")
+    right_prefix = str(manifest.get("right_prefix") or "")
+    pairs = sc.get("near_pairs")
+    if not isinstance(pairs, (list, tuple)):
+        return set()
+    groups: set[str] = set()
+    for pair in pairs:
+        if isinstance(pair, Mapping) and _self_collision_slow_pair(pair):
+            groups |= _near_pair_groups(pair, left_prefix, right_prefix)
+    return groups
+
+
 def _self_collision_red_groups(
     sc: Mapping[str, Any] | None, violated: bool, box_collision: bool
 ) -> set[str]:
@@ -1664,14 +1782,7 @@ def _self_collision_red_groups(
     pairs = [p for p in pairs if isinstance(p, Mapping)]
 
     def _groups_of(pair: Mapping[str, Any]) -> set[str]:
-        return {
-            group
-            for group in (
-                _self_collision_geom_group(pair.get("name_a"), left_prefix, right_prefix),
-                _self_collision_geom_group(pair.get("name_b"), left_prefix, right_prefix),
-            )
-            if group is not None
-        }
+        return _near_pair_groups(pair, left_prefix, right_prefix)
 
     groups: set[str] = set()
     graded = False
@@ -1751,22 +1862,108 @@ def _set_urdf_parts_visible(
     return True
 
 
+def _rgb_opacity(rgba: tuple[float, float, float, float]) -> tuple[tuple[int, int, int], float]:
+    """RGBA floats (the ViserUrdf color-override form) -> the (uint8 RGB, opacity) pair
+    add_mesh_simple stores as separate props. One conversion so the overlay's live
+    recolor and the color it was BUILT with cannot drift apart."""
+    return (
+        (int(round(rgba[0] * 255)), int(round(rgba[1] * 255)), int(round(rgba[2] * 255))),
+        float(rgba[3]),
+    )
+
+
+def _set_mesh_rgba(handle: Any, rgba: tuple[float, float, float, float]) -> None:
+    """Recolor one add_mesh_simple node in place (viser props are assignable).
+
+    Alpha 1.0 is written as opacity=None, NOT as 1.0: viser turns any non-null opacity
+    into a transparent three.js material (`transparent = props.opacity !== null`), and a
+    fully-opaque transparent material still renders in the transparent pass, sorted by
+    draw order instead of depth. None is the opaque material. The client rebuilds the
+    material when that flag flips, so this is safe to change on a live node."""
+    rgb, opacity = _rgb_opacity(rgba)
+    try:
+        handle.color = rgb
+        handle.opacity = None if opacity >= 1.0 else opacity
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+
+def _set_urdf_parts_highlight(
+    scene_handles: dict[str, Any], cache_key: str, urdf_handle: Any,
+    *, arm_rgba: tuple[float, float, float, float] | None,
+    gripper_rgba: tuple[float, float, float, float] | None,
+) -> bool:
+    """Show the self-collision overlay's link meshes per body group, in each group's
+    own color (None = that group is not highlighted, so its meshes are hidden).
+
+    Recoloring in place instead of adding a second, yellow, ViserUrdf per arm: the
+    scene already carries three arm URDFs per side (solid, reference ghost, collision
+    overlay) and the two highlight bands are mutually exclusive per group, so a fourth
+    would double the arm mesh nodes to draw a state that fits in a prop assignment.
+
+    The color is written only when it CHANGES. update_gui runs at 10 Hz and every
+    assignment queues a websocket message per mesh node, so an unconditional write
+    would push ~200 messages/s of "the color is still yellow". Visibility is written
+    every tick, as before -- that path is shared with the un-highlighted case.
+
+    False when the URDF could not be split into arm/gripper mesh nodes; the caller then
+    falls back to whole-arm visibility, and to the RED-ONLY behavior, because without
+    the mesh handles the overlay cannot be recolored and would paint a d_slow warning
+    in hard-violation red."""
+    groups = _urdf_part_meshes(scene_handles, cache_key, urdf_handle)
+    if groups is None:
+        return False
+    # Colors live in the entry _urdf_part_meshes owns, so the box-DH URDF swap
+    # (which rebuilds that entry) drops the stale colors with the stale handles.
+    entry = scene_handles.get(cache_key)
+    painted = entry.setdefault("rgba", {}) if isinstance(entry, dict) else {}
+    for group, rgba in (("arm", arm_rgba), ("gripper", gripper_rgba)):
+        handles = groups[group]
+        for handle in handles:
+            _set_visible(handle, rgba is not None)
+        if rgba is not None and painted.get(group) != rgba:
+            for handle in handles:
+                _set_mesh_rgba(handle, rgba)
+            painted[group] = rgba
+    return True
+
+
+def _highlight_rgba(
+    group: str, red: set[str], slow: set[str]
+) -> tuple[float, float, float, float] | None:
+    """The overlay color for one body group: hard-violation red wins over d_slow
+    yellow (a group named by both is in the worse state), None when neither."""
+    if group in red:
+        return _SELF_COLLISION_RGBA
+    if group in slow:
+        return _SELF_COLLISION_SLOW_RGBA
+    return None
+
+
 def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:
-    """Paint the colliding PARTS translucent red while self_collision.violated.
+    """Paint the PARTS the self-collision guard is acting on: translucent RED while
+    self_collision.violated (a pair below its own d_hard), warning YELLOW one band out
+    (a pair inside its own d_slow, _self_collision_slow_groups). Red wins per group.
 
     Driven by the server's self_collision telemetry, so monitor_only runs show the
-    overlay too. Only the body groups the violating pair names turn red, out of the
-    five the collision model has: left arm, right arm, left gripper, right gripper,
-    stand (see _self_collision_red_groups / _SELF_COLLISION_GROUPS). So two grippers
-    touching lights the two grippers, not two whole arms, and an arm folding onto the
-    stand leaves that arm's gripper normal. Where the URDF cannot be split into arm
-    and gripper meshes the group pair collapses back to the whole arm, which is the
-    behavior this refines.
+    overlay too. Only the body groups the pair names light up, out of the five the
+    collision model has: left arm, right arm, left gripper, right gripper, stand
+    (see _self_collision_red_groups / _SELF_COLLISION_GROUPS). So two grippers touching
+    lights the two grippers, not two whole arms, and an arm folding onto the stand
+    leaves that arm's gripper normal. Where the URDF cannot be split into arm and
+    gripper meshes the group pair collapses back to the whole arm — and, since the
+    overlay then cannot be recolored, to red only, so a d_slow warning is never drawn
+    in hard-violation red.
 
-    pgmode real (physical_motion_expected=True): the ACTUAL robot (q_actual) turns
-    red. pgmode simulation: the commanded ghost (q_sent) turns red while the solid
-    robot keeps showing the true (stationary) state. External-box collision telemetry
-    is per-box only in this first pass, so any box collision turns both arms red."""
+    NEITHER band needs the "자기충돌 검사 표시" debug checkbox: which parts the guard
+    is braking (or about to brake) is what an operator watching the robot slow down
+    needs to see. The checkbox stays what it was — the full checked-hull view.
+
+    pgmode real (physical_motion_expected=True): the ACTUAL robot (q_actual) is
+    replaced by the highlight. pgmode simulation: the commanded ghost (q_sent) is
+    replaced while the solid robot keeps showing the true (stationary) state.
+    External-box collision telemetry is per-box only in this first pass, so any box
+    collision turns both arms red (the yellow band excludes *plane / *box entirely)."""
     if not isinstance(scene_handles, dict):
         return
     sc = getattr(latest, "self_collision", None) if latest is not None else None
@@ -1774,7 +1971,9 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
     box_collision = _external_box_collision(sc)
     _update_self_collision_witness_markers(scene_handles, sc, violated)
     red = _self_collision_red_groups(sc, violated, box_collision)
-    stand_red = "stand" in red
+    # Red wins per group: a part named by both a breaching and a merely-close pair is
+    # in the worse state, and the two bands must never be drawn on the same meshes.
+    slow = _self_collision_slow_groups(sc) - red
     physical_real = latest is not None and (
         getattr(latest.left, "physical_motion_expected", None) is True
         or getattr(latest.right, "physical_motion_expected", None) is True
@@ -1785,41 +1984,60 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
         arm_red = f"{side}_arm" in red
         gripper_red = f"{side}_gripper" in red
         any_red = arm_red or gripper_red
+        arm_rgba = _highlight_rgba(f"{side}_arm", red, slow)
+        gripper_rgba = _highlight_rgba(f"{side}_gripper", red, slow)
+        arm_lit = arm_rgba is not None
+        gripper_lit = gripper_rgba is not None
+        any_lit = arm_lit or gripper_lit
         overlay = scene_handles.get(f"{side}_urdf_collision")
-        if any_red and overlay is not None and arm_state is not None:
+        if any_lit and overlay is not None and arm_state is not None:
             q = arm_state.q_actual_deg if physical_real else (
                 arm_state.q_sent_deg if arm_state.q_sent_deg is not None else arm_state.q_actual_deg
             )
             try:
-                _update_urdf_config(overlay, _joint_cfg_radians(q))
+                # The JAW too, not just the arm joints (2026-09-10). Without it
+                # _finger_position_m(None) parks the overlay's prismatic fingers at 0 =
+                # FULL OPEN forever, so a gripper<->gripper highlight drew jaws 98 mm
+                # apart while the real ones were closed on a bolt -- the highlight named
+                # the right part in the wrong shape. Same source as the solid robot and
+                # the checked-hull overlay (published gripper feedback, else the GUI
+                # slider), so all three now agree on where the fingers are.
+                _update_urdf_config(overlay, _joint_cfg_radians(q),
+                                    gripper_percent=scene_handles.get(f"gripper_percent_{side}"))
             except Exception as exc:
                 scene_handles["urdf_collision_update_error"] = f"{type(exc).__name__}: {exc}"
-        # Red overlay: only the red groups' meshes, under a frame shown when either is.
-        _set_urdf_parts_visible(
+        # Overlay: only the lit groups' meshes, each in its band's colour, under a
+        # frame shown when either is. Without the per-group mesh handles the overlay
+        # cannot be recoloured, so it degrades to the red-only behaviour rather than
+        # painting a d_slow warning in hard-violation red.
+        if _set_urdf_parts_highlight(
             scene_handles, f"_{side}_collision_mesh_groups", overlay,
-            arm_visible=arm_red, gripper_visible=gripper_red,
-        )
-        _set_visible(scene_handles.get(f"{side}_base_collision"), any_red)
-        # Replace (not overlap) the model the red overlay represents to avoid
-        # z-fighting at the identical configuration — per GROUP, only the red ones.
+            arm_rgba=arm_rgba, gripper_rgba=gripper_rgba,
+        ):
+            _set_visible(scene_handles.get(f"{side}_base_collision"), any_lit)
+        else:
+            arm_lit, gripper_lit, any_lit = arm_red, gripper_red, any_red
+            _set_visible(scene_handles.get(f"{side}_base_collision"), any_red)
+        # Replace (not overlap) the model the overlay represents to avoid
+        # z-fighting at the identical configuration — per GROUP, only the lit ones.
         # In pgmode simulation the overlay replaces the commanded ghost instead, so
         # the solid robot (q_actual) stays fully visible.
         if not _set_urdf_parts_visible(
             scene_handles, f"_{side}_solid_mesh_groups", scene_handles.get(f"{side}_urdf"),
-            arm_visible=not (arm_red and physical_real),
-            gripper_visible=not (gripper_red and physical_real),
+            arm_visible=not (arm_lit and physical_real),
+            gripper_visible=not (gripper_lit and physical_real),
         ):
-            _set_visible(scene_handles.get(f"{side}_base"), not (any_red and physical_real))
+            _set_visible(scene_handles.get(f"{side}_base"), not (any_lit and physical_real))
         else:
             _set_visible(scene_handles.get(f"{side}_base"), True)
-        if any_red and not physical_real:
+        if any_lit and not physical_real:
             # The ghost is what the overlay replaces here. update_scene_markers owns
             # the ghost FRAME (it re-shows it every tick from _reference_ghost_active),
             # so hide the replaced meshes and leave the frame to it; only fall back to
             # hiding the whole ghost when the split is unavailable.
             if not _set_urdf_parts_visible(
                 scene_handles, f"_{side}_ref_mesh_groups", scene_handles.get(f"{side}_urdf_ref"),
-                arm_visible=not arm_red, gripper_visible=not gripper_red,
+                arm_visible=not arm_lit, gripper_visible=not gripper_lit,
             ):
                 _set_visible(scene_handles.get(f"{side}_base_ref"), False)
         else:
@@ -1828,28 +2046,38 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
                 arm_visible=True, gripper_visible=True,
             )
 
-    _set_visible(scene_handles.get("stand_mesh_collision"), stand_red)
-    _set_visible(scene_handles.get("stand_mesh"), not stand_red)
-    _set_environment_red(scene_handles, "environment" in red)
+    stand_rgba = _highlight_rgba("stand", red, slow)
+    stand_handle = scene_handles.get("stand_mesh_collision")
+    if stand_rgba is not None and scene_handles.get("_stand_collision_rgba") != stand_rgba:
+        _set_mesh_rgba(stand_handle, stand_rgba)
+        scene_handles["_stand_collision_rgba"] = stand_rgba
+    _set_visible(stand_handle, stand_rgba is not None)
+    _set_visible(scene_handles.get("stand_mesh"), stand_rgba is None)
+    _set_environment_highlight(scene_handles, _highlight_rgba("environment", red, slow))
 
 
-def _set_environment_red(scene_handles: dict[str, Any], red: bool) -> None:
-    """Recolour the env_* cell-structure boxes for the self-collision highlight.
+def _set_environment_highlight(
+    scene_handles: dict[str, Any], rgba: tuple[float, float, float, float] | None
+) -> None:
+    """Recolour the env_* cell-structure boxes (the riser) for the self-collision
+    highlight: hard-violation red, d_slow yellow, or back to the URDF colour.
 
     These are add_box handles, not URDF meshes, so there is no translucent duplicate to
     swap in the way the arms and the stand have — the box IS the drawing, and the
-    highlight is its colour. The nominal colour comes back from environment_rgb, so a
-    cleared violation restores exactly what the URDF asked for."""
+    highlight is its colour (opacity is not a box prop, so only the RGB is taken). The
+    nominal colour comes back from environment_rgb, so a cleared highlight restores
+    exactly what the URDF asked for."""
     names = scene_handles.get("environment_names")
     if not isinstance(names, (list, tuple)):
         return
     nominal = scene_handles.get("environment_rgb")
     nominal = nominal if isinstance(nominal, Mapping) else {}
+    highlight = _rgb_opacity(rgba)[0] if rgba is not None else None
     for key in names:
         handle = scene_handles.get(f"environment_{key}")
         if handle is None:
             continue
-        colour = _SELF_COLLISION_STAND_RGB if red else nominal.get(key)
+        colour = highlight if highlight is not None else nominal.get(key)
         if colour is None:
             continue
         try:
@@ -3561,7 +3789,14 @@ def update_scene_markers(
         show_ghost = _reference_ghost_active(arm_state)
         if show_ghost:
             try:
-                _update_urdf_config(ghost, _joint_cfg_radians(arm_state.q_sent_deg))
+                # Jaw included for the same reason as the collision overlay above: the
+                # overlay REPLACES this ghost per body group, so a ghost stuck at full
+                # open put an open jaw next to the overlay's closed one on the same arm.
+                # There is no commanded-percent channel in the state, so this is the
+                # measured jaw -- the same one every other drawn gripper uses.
+                _update_urdf_config(ghost, _joint_cfg_radians(arm_state.q_sent_deg),
+                                    gripper_percent=scene_handles.get(
+                                        f"gripper_percent_{'left' if key.startswith('left') else 'right'}"))
             except Exception as exc:
                 scene_handles["urdf_ref_update_error"] = f"{type(exc).__name__}: {exc}"
         _set_visible(scene_handles.get(base_key), show_ghost)

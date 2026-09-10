@@ -473,11 +473,16 @@ def _rtc_record(rtc: Any) -> dict[str, Any] | None:
             None if configured is None or realized is None else realized - configured
         ),
     }
-    for key in ("execute_horizon", "schedule", "alignment_outcome"):
+    for key in (
+        "execute_horizon", "schedule", "alignment_outcome",
+        # adaptive-delay accounting (2026-09-09): what the client sent for THIS chunk
+        "delay_policy", "sent_shift", "frozen_rows_executed", "prev_conditioned",
+        "freeze_guard_waits",
+    ):
         value = rtc.get(key)
         if value is None:
             continue
-        out[key] = value if isinstance(value, str) else _finite_int(value)
+        out[key] = value if isinstance(value, (str, bool)) else _finite_int(value)
     return out
 
 

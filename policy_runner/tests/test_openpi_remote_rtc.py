@@ -201,5 +201,142 @@ class OpenpiRemoteRtcTest(unittest.TestCase):
         self.assertIsNone(src._sample_chunk({}))
 
 
+@unittest.skipIf(OpenpiRemoteActionSource is None, "torch is not installed")
+class OpenpiRemoteRtcReadyEventTest(unittest.TestCase):
+    """ready_event + RTC (2026-09-09): adaptive freeze depth, measured shift, and the
+    previous chunk being the last ACTIVATED result rather than the last inference."""
+
+    def _adaptive_source(self, samples_ms, *, margin=0, d_max=8, horizon=24, execute=4):
+        import threading
+        from collections import deque
+
+        src, raw = _make_source(rtc_enabled=True, horizon=horizon, chunk_execute_steps=execute)
+        src.rtc_delay_policy = "adaptive"
+        src.rtc_delay_margin_steps = margin
+        src.rtc_delay_max_steps = d_max
+        src.rtc_inference_delay = 3
+        src.policy_dt_sec = 0.0334
+        src._inference_timing_lock = threading.Lock()
+        src._inference_timing_history = {"request_to_activation_ms": deque(samples_ms, maxlen=64)}
+        src._stream_emitted_policy_steps = 0
+        return src, raw
+
+    @staticmethod
+    def _activate(src, seq, obs, ssi=3):
+        src.on_rtc_chunk_activated({"inference_seq": seq, "observation_step_seq": obs, "source_start_index": ssi})
+
+    def test_worker_context_stashes_raw_until_activation(self) -> None:
+        src, raw = self._adaptive_source([70, 80, 95, 100, 110])
+        src.note_rtc_request_context(10, 1)
+        src._sample_chunk({})
+        src.clear_rtc_request_context()
+        # not yet the previous chunk: the result has not been activated
+        self.assertIsNone(src._rtc_prev_raw_chunk)
+        self.assertIn(1, src._rtc_pending_raw)
+        self.assertTrue(src._rtc_last_sent["cold_start"])
+        self._activate(src, 1, 10)
+        self.assertTrue(np.allclose(src._rtc_prev_raw_chunk, raw))
+        self.assertEqual(src._rtc_prev_obs_step_seq, 10)
+        self.assertEqual(src._rtc_pending_raw, {})
+        self.assertEqual(list(src._rtc_realized_delay_history), [3])
+
+    def test_discarded_result_never_seeds_the_freeze(self) -> None:
+        src, raw = self._adaptive_source([70, 80, 95, 100, 110])
+        src.note_rtc_request_context(10, 1)
+        src._sample_chunk({})
+        src.clear_rtc_request_context()
+        src.on_rtc_chunk_discarded({"inference_seq": 1})
+        self.assertIsNone(src._rtc_prev_raw_chunk)
+        self.assertEqual(src._rtc_pending_raw, {})
+        # the next request therefore stays vanilla (no prev to continue)
+        src.note_rtc_request_context(13, 2)
+        src._sample_chunk({})
+        src.clear_rtc_request_context()
+        self.assertNotIn("prev_action_chunk", src._client.sent_obs[-1])
+
+    def test_adaptive_delay_and_measured_shift_ride_in_the_request(self) -> None:
+        src, raw = self._adaptive_source([70, 80, 95, 100, 110])
+        # realized-delay history 3,3,3,4 -> p10 = 3 -> d = 3 (never above the typical ssi)
+        for seq, ssi in ((11, 3), (12, 3), (13, 3), (14, 4)):
+            src._note_rtc_realized_delay(ssi)
+        src.note_rtc_request_context(10, 1)
+        src._sample_chunk({})
+        src.clear_rtc_request_context()
+        self._activate(src, 1, 10)
+        src.note_rtc_request_context(13, 2)  # observed 3 steps after the executing chunk's observation
+        src._sample_chunk({})
+        src.clear_rtc_request_context()
+        obs = src._client.sent_obs[-1]
+        self.assertEqual(obs["inference_delay"], 3)
+        self.assertEqual(obs["execute_horizon"], 3)  # = measured shift, NOT chunk_execute_steps (4)
+        self.assertTrue(np.allclose(obs["prev_action_chunk"], rtc_shift_prev_chunk(raw, 3)))
+        sent = src._rtc_last_sent
+        self.assertEqual((sent["policy"], sent["shift"], sent["delay"], sent["execute_horizon"]), ("adaptive", 3, 3, 3))
+        self.assertTrue(sent["prev_conditioned"])
+        self.assertEqual(sent["prev_observation_step_seq"], 10)
+
+    def test_adaptive_delay_uses_low_quantile_of_realized_ssi(self) -> None:
+        # over-freeze (d > ssi) executes the frozen->guided seam, so the estimate is p10 of
+        # the realized ssi, not a high quantile of latency: 3,3,3,3,4,4 -> 3
+        src, _ = self._adaptive_source([70, 80, 95, 100, 110])
+        for ssi in (3, 3, 3, 3, 4, 4):
+            src._note_rtc_realized_delay(ssi)
+        self.assertEqual(src._adaptive_rtc_delay(), 3)
+        src.rtc_delay_margin_steps = 1
+        self.assertEqual(src._adaptive_rtc_delay(), 4)
+        src.rtc_delay_margin_steps = -1
+        self.assertEqual(src._adaptive_rtc_delay(), 2)
+        src.rtc_delay_max_steps = 2
+        src.rtc_delay_margin_steps = 3
+        self.assertEqual(src._adaptive_rtc_delay(), 2)
+
+    def test_adaptive_delay_time_fallback_floors_the_median(self) -> None:
+        # no realized history yet: floor(p50(request->activation)/policy_dt): 95 ms -> 2
+        src, _ = self._adaptive_source([70, 80, 95, 100, 110])
+        self.assertEqual(src._adaptive_rtc_delay(), 2)
+        src.rtc_delay_margin_steps = 1
+        self.assertEqual(src._adaptive_rtc_delay(), 3)
+
+    def test_adaptive_delay_falls_back_to_static_seed_until_history_exists(self) -> None:
+        src, _ = self._adaptive_source([70, 80], margin=1)  # < 4 timing samples, no realized ssi
+        self.assertEqual(src._adaptive_rtc_delay(), 3 + 1)
+
+    def test_static_policy_keeps_fixed_steps_contract_with_hooks(self) -> None:
+        src, raw = _make_source(rtc_enabled=True, horizon=24, chunk_execute_steps=4)
+        src.rtc_delay_policy = "static"
+        src.rtc_inference_delay = 3
+        src.note_rtc_request_context(0, 1)
+        src._sample_chunk({})
+        src.clear_rtc_request_context()
+        src.on_rtc_chunk_activated({"inference_seq": 1, "observation_step_seq": 0, "source_start_index": 3})
+        src.note_rtc_request_context(4, 2)
+        src._sample_chunk({})
+        src.clear_rtc_request_context()
+        obs = src._client.sent_obs[-1]
+        self.assertEqual(obs["inference_delay"], 3)
+        self.assertEqual(obs["execute_horizon"], 4)  # replan period, unchanged
+        self.assertTrue(np.allclose(obs["prev_action_chunk"], rtc_shift_prev_chunk(raw, 4)))
+        self.assertEqual(src._rtc_last_sent["policy"], "static")
+
+    def test_reset_rtc_clears_pending_and_bookkeeping(self) -> None:
+        src, _ = self._adaptive_source([70, 80, 95, 100, 110])
+        src.note_rtc_request_context(10, 1)
+        src._sample_chunk({})
+        src.clear_rtc_request_context()
+        src._vel_prev_pose_by_arm = {"left": None, "right": None}
+        src._vel_prev_sample_t = None
+        src._velproprio_history_lock = __import__("threading").Lock()
+        src._velproprio_history = {"left": [], "right": []}
+        try:
+            src.reset_rtc()
+        except AttributeError:
+            # reset_rtc also touches velocity-proprio buffers the bare source lacks; the RTC
+            # part runs first and is what this test locks.
+            pass
+        self.assertEqual(src._rtc_pending_raw, {})
+        self.assertIsNone(src._rtc_prev_raw_chunk)
+        self.assertIsNone(src._rtc_last_sent)
+
+
 if __name__ == "__main__":
     unittest.main()

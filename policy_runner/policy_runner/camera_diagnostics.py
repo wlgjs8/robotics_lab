@@ -41,6 +41,36 @@ def rgb_image_metrics(image: np.ndarray) -> dict[str, float | int]:
     }
 
 
+def run_directory(configured: str, *, now: datetime | None = None) -> Path:
+    """Per-run output directory for one inference process.
+
+    Every run gets its own directory, whatever the operator asked for: `auto`
+    names it under `logs/`, and an explicit path is treated as the PARENT with
+    the run landing in a `run_<timestamp>` child.  Two runs must never share a
+    directory, because snapshot filenames carry only `bundle_seq` — and
+    `bundle_seq` restarts from zero whenever camera_server restarts, so a shared
+    directory silently overwrites the earlier run's frames (measured 2026-09-09:
+    two consecutive rollouts interleaved 1014 pairs into one fixed directory
+    with no run boundary in the names).
+    """
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    if configured.lower() == "auto":
+        return Path("logs") / f"flow_obs_{stamp}"
+    return Path(configured).expanduser() / f"run_{stamp}"
+
+
+def _create_run_directory(base: Path, attempts: int = 100) -> Path:
+    """Create `base`, disambiguating runs that start within the same second."""
+    for attempt in range(1, attempts + 1):
+        candidate = base if attempt == 1 else base.with_name(f"{base.name}_{attempt}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise OSError(f"no unique run directory available under {base.parent}")
+
+
 class BackgroundRgbSnapshotWriter:
     """Opt-in, bounded, best-effort JPEG writer that never waits in inference."""
 
@@ -48,11 +78,7 @@ class BackgroundRgbSnapshotWriter:
         configured = str(mode if mode is not None else os.environ.get(DIAGNOSTIC_IMAGES_ENV, "off")).strip()
         self.directory: Path | None = None
         if configured.lower() not in {"", "off"}:
-            self.directory = (
-                Path("logs") / f"flow_obs_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                if configured.lower() == "auto"
-                else Path(configured).expanduser()
-            )
+            self.directory = run_directory(configured)
         raw_max: object = max_bundles
         if raw_max is None:
             raw_max = os.environ.get(
@@ -74,7 +100,7 @@ class BackgroundRgbSnapshotWriter:
         self._thread: threading.Thread | None = None
         if self.directory is not None and self.max_bundles > 0:
             try:
-                self.directory.mkdir(parents=True, exist_ok=True)
+                self.directory = _create_run_directory(self.directory)
                 self._thread = threading.Thread(target=self._run, name="flow-rgb-snapshots", daemon=True)
                 self._thread.start()
             except OSError:

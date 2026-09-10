@@ -217,6 +217,7 @@ struct PreviewExecutionWorker::Impl {
     PreviewExecutionResult out;
     out.identity = r.identity;
     out.gauge = r.gauge;
+    out.dispatch_offset_m = r.dispatch_offset_m;
     out.generated_at_sec = r.generated_at_sec;
     out.splice_at_sec = r.splice_at_sec;
     out.valid_until_sec = r.valid_until_sec;
@@ -254,6 +255,11 @@ struct PreviewExecutionWorker::Impl {
       return finish(PreviewExecutionWorkerStatus::InvalidRequest);
     const bool contact_active=r.contact_gate<1.0 && !r.contact_normal_stand.isZero(0.0);
     if(contact_active && std::abs(r.contact_normal_stand.norm()-1.0)>tracker.config().feasibility_tolerance)
+      return finish(PreviewExecutionWorkerStatus::InvalidRequest);
+    // A dispatched-state offset/clamp describes a held-back ACTIVE plan only.
+    if(!r.dispatch_offset_m.allFinite() ||
+       ((r.contact_clamped_dispatch || !r.dispatch_offset_m.isZero(0.0)) && (r.cold_start || r.has_brake_predecessor)) ||
+       (r.contact_clamped_dispatch && !contact_active))
       return finish(PreviewExecutionWorkerStatus::InvalidRequest);
     if (r.cold_start) {
       if (r.predecessor.valid || r.has_brake_predecessor ||
@@ -346,6 +352,25 @@ struct PreviewExecutionWorker::Impl {
         contact.knots[contact.count++]={relative,std::max(0.0,velocity)};
         previous_time=relative;previous_velocity=velocity;
         if(relative==tracker.durationSec())break;
+      }
+    }
+    // Splice from the DISPATCHED state: the predecessor sample shifted by the
+    // held-back displacement, its closing velocity cut to the knot-0 authority
+    // (and a closing acceleration removed) exactly as the executor clamps its
+    // output tick after tick. The old design refused such a splice (Infeasible)
+    // and the executor had to brake and resume; now the constrained replan is
+    // continuous with what the arm is actually being sent.
+    if(!r.dispatch_offset_m.isZero(0.0)) {
+      auto T=math::se3FromPose(out.initial.pose);T.translation()+=r.dispatch_offset_m;
+      out.initial.pose=math::poseFromSe3(T);
+    }
+    if(r.contact_clamped_dispatch) {
+      const Eigen::Vector3d& normal=r.contact_normal_stand;
+      const double excess=normal.dot(out.initial.linear_velocity)-contact.knots[0].upper_velocity_m_s;
+      if(excess>0) {
+        out.initial.linear_velocity-=excess*normal;
+        const double closing_acceleration=normal.dot(out.initial.linear_acceleration);
+        if(closing_acceleration>0)out.initial.linear_acceleration-=closing_acceleration*normal;
       }
     }
     // Solver state is strictly worker-owned. Never publish its previous result

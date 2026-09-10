@@ -782,6 +782,7 @@ bool testPreviewTelemetryAndCapabilitySurviveWitnessBudget() {
     p.accepted_position_error_m = .00015; p.accepted_rotation_error_rad = .00025;
     p.solve_time_sec = .0004; p.submitted = 23; p.accepted = 19;
     p.rejected = 3; p.expired = 2; p.contact_guard_count = 5;
+    p.contact_clamp_count = 6; p.contact_clamp_active = true; p.contact_clamp_shift_m = .00025;
     populateDetailedPreviewFixture(p);
     // Populate both arms to test the actual worst-side diagnostic wire growth.
     snapshot.right_cartesian_solve.preview_execution = p;
@@ -796,7 +797,8 @@ bool testPreviewTelemetryAndCapabilitySurviveWitnessBudget() {
         {"backlog_sec",.012},{"rate",1.03},{"plan_age_sec",.024},
         {"accepted_position_error_m",.00015},{"accepted_rotation_error_rad",.00025},
         {"solve_time_sec",.0004},{"submitted",23},{"accepted",19},{"rejected",3},
-        {"expired",2},{"contact_guard_count",5}};
+        {"expired",2},{"contact_guard_count",5},{"contact_clamp_count",6},{"contact_clamp_active",true},
+        {"contact_clamp_shift_m",.00025}};
     // Check the complete original telemetry contract while allowing explicitly
     // additive fields. Large integer source IDs must not pass through double.
     for (auto it = expected.begin(); it != expected.end(); ++it) RB_CHECK(left.at(it.key()) == it.value());

@@ -1,4 +1,5 @@
 #include "rb_servo/control/preview_trajectory_tracker.hpp"
+#include "rb_servo/core/realtime.hpp"
 #include "rb_servo/math/se3.hpp"
 #include <algorithm>
 #include <atomic>
@@ -386,10 +387,66 @@ int benchmark() {
       << ",\"cpp_new_calls_during_plan\":" << new_calls << "}\n";
   return solved>0?0:1;
 }
+struct CoupledStats {
+  int coupled=0,accepted=0,rejected=0;
+  std::vector<double> ms,qp;std::vector<int> cuts,nwsr,rounds;
+};
+CoupledStats runCoupled(bool ramp) {
+  // Real stack_real.yaml tracker numbers. ramp=false: the whole horizon sits just
+  // outside the 1.4 rad/s ball (63 cuts, the worst case). ramp=true reproduces
+  // servo_log_20260910_111012 @412 s / 433 s: the independent per-axis optimum
+  // crosses the ball late in the horizon (chart norm 1.40-1.43, 1-9 cuts, NWSR 3-16).
+  using Clock=std::chrono::steady_clock;
+  auto cfg=config();cfg.jerk_weight=2000.;cfg.jerk_difference_weight=.01;
+  cfg.linear_tracking_scale_m=.01;cfg.angular_tracking_scale_rad=.03;
+  cfg.max_working_set_recalculations=200;cfg.max_solve_time_sec=.05;
+  cfg.max_linear_tracking_slack_m=.06;cfg.max_angular_tracking_slack_rad=.27;
+  PreviewTrajectoryTracker tracker(cfg);
+  PreviewMotionState initial;initial.pose=pose({0.,0.,0.});
+  const Eigen::Vector3d dir=Eigen::Vector3d(.9,.9,.5).normalized();
+  initial.angular_velocity_body=ramp?Eigen::Vector3d(dir*1.37):Eigen::Vector3d(.8,.8,.5);
+  CoupledStats s;
+  for(int k=0;k<60;++k) {
+    const double now=.01*k;
+    const auto R0=math::rotationFromPose(initial.pose);
+    const auto ref=reference([&](double t){
+      const Eigen::Vector3d angle=ramp?Eigen::Vector3d(dir*(1.37*t+.075*t*t)):Eigen::Vector3d(.9*t,.9*t,.6*t);
+      return math::poseFromSe3(pinocchio::SE3(R0*math::exp3(angle),Eigen::Vector3d(.3*(now+t),0.,0.)));});
+    const auto begin=Clock::now();const auto r=tracker.plan(ref,initial);
+    const double ms=std::chrono::duration<double,std::milli>(Clock::now()-begin).count();
+    if(r.accepted()) {++s.accepted;PreviewMotionSample next;tracker.sample(.01,next);initial=next;}
+    else ++s.rejected;
+    if(r.diagnostics.angular_norm_coupled) {
+      ++s.coupled;s.ms.push_back(ms);s.qp.push_back(r.diagnostics.angular_norm_qp_time_sec*1e3);
+      s.cuts.push_back(static_cast<int>(r.diagnostics.angular_norm_cuts));
+      s.nwsr.push_back(r.diagnostics.working_set_recalculations);s.rounds.push_back(r.diagnostics.angular_norm_rounds);
+    }
+  }
+  return s;
+}
+int benchmarkCoupled() {
+  auto pct=[](std::vector<double> v,double p){std::sort(v.begin(),v.end());return v.empty()?0.:v[static_cast<std::size_t>((v.size()-1)*p)];};
+  auto pcti=[](std::vector<int> v,double p){std::sort(v.begin(),v.end());return v.empty()?0:v[static_cast<std::size_t>((v.size()-1)*p)];};
+  for(int pinned=0;pinned<2;++pinned) {
+    if(pinned) {const int previous=rb_servo::pinBlasThreads(1);std::cout<<"OpenBLAS threads "<<previous<<" -> 1\n";}
+    else std::cout<<"OpenBLAS default pool\n";
+    for(bool ramp:{false,true}) {
+      const auto s=runCoupled(ramp);
+      std::cout<<"  "<<(ramp?"real-like ramp":"whole-horizon ")<<": coupled="<<s.coupled<<" accepted="<<s.accepted<<" rejected="<<s.rejected
+               <<" total_ms p50/p95/max="<<pct(s.ms,.5)<<"/"<<pct(s.ms,.95)<<"/"<<pct(s.ms,1.)
+               <<" qp_ms p50/p95="<<pct(s.qp,.5)<<"/"<<pct(s.qp,.95)
+               <<" cuts p50/max="<<pcti(s.cuts,.5)<<"/"<<pcti(s.cuts,1.)<<" nwsr p50/max="<<pcti(s.nwsr,.5)<<"/"<<pcti(s.nwsr,1.)
+               <<" rounds p50/max="<<pcti(s.rounds,.5)<<"/"<<pcti(s.rounds,1.)<<'\n';
+    }
+  }
+  return 0;
+}
 } // namespace
+
 
 int main(int argc,char** argv) {
   if(argc==2 && std::string(argv[1])=="--benchmark") return benchmark();
+  if(argc==2 && std::string(argv[1])=="--benchmark-coupled") return benchmarkCoupled();
   const std::pair<const char*,bool(*)()> tests[]={
       {"explicit config and constant velocity",testExplicitConfigAndConstantVelocity},
       {"continuous envelope and physical angular derivatives",testContinuousEnvelopeAndPhysicalAngularDerivatives},

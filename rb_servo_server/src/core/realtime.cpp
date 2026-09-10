@@ -1,8 +1,10 @@
 #include "rb_servo/core/realtime.hpp"
 
+#include <cstring>
 #include <iostream>
 
 #ifdef __linux__
+#include <dlfcn.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
@@ -55,6 +57,26 @@ bool pinCurrentThreadToCpu(int cpu_core) {
     (void)cpu_core;
     std::cerr << "[WARN] CPU pinning is only supported on Linux.\n";
     return false;
+#endif
+}
+
+int pinBlasThreads(int threads) {
+#ifdef __linux__
+    using GetFn = int (*)();
+    using SetFn = void (*)(int);
+    void* get_symbol = dlsym(RTLD_DEFAULT, "openblas_get_num_threads");
+    void* set_symbol = dlsym(RTLD_DEFAULT, "openblas_set_num_threads");
+    if (!get_symbol || !set_symbol || threads < 1) return -1;
+    GetFn get = nullptr;
+    SetFn set = nullptr;
+    std::memcpy(&get, &get_symbol, sizeof(get));
+    std::memcpy(&set, &set_symbol, sizeof(set));
+    const int previous = get();
+    set(threads);
+    return previous;
+#else
+    (void)threads;
+    return -1;
 #endif
 }
 

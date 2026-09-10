@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <new>
 #include <thread>
 
@@ -270,6 +271,54 @@ bool testPhysicalContactAndBrakePredecessor() {
   return true;
 }
 
+bool testClampedDispatchSplice() {
+  // 2026-09-10: the executor no longer brakes when the active plan loses closing
+  // authority; it clamps its output and asks for a replan from THAT dispatched
+  // state. The worker splices from the predecessor shifted by the held-back
+  // displacement with its closing velocity cut to the knot-0 authority.
+  setExternalSteadyNs(1000000000ULL);
+  CartesianChunkFollower follower(followerConfig());follower.submitDeltaFrame(frame(),pose(.4));follower.tick(.002);
+  PreviewExecutionWorker worker(trackerConfig(),followerConfig(),workerConfig());
+  auto cold=request(follower);
+  CHECK(worker.trySubmit(follower,cold));PreviewExecutionResult first;CHECK(waitResult(worker,first));CHECK(first.accepted());
+  PreviewMotionSample at_splice;CHECK(first.trajectory.sample(.02,at_splice));
+  CHECK(at_splice.linear_velocity.x()>1e-4);  // the predecessor is closing along +x
+  // The force gate then removes all +x authority: the canonical follower stops.
+  follower.setPlanRateGate(0);follower.tick(.002);
+  CHECK(follower.outputKinematics().velocity.x==0);
+  setExternalSteadyNs(1020000000ULL);
+  auto contact=request(follower,1.02);contact.cold_start=false;contact.identity.parent_plan_id=first.identity.request_id;
+  contact.predecessor=first.trajectory;contact.predecessor_origin_sec=first.splice_at_sec;
+  contact.contact_gate=.5;contact.contact_normal_stand={1,0,0};
+  // Without the dispatched state the predecessor's closing velocity violates knot 0:
+  // refused, never clipped (the accepted splice is not the worker's to change).
+  CHECK(worker.trySubmit(follower,contact));PreviewExecutionResult out;CHECK(waitResult(worker,out));
+  CHECK(out.status==PreviewExecutionWorkerStatus::SolveRejected);
+  CHECK(out.diagnostics.status==PreviewSolveStatus::Infeasible);
+  contact.contact_clamped_dispatch=true;contact.dispatch_offset_m={-.0005,0,0};
+  CHECK(worker.trySubmit(follower,contact));CHECK(waitResult(worker,out));
+  if(!out.accepted())std::cerr<<"clamped dispatch worker status="<<static_cast<int>(out.status)
+      <<" solve="<<static_cast<int>(out.diagnostics.status)<<" slack="<<out.diagnostics.max_position_tracking_slack_m<<'\n';
+  CHECK(out.accepted());CHECK(out.diagnostics.contact_constrained);
+  const double tol=trackerConfig().feasibility_tolerance;
+  CHECK(std::abs(out.initial.pose.x-(at_splice.pose.x-.0005))<1e-12);
+  CHECK(std::abs(out.initial.pose.y-at_splice.pose.y)<1e-12);
+  CHECK(out.initial.linear_velocity.x()<=tol);
+  CHECK(out.initial.linear_acceleration.x()<=tol);
+  CHECK((out.initial.linear_velocity-at_splice.linear_velocity).tail<2>().norm()==0);
+  CHECK((out.dispatch_offset_m-Eigen::Vector3d(-.0005,0,0)).norm()==0);
+  PreviewMotionSample started;CHECK(out.trajectory.sample(0.,started));
+  CHECK(std::abs(started.pose.x-out.initial.pose.x)<1e-12);
+  // The offset/clamp describe a held-back ACTIVE plan: no cold start, no brake
+  // predecessor, and a clamp needs a contact.
+  auto bad=contact;bad.cold_start=true;bad.identity.parent_plan_id=0;bad.predecessor=PreviewPolynomialTrajectory{};
+  bad.predecessor_origin_sec=std::numeric_limits<double>::quiet_NaN();
+  CHECK(worker.trySubmit(follower,bad));CHECK(waitResult(worker,out));CHECK(out.status==PreviewExecutionWorkerStatus::InvalidRequest);
+  auto no_contact=contact;no_contact.contact_gate=1.;no_contact.contact_normal_stand.setZero();
+  CHECK(worker.trySubmit(follower,no_contact));CHECK(waitResult(worker,out));CHECK(out.status==PreviewExecutionWorkerStatus::InvalidRequest);
+  return true;
+}
+
 bool testVelocityAuthorityAtSourceZeroCrossing() {
   setExternalSteadyNs(1000000000ULL);
   auto changing=frame();
@@ -368,7 +417,7 @@ bool testGaugeTransportPreservesC2AndIdentity() {
 
 int main() {
   const bool okay=testSnapshotAndExport()&&testWorkerSpliceAndAdmission()&&testRefusalsAndBoundedSnapshots()&&
-      testPhysicalContactAndBrakePredecessor()&&testVelocityAuthorityAtSourceZeroCrossing()&&testGaugeTransportPreservesC2AndIdentity();
+      testPhysicalContactAndBrakePredecessor()&&testClampedDispatchSplice()&&testVelocityAuthorityAtSourceZeroCrossing()&&testGaugeTransportPreservesC2AndIdentity();
   setExternalSteadyNs(0);
   if (!okay) return 1;
   std::cout<<"preview worker: fixed snapshots, future C2 splice, stale/late refusal, and RT C++ allocation audit PASS\n";

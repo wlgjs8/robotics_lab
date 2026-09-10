@@ -635,6 +635,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         rtc_inference_delay: int = 2,
         rtc_prefix_attention_schedule: str = "exp",
         rtc_max_guidance_weight: float = 5.0,
+        rtc_delay_policy: str = "static",
+        rtc_delay_margin_steps: int = 0,
+        rtc_delay_max_steps: int = 8,
         clock: Any | None = None,
         chunk_overlay_endpoint: str | None = None,
         stderr: TextIO = sys.stderr,
@@ -932,6 +935,41 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.rtc_max_guidance_weight = float(rtc_max_guidance_weight)
         self._rtc_prev_raw_chunk: np.ndarray | None = None
         self._rtc_warned_no_raw = False
+        # RTC freeze-depth policy (2026-09-09, ready_event + RTC).
+        #   static   : d = --rtc-inference-delay clipped to the replan period, execute_horizon =
+        #              replan period. The fixed_steps contract (kick at K, freeze execute-K).
+        #   adaptive : d is PREDICTED per request from the measured request->activation time
+        #              (p90 of the last 32 activations / policy_dt, rounded up, + margin, clipped
+        #              to [1, max]); the prev-chunk shift is the measured observation-to-observation
+        #              spacing and execute_horizon = that shift, so the server's guidance window ends
+        #              exactly where the shifted previous chunk's zero pad begins. Required by
+        #              ready_event, whose kick is at activation and whose realized delay is
+        #              ceil(latency / policy_dt) (2-4 steps), not a configured constant.
+        if str(rtc_delay_policy) not in ("static", "adaptive"):
+            raise ValueError(f"rtc_delay_policy must be 'static' or 'adaptive', got {rtc_delay_policy!r}")
+        self.rtc_delay_policy = str(rtc_delay_policy)
+        self.rtc_delay_margin_steps = int(rtc_delay_margin_steps)
+        self.rtc_delay_max_steps = max(1, int(rtc_delay_max_steps))
+        # Previous-chunk bookkeeping. The chunk the freeze must continue is the plan the robot
+        # is EXECUTING, i.e. the last ACTIVATED result -- not the last inference result, which
+        # ready_event may discard (generation change, exhausted alignment). Results are stashed
+        # by inference_seq and promoted by the activation hook; inline/synchronous callers (no
+        # worker context) keep the immediate cache.
+        self._rtc_pending_raw: dict[int, tuple[np.ndarray, int | None]] = {}
+        self._rtc_pending_lock = threading.Lock()  # worker stashes, command loop promotes
+        self._rtc_prev_obs_step_seq: int | None = None
+        self._rtc_request_obs_step_seq: int | None = None
+        self._rtc_request_inference_seq: int | None = None
+        self._rtc_last_sent: dict[str, Any] | None = None
+        if self.rtc_enabled and self.rtc_delay_policy == "adaptive":
+            print(
+                "[flow-infer] RTC delay policy=adaptive: d = p10(realized ssi, last 32 activations) "
+                f"+ {self.rtc_delay_margin_steps} (max {self.rtc_delay_max_steps}; before history: "
+                "floor(p50 request->activation / policy_dt), then the static seed); shift and "
+                "execute_horizon = measured observation spacing; prev chunk = last ACTIVATED result; "
+                "activation waits until the executed window starts at row d (no frozen->guided seam).",
+                file=stderr, flush=True,
+            )
         # Chunk-boundary action crossfade state (mirrors FlowMatchingActionSource;
         # this class skips super().__init__). 0 = off. RTC subsumes the crossfade
         # (it makes boundaries continuous at the flow level), so disable it when on.
@@ -1015,6 +1053,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             file=self.stderr,
             flush=True,
         )
+        # The snapshot writer picks its own per-run directory, so print the
+        # resolved path — the operator can no longer read it off the env var.
+        snapshot_state = self._diagnostic_image_writer.snapshot()
+        if snapshot_state["enabled"]:
+            print(
+                f"[flow-infer] rgb snapshots -> {snapshot_state['directory']} "
+                f"(max_bundles={snapshot_state['max_bundles']})",
+                file=self.stderr,
+                flush=True,
+            )
         print(
             f"[flow-infer] openpi action_horizon={self.action_horizon} "
             f"chunk_execute_steps={self.chunk_execute_steps}",
@@ -2249,15 +2297,149 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         real deployments should run RTC OFF until an anchor-gap-compensated freeze
         exists. Delta chunks pin MOTION, so the same gap does not accumulate.
         """
-        cur = int(getattr(self, "_stream_emitted_policy_steps", 0) or 0)
-        last = getattr(self, "_rtc_last_obs_step_seq", None)
+        # Observation step of THIS request: the worker snapshots it at kick time
+        # (note_rtc_request_context); fall back to the live counter for inline callers.
+        snap = getattr(self, "_rtc_request_obs_step_seq", None)
+        cur = int(snap) if snap is not None else int(getattr(self, "_stream_emitted_policy_steps", 0) or 0)
+        # Observation step of the chunk the robot is executing (last ACTIVATED result), when
+        # the activation hook is wired; else the previous request's observation (legacy).
+        prev_activated = getattr(self, "_rtc_prev_obs_step_seq", None)
+        last = prev_activated if prev_activated is not None else getattr(self, "_rtc_last_obs_step_seq", None)
         self._rtc_last_obs_step_seq = cur
         shift = replan if last is None else int(np.clip(cur - int(last), 1, 4 * max(1, replan)))
-        # Freeze depth stays STATIC (configured): the safety condition is d >= realized
-        # (over-freeze is geometrically safe; UNDER-freeze breaks plan continuity -- the
-        # 20260825 #3/#4 sawtooth came from sending d=last-realized, i.e. 0-2 < next r).
-        delay = int(np.clip(self.rtc_inference_delay, 0, replan))
+        # Freeze depth: static = configured (safety condition d >= realized; over-freeze is
+        # geometrically safe, UNDER-freeze breaks plan continuity -- the 20260825 #3/#4 sawtooth
+        # came from sending d=last-realized, i.e. 0-2 < next r); adaptive = predicted from the
+        # measured request->activation distribution (see _adaptive_rtc_delay).
+        delay = self._rtc_delay_for_request(replan)
         return shift, delay
+
+    def _rtc_delay_for_request(self, replan: int) -> int:
+        if str(getattr(self, "rtc_delay_policy", "static")) == "adaptive":
+            return self._adaptive_rtc_delay()
+        return int(np.clip(self.rtc_inference_delay, 0, replan))
+
+    def _adaptive_rtc_delay(self) -> int:
+        """Predict the freeze depth d for this request so that d <= the realized delay.
+
+        The realized delay is `source_start_index` (ssi): the policy steps emitted between the
+        observation and activation. The runner executes deltas from row ssi on, composed from
+        the command pose, so d rows of frozen prefix are never executed as long as d <= ssi.
+        If d > ssi (over-freeze) the first executed delta d_ssi = T_ssi^-1 T_ssi+1 straddles
+        the frozen -> guided boundary: the inpainting's residual position gap at that boundary
+        becomes a one-step velocity spike. MEASURED 2026-09-09 (ready_event, shift 3, ssi 3):
+        d=3 chunks seam jump 0.5-1.9 mm/step, d=4 chunks 4-13 mm/step (left arm). Under-freeze
+        only shortens the conditioning prefix (those rows are in the past at activation), so the
+        estimate is a LOW quantile of the realized ssi history: p10 of the last 32 activations
+        + margin (default 0), clipped to [1, max]. Before 4 activations exist: floor(p50 of the
+        request->activation time / policy_dt) if timed, else the static seed; both + margin."""
+        margin = int(getattr(self, "rtc_delay_margin_steps", 0))
+        d_max = max(1, int(getattr(self, "rtc_delay_max_steps", 8)))
+        lock = getattr(self, "_inference_timing_lock", None)
+        realized = getattr(self, "_rtc_realized_delay_history", None)
+        if realized is not None:
+            if lock is not None:
+                with lock:
+                    realized = [int(v) for v in realized]
+            else:
+                realized = [int(v) for v in realized]
+        if realized and len(realized) >= 4:
+            p10 = float(np.percentile(np.asarray(realized[-32:], dtype=np.float64), 10))
+            return int(np.clip(int(np.floor(p10)) + margin, 1, d_max))
+        samples: list[float] = []
+        history = getattr(self, "_inference_timing_history", None)
+        if isinstance(history, dict) and "request_to_activation_ms" in history:
+            if lock is not None:
+                with lock:
+                    samples = [float(v) for v in history["request_to_activation_ms"]]
+            else:
+                samples = [float(v) for v in history["request_to_activation_ms"]]
+        if len(samples) >= 4:
+            dt_ms = float(getattr(self, "policy_dt_sec", 0.0) or 0.0334) * 1000.0
+            p50 = float(np.percentile(np.asarray(samples[-32:], dtype=np.float64), 50))
+            return int(np.clip(int(np.floor(p50 / dt_ms)) + margin, 1, d_max))
+        base = int(getattr(self, "rtc_inference_delay", 0))
+        return int(np.clip(base + margin, 1, d_max))
+
+    # ---- RTC previous-chunk bookkeeping (worker + activation hooks) ----------------
+    def note_rtc_request_context(self, observation_step_seq: int, inference_seq: int) -> None:
+        self._rtc_request_obs_step_seq = int(observation_step_seq)
+        self._rtc_request_inference_seq = int(inference_seq)
+
+    def clear_rtc_request_context(self) -> None:
+        self._rtc_request_obs_step_seq = None
+        self._rtc_request_inference_seq = None
+
+    def _rtc_pending_state(self) -> tuple[dict[int, tuple[np.ndarray, int | None]], threading.Lock]:
+        pending = getattr(self, "_rtc_pending_raw", None)
+        if pending is None:
+            pending = self._rtc_pending_raw = {}
+        lock = getattr(self, "_rtc_pending_lock", None)
+        if lock is None:
+            lock = self._rtc_pending_lock = threading.Lock()
+        return pending, lock
+
+    def _stash_rtc_raw_chunk(self, raw: np.ndarray) -> None:
+        seq = getattr(self, "_rtc_request_inference_seq", None)
+        if seq is None:
+            # No worker context (inline/synchronous caller): every result is executed, so it
+            # becomes the previous chunk immediately (legacy behaviour).
+            self._rtc_prev_raw_chunk = raw
+            self._rtc_prev_obs_step_seq = getattr(self, "_rtc_request_obs_step_seq", None)
+            return
+        pending, lock = self._rtc_pending_state()
+        with lock:
+            pending[int(seq)] = (raw, getattr(self, "_rtc_request_obs_step_seq", None))
+            for key in sorted(pending)[:-8]:  # bounded: only the newest few can still activate
+                pending.pop(key, None)
+
+    def on_rtc_chunk_activated(self, metadata: Any) -> None:
+        """Promote the ACTIVATED result to the previous chunk the next freeze continues."""
+        if not isinstance(metadata, dict) or not getattr(self, "_rtc_pending_raw", None):
+            return
+        seq = metadata.get("inference_seq")
+        if seq is None:
+            return
+        pending, lock = self._rtc_pending_state()
+        with lock:
+            item = pending.pop(int(seq), None)
+            if item is None:
+                return
+            raw, obs_seq = item
+            obs = obs_seq if obs_seq is not None else metadata.get("observation_step_seq")
+            # Both fields are read by the worker; write them together under the lock.
+            self._rtc_prev_obs_step_seq = int(obs) if obs is not None else None
+            self._rtc_prev_raw_chunk = raw
+            for key in [k for k in pending if k < int(seq)]:  # older results can no longer activate
+                pending.pop(key, None)
+        ssi = metadata.get("source_start_index")
+        if ssi is not None:
+            self._note_rtc_realized_delay(int(ssi))
+
+    def _note_rtc_realized_delay(self, ssi: int) -> None:
+        """Realized delay history (steps between observation and activation) feeding the
+        adaptive freeze-depth estimate; kept alongside the timing history under its lock."""
+        from collections import deque as _deque
+
+        lock = getattr(self, "_inference_timing_lock", None)
+        hist = getattr(self, "_rtc_realized_delay_history", None)
+        if hist is None:
+            hist = self._rtc_realized_delay_history = _deque(maxlen=64)
+        if lock is not None:
+            with lock:
+                hist.append(int(ssi))
+        else:
+            hist.append(int(ssi))
+
+    def on_rtc_chunk_discarded(self, metadata: Any) -> None:
+        if not isinstance(metadata, dict) or not getattr(self, "_rtc_pending_raw", None):
+            return
+        seq = metadata.get("inference_seq")
+        if seq is None:
+            return
+        pending, lock = self._rtc_pending_state()
+        with lock:
+            pending.pop(int(seq), None)
 
     def reset_rtc(self) -> None:
         """Drop the cached previous chunk so the next infer cold-starts (vanilla).
@@ -2267,6 +2449,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         """
         self._rtc_prev_raw_chunk = None
         self._rtc_warned_no_raw = False
+        pending, lock = self._rtc_pending_state()
+        with lock:
+            pending.clear()
+            self._rtc_prev_obs_step_seq = None
+        self._rtc_last_obs_step_seq = None
+        self._rtc_last_sent = None
         history = getattr(self, "_servo_command_history", None)
         if history is not None:
             # The collector is shared with the state client. Keep it intact but
@@ -2380,19 +2568,37 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             replan = int(getattr(self, "rtc_replan_period", 0) or self.chunk_execute_steps)
             _am = getattr(self, "action_mode", "delta")
             _nq = getattr(self, "_rtc_norm_q", None)
-            if _am == "anchored":
+            _policy = str(getattr(self, "rtc_delay_policy", "static"))
+            if _am == "anchored" or _policy == "adaptive":
+                # measured obs-to-obs shift (+ predicted delay under adaptive)
                 _shift, _delay = self._dynamic_rtc_params(replan)
             else:
                 _shift, _delay = replan, int(np.clip(self.rtc_inference_delay, 0, replan))
+            # Guidance window end. The shifted prev chunk has H - shift real rows then zero
+            # padding; under adaptive the server must stop guiding exactly there.
+            _exec_h = int(_shift) if _policy == "adaptive" else int(replan)
             if _am == "anchored" and _nq is None:
                 pass  # no valid re-anchor possible: stay vanilla rather than corrupt the freeze
             else:
                 obs["prev_action_chunk"] = rtc_shift_prev_chunk(
                     self._rtc_prev_raw_chunk, _shift, action_mode=_am, norm_q=_nq)
             obs["inference_delay"] = int(_delay)
-            obs["execute_horizon"] = int(replan)
+            obs["execute_horizon"] = int(_exec_h)
             obs["prefix_attention_schedule"] = self.rtc_prefix_attention_schedule
             obs["max_guidance_weight"] = float(self.rtc_max_guidance_weight)
+            self._rtc_last_sent = {
+                "policy": _policy,
+                "shift": int(_shift),
+                "delay": int(_delay),
+                "execute_horizon": int(_exec_h),
+                "prev_conditioned": bool("prev_action_chunk" in obs),
+                "prev_observation_step_seq": getattr(self, "_rtc_prev_obs_step_seq", None),
+            }
+        else:
+            self._rtc_last_sent = (
+                {"policy": str(getattr(self, "rtc_delay_policy", "static")), "cold_start": True}
+                if self.rtc_enabled else None
+            )
         try:
             result = self._client.infer(obs)
         except Exception as exc:  # noqa: BLE001 - remote failure must not crash the loop
@@ -2427,7 +2633,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             # gripper-rescaled `actions` below. Absent => server too old => vanilla.
             raw = result.get("rtc_raw_actions")
             if raw is not None:
-                self._rtc_prev_raw_chunk = np.asarray(raw, dtype=np.float32)
+                self._stash_rtc_raw_chunk(np.asarray(raw, dtype=np.float32))
             elif not self._rtc_warned_no_raw:
                 print(
                     "[flow-infer] RTC enabled but server returned no 'rtc_raw_actions' -> "

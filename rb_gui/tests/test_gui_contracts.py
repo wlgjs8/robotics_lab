@@ -640,11 +640,25 @@ class RecordingServer:
 
 
 class RecordingMeshNode:
-    """One ViserUrdf mesh node: a read-only path name + assignable visibility, which
-    is the whole surface update_self_collision_overlay drives per body group."""
+    """One ViserUrdf mesh node: a read-only path name + the assignable props
+    update_self_collision_overlay drives per body group (visibility, and the
+    colour/opacity of the band it is highlighted for). Colour writes are COUNTED:
+    the overlay must only repaint on a band change, not on every 10 Hz tick."""
     def __init__(self, name):
         self.name = name
         self.visible = None
+        self.opacity = None
+        self._color = None
+        self.color_writes = 0
+
+    @property
+    def color(self):
+        return self._color
+
+    @color.setter
+    def color(self, value):
+        self._color = value
+        self.color_writes += 1
 
 
 class RecordingUrdf:
@@ -657,6 +671,21 @@ class RecordingUrdf:
 
     def update_cfg(self, config):
         self.configs.append(tuple(float(value) for value in config))
+
+
+class _ArticulatedRecordingUrdf(RecordingUrdf):
+    """RecordingUrdf that reports the ARTICULATED arm URDF's 8 actuated joints, so
+    _update_urdf_config takes its finger-joint branch (the plain fake has no
+    get_actuated_joint_names and exercises only the 6 arm joints)."""
+
+    _ACTUATED = (
+        "base_joint", "shoulder_joint", "elbow_joint",
+        "wrist1_joint", "wrist2_joint", "wrist3_joint",
+        "finger_left_joint", "finger_right_joint",
+    )
+
+    def get_actuated_joint_names(self):
+        return self._ACTUATED
 
 
 # The REAL viser node names for the articulated arm URDF, verified against
@@ -6237,10 +6266,14 @@ class SelfCollisionOverlayTest(unittest.TestCase):
               "pair": pair,
               "stand_capsule": "lower_column" if pair and "stand" in pair else None}
         if near_pairs is not None:
+            # (name_a, name_b) = a breaching pair with no published band (the legacy
+            # shape these tests were written against); a dict passes through, so a
+            # test can give a pair its own clearance_m / d_hard_m / d_slow_m.
             sc["near_pairs"] = [
-                {"name_a": a, "name_b": b, "p_a_m": [0.0, 0.0, 0.0],
+                dict(pair) if isinstance(pair, dict) else
+                {"name_a": pair[0], "name_b": pair[1], "p_a_m": [0.0, 0.0, 0.0],
                  "p_b_m": [0.0, 0.0, 0.1], "clearance_m": 0.001}
-                for a, b in near_pairs
+                for pair in near_pairs
             ]
         if manifest is not None:
             sc["manifest"] = manifest
@@ -6501,6 +6534,301 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         self.assertFalse(handles["right_base_ref"].visible)
         self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(9.0))
         self.assertAlmostEqual(handles["right_urdf_collision"].configs[-1][0], math.radians(9.0))
+
+    @staticmethod
+    def _slow_pair(name_a, name_b, clearance_m=0.030, d_slow_m=0.075, **extra):
+        pair = {"name_a": name_a, "name_b": name_b,
+                "p_a_m": [0.0, 0.0, 0.0], "p_b_m": [0.0, 0.0, 0.1],
+                "clearance_m": clearance_m, "d_hard_m": 0.030, "d_slow_m": d_slow_m}
+        pair.update(extra)
+        return pair
+
+    @staticmethod
+    def _expected_opacity(rgba):
+        """What _set_mesh_rgba writes for this band's alpha: viser's opaque material
+        is opacity=None, so an alpha of 1.0 lands as None (see _set_mesh_rgba)."""
+        return None if rgba[3] >= 1.0 else rgba[3]
+
+    @staticmethod
+    def _mesh_colors(handles, key):
+        """{"arm": set(colors), "gripper": set(colors)} for one URDF's mesh nodes."""
+        out = {"arm": set(), "gripper": set()}
+        for node in handles[key]._meshes:
+            group = "gripper" if set(node.name.split("/")) & {
+                "tool", "finger_left", "finger_right"} else "arm"
+            out[group].add(node.color)
+        return out
+
+    _MANIFEST = {"left_prefix": "dual_rb5_850e_left_",
+                 "right_prefix": "dual_rb5_850e_right_"}
+
+    def test_slow_band_pair_paints_its_parts_yellow_without_a_violation(self):
+        # NOT violated: clearance 30 mm sits inside the pair's own 75 mm d_slow band
+        # and above its 30 mm floor. The overlay must still light the two parts the
+        # guard is watching -- that is the whole point of the yellow band, and it is
+        # shown with no debug checkbox, exactly like the red one.
+        handles = self._split_handles()
+        latest = self._latest(
+            violated=False, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_link3_0", "stand_body_shoulder_0")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        yellow = scene._rgb_opacity(scene._SELF_COLLISION_SLOW_RGBA)[0]
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertEqual(self._mesh_colors(handles, "left_urdf_collision")["arm"], {yellow})
+        # The band's own alpha reaches every mesh node of the group, and the stand's
+        # single duplicate. (An alpha of 1.0 would be written as viser's opaque
+        # material, opacity=None -- see _set_mesh_rgba.)
+        self.assertEqual(
+            {node.opacity for node in handles["left_urdf_collision"]._meshes
+             if not set(node.name.split("/")) & {"tool", "finger_left", "finger_right"}},
+            {self._expected_opacity(scene._SELF_COLLISION_SLOW_RGBA)})
+        self.assertEqual(handles["stand_mesh_collision"].opacity,
+                         self._expected_opacity(scene._SELF_COLLISION_SLOW_RGBA))
+        self.assertEqual(
+            self._mesh_visibility(handles, "left_urdf_collision"),
+            {"arm": {True}, "gripper": {False}})
+        # The stand is the other member; the right arm is untouched.
+        self.assertTrue(handles["stand_mesh_collision"].visible)
+        self.assertEqual(handles["stand_mesh_collision"].color, yellow)
+        self.assertFalse(handles["stand_mesh"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
+
+    def test_hard_violation_wins_over_the_slow_band_on_the_same_part(self):
+        handles = self._split_handles()
+        latest = self._latest(
+            violated=True, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[
+                # left arm breaching its floor, and also merely close to the stand
+                self._slow_pair("dual_rb5_850e_left_link3_0",
+                                "dual_rb5_850e_right_link3_0", clearance_m=0.010),
+                self._slow_pair("dual_rb5_850e_left_link2_0", "stand_body_shoulder_0"),
+            ],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        red = scene._rgb_opacity(scene._SELF_COLLISION_RGBA)[0]
+        yellow = scene._rgb_opacity(scene._SELF_COLLISION_SLOW_RGBA)[0]
+        # The left arm is named by both pairs: the worse band wins.
+        self.assertEqual(self._mesh_colors(handles, "left_urdf_collision")["arm"], {red})
+        # The right arm is only in the breaching pair; the stand only in the close one.
+        self.assertEqual(self._mesh_colors(handles, "right_urdf_collision")["arm"], {red})
+        self.assertEqual(handles["stand_mesh_collision"].color, yellow)
+        # The red band's own alpha, on the group red won.
+        self.assertEqual(
+            {node.opacity for node in handles["left_urdf_collision"]._meshes
+             if not set(node.name.split("/")) & {"tool", "finger_left", "finger_right"}},
+            {self._expected_opacity(scene._SELF_COLLISION_RGBA)})
+
+    def test_plane_and_box_pairs_are_left_out_of_the_yellow_band(self):
+        # The floor and the keep-out boxes are not self-collision, and neither is drawn
+        # as a body part (both classify as "stand"), so an arm descending toward the
+        # floor -- every pick and every place -- must not paint the stand yellow.
+        handles = self._split_handles()
+        latest = self._latest(
+            violated=False, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[
+                self._slow_pair("dual_rb5_850e_left_link6_0", "ground_plane",
+                                clearance_m=0.005, d_slow_m=0.015, external=True),
+                self._slow_pair("dual_rb5_850e_right_link6_0", "external_box_0",
+                                clearance_m=0.010, d_slow_m=0.045, external_box=True),
+            ],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertFalse(handles["left_base_collision"].visible)
+        self.assertFalse(handles["right_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+
+    def test_plane_and_box_are_dropped_by_name_without_the_flags(self):
+        # Same exclusion against a server that publishes no category flags.
+        handles = self._split_handles()
+        latest = self._latest(
+            violated=False, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_link6_0", "ground_plane")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertFalse(handles["left_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+
+    def test_yellow_band_repaints_only_when_the_band_changes(self):
+        # update_gui runs at 10 Hz and every colour assignment is a websocket message
+        # per mesh node; a steady band must not re-send it.
+        handles = self._split_handles()
+        latest = self._latest(
+            violated=False, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_link3_0", "stand_body_shoulder_0")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        update_self_collision_overlay(handles, latest)
+        arm_writes = {node.color_writes
+                      for node in handles["left_urdf_collision"]._meshes
+                      if not set(node.name.split("/")) & {"tool", "finger_left", "finger_right"}}
+        self.assertEqual(arm_writes, {1})
+        # A change of band repaints exactly once more.
+        update_self_collision_overlay(handles, self._latest(
+            violated=True, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_link3_0", "stand_body_shoulder_0",
+                                        clearance_m=0.010)],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None))
+        arm_colors = self._mesh_colors(handles, "left_urdf_collision")["arm"]
+        self.assertEqual(arm_colors, {scene._rgb_opacity(scene._SELF_COLLISION_RGBA)[0]})
+
+    def test_highlight_overlay_fingers_follow_the_live_jaw(self):
+        """The red/yellow overlay is the ARTICULATED arm URDF, so its prismatic finger
+        joints have to be driven by the live gripper percent like the solid robot's.
+
+        Without the percent, _finger_position_m(None) parks them at 0 = FULL OPEN
+        forever: a gripper<->gripper highlight then drew the jaws 98 mm apart while the
+        real ones were closed on a bolt (operator, 2026-09-10)."""
+        handles = self._split_handles()
+        for side in ("left", "right"):
+            handles[f"{side}_urdf_collision"] = _ArticulatedRecordingUrdf(
+                meshes=arm_urdf_meshes(f"/stand/{side}_base_collision"))
+        # The app pushes the live percent into scene_handles each tick
+        # (app._push_gripper_percent); scene.py reads it from there.
+        handles["gripper_percent_left"] = 40.0
+        latest = self._latest(
+            violated=True, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_pika_finger_right",
+                                        "dual_rb5_850e_right_pika_finger_left",
+                                        clearance_m=0.010, d_slow_m=0.062)],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        cfg = handles["left_urdf_collision"].configs[-1]
+        self.assertEqual(len(cfg), 8)
+        expected = (1.0 - 40.0 / 100.0) * scene._GRIPPER_FINGER_TRAVEL_M
+        self.assertAlmostEqual(cfg[6], +expected)
+        self.assertAlmostEqual(cfg[7], -expected)
+
+    def test_highlight_overlay_fingers_open_without_gripper_feedback(self):
+        # No published percent and no slider -> open, the same conservative envelope
+        # the server falls back to (effectiveGripperPercent -> 100).
+        handles = self._split_handles()
+        handles["left_urdf_collision"] = _ArticulatedRecordingUrdf(
+            meshes=arm_urdf_meshes("/stand/left_base_collision"))
+        latest = self._latest(
+            violated=True, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_pika_finger_right",
+                                        "dual_rb5_850e_right_pika_finger_left",
+                                        clearance_m=0.010, d_slow_m=0.062)],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        cfg = handles["left_urdf_collision"].configs[-1]
+        self.assertAlmostEqual(cfg[6], 0.0)
+        self.assertAlmostEqual(cfg[7], 0.0)
+
+    def test_slow_band_riser_pair_paints_the_cell_structure_yellow(self):
+        handles = self._split_handles()
+        handles["environment_names"] = ["env_stand_riser", "env_work_table"]
+        handles["environment_rgb"] = {"env_stand_riser": (51, 51, 54),
+                                      "env_work_table": (90, 90, 90)}
+        handles["environment_env_stand_riser"] = RecordingSceneHandle()
+        handles["environment_env_work_table"] = RecordingSceneHandle()
+        latest = self._latest(
+            violated=False, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_link3_1", "env_stand_riser_0",
+                                        clearance_m=0.030, d_slow_m=0.062, environment=True)],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        yellow = scene._rgb_opacity(scene._SELF_COLLISION_SLOW_RGBA)[0]
+        self.assertEqual(handles["environment_env_stand_riser"].color, yellow)
+        self.assertTrue(handles["left_base_collision"].visible)
+        # Cleared -> the URDF colours come back.
+        update_self_collision_overlay(handles, self._latest(
+            violated=False, physical_real=True, q_actual=[1, 2, 3, 4, 5, 6], q_sent=None))
+        self.assertEqual(handles["environment_env_stand_riser"].color, (51, 51, 54))
+        self.assertFalse(handles["left_base_collision"].visible)
+
+    def test_unsplittable_urdf_keeps_the_red_only_behavior(self):
+        # Without per-link mesh handles the overlay cannot be recoloured, so a d_slow
+        # band must NOT be drawn -- it would appear in hard-violation red.
+        handles = self._handles()
+        latest = self._latest(
+            violated=False, physical_real=True, pair=None, manifest=self._MANIFEST,
+            near_pairs=[self._slow_pair("dual_rb5_850e_left_link3_0", "stand_body_shoulder_0")],
+            q_actual=[1, 2, 3, 4, 5, 6], q_sent=None)
+        update_self_collision_overlay(handles, latest)
+        self.assertFalse(handles["left_base_collision"].visible)
+        self.assertTrue(handles["left_base"].visible)
+
+
+class MeshRgbaTest(unittest.TestCase):
+    """_set_mesh_rgba: the RGBA the overlay reasons in -> viser's (color, opacity)."""
+
+    def test_alpha_below_one_is_written_as_is(self):
+        node = RecordingMeshNode("/m")
+        scene._set_mesh_rgba(node, (0.85, 0.08, 0.08, 0.5))
+        self.assertEqual((node.color, node.opacity), ((217, 20, 20), 0.5))
+
+    def test_alpha_one_is_written_as_the_opaque_material(self):
+        # viser: `transparent = props.opacity !== null`, so opacity=1.0 would still be
+        # a transparent material (transparent pass, sorted by draw order). None is the
+        # opaque one. Keeps "make a band opaque" a one-number change.
+        node = RecordingMeshNode("/m")
+        scene._set_mesh_rgba(node, (0.92, 0.72, 0.12, 1.0))
+        self.assertIsNone(node.opacity)
+
+    def test_a_handle_without_the_props_is_survived(self):
+        scene._set_mesh_rgba(None, (0.0, 0.0, 0.0, 0.5))  # must not raise
+
+
+class SelfCollisionSlowGroupsTest(unittest.TestCase):
+    """_self_collision_slow_groups: which parts the d_slow (yellow) layer lights up."""
+
+    MANIFEST = {"left_prefix": "dual_rb5_850e_left_",
+                "right_prefix": "dual_rb5_850e_right_"}
+
+    def groups(self, pairs):
+        return scene._self_collision_slow_groups(
+            {"manifest": self.MANIFEST, "near_pairs": list(pairs)})
+
+    def test_each_pair_is_banded_against_its_own_d_slow(self):
+        # 23 mm is inside the 75 mm self band but OUTSIDE the 15 mm intra-arm band --
+        # the RB5's permanent structural link3<->link5 pair, which must stay dark.
+        self.assertEqual(
+            self.groups([
+                {"name_a": "dual_rb5_850e_left_link3_1", "name_b": "dual_rb5_850e_left_link5_0",
+                 "clearance_m": 0.023, "d_slow_m": 0.015},
+                {"name_a": "dual_rb5_850e_right_link2_0", "name_b": "stand_body_shoulder_0",
+                 "clearance_m": 0.023, "d_slow_m": 0.075},
+            ]),
+            {"right_arm", "stand"})
+
+    def test_no_closing_filter(self):
+        # Unlike the close-call tubes, a pair parked inside the band with no approach
+        # still lights its parts: the question here is "what is being checked".
+        self.assertEqual(
+            self.groups([{"name_a": "dual_rb5_850e_left_pika_finger_right",
+                          "name_b": "dual_rb5_850e_right_pika_finger_left",
+                          "clearance_m": 0.030, "d_slow_m": 0.062, "rate_m_s": 0.0,
+                          "gripper_gripper": True}]),
+            {"left_gripper", "right_gripper"})
+
+    def test_pairs_outside_their_band_and_pairs_without_one_are_skipped(self):
+        self.assertEqual(
+            self.groups([
+                {"name_a": "dual_rb5_850e_left_link3_0", "name_b": "stand_body_shoulder_0",
+                 "clearance_m": 0.080, "d_slow_m": 0.075},
+                # older server: no published band -> skipped, not guessed at
+                {"name_a": "dual_rb5_850e_right_link3_0", "name_b": "stand_body_shoulder_0",
+                 "clearance_m": 0.010},
+            ]),
+            set())
+
+    def test_plane_and_box_geometry_never_lights_a_part(self):
+        self.assertEqual(
+            self.groups([
+                {"name_a": "dual_rb5_850e_left_link6_0", "name_b": "ground_plane",
+                 "clearance_m": 0.005, "d_slow_m": 0.015, "external": True},
+                {"name_a": "dual_rb5_850e_right_link6_0", "name_b": "external_box_1",
+                 "clearance_m": 0.010, "d_slow_m": 0.045, "external_box": True},
+            ]),
+            set())
+
+    def test_missing_or_malformed_telemetry_is_dark(self):
+        self.assertEqual(scene._self_collision_slow_groups(None), set())
+        self.assertEqual(scene._self_collision_slow_groups({}), set())
+        self.assertEqual(scene._self_collision_slow_groups({"near_pairs": None}), set())
 
 
 class SelfCollisionGroupClassifyTest(unittest.TestCase):

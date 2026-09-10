@@ -123,7 +123,7 @@ if(RB_SERVO_ENABLE_PREVIEW_EXECUTION)
         src/control/preview_brake.cpp
         src/control/live_preview_execution.cpp)
     target_include_directories(rb_servo_core PRIVATE ${qpOASES_INCLUDE_DIR})
-    target_link_libraries(rb_servo_core PUBLIC ${qpOASES_LIBRARY})
+    target_link_libraries(rb_servo_core PUBLIC ${qpOASES_LIBRARY} ${CMAKE_DL_LIBS})
     target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PREVIEW_EXECUTION=1)
 endif()
 

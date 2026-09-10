@@ -224,6 +224,38 @@ class RolloutStepLoggerTest(unittest.TestCase):
         self.assertEqual(record["rtc"]["schedule"], "exp")
         self.assertEqual(record["rtc"]["alignment_outcome"], "aligned")
 
+    def test_rtc_block_carries_adaptive_delay_accounting(self) -> None:
+        record = build_rollout_step_record(
+            state_payload=_state_payload(),
+            command_intent=None,
+            conditioned_targets=None,
+            raw_delta_ee_local=None,
+            gripper_cmd_pct=None,
+            chunk_id=1,
+            chunk_step_index=0,
+            stall=False,
+            hold=False,
+            inference_latency_ms=None,
+            rtc={
+                "configured_delay": 4,
+                "realized_delay": 3,
+                "execute_horizon": 3,
+                "schedule": "exp",
+                "alignment_outcome": "aligned",
+                "delay_policy": "adaptive",
+                "sent_shift": 3,
+                "frozen_rows_executed": 1,
+                "prev_conditioned": True,
+            },
+            t_mono=1.0,
+            t_wall=2.0,
+        )
+        self.assertEqual(record["rtc"]["delay_error"], -1)
+        self.assertEqual(record["rtc"]["delay_policy"], "adaptive")
+        self.assertEqual(record["rtc"]["sent_shift"], 3)
+        self.assertEqual(record["rtc"]["frozen_rows_executed"], 1)
+        self.assertIs(record["rtc"]["prev_conditioned"], True)
+
     def test_rtc_block_absent_when_rtc_off(self) -> None:
         record = build_rollout_step_record(
             state_payload=_state_payload(),

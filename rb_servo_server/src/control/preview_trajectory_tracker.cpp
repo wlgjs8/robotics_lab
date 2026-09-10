@@ -717,9 +717,29 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
     // satisfying these planes: the complete norm certificate is rechecked.
     auto& cuts=x.angular_norm_cuts;auto& cut_upper=x.angular_norm_upper;
     cuts.setZero();cut_upper.setConstant(qpOASES::INFTY);
-    for(auto& pool:x.angular_norm_pool)pool.warm=false; // one plane set per nonlinear problem
+    // One cold init per nonlinear problem. Measured 2026-09-10 on the rebased
+    // splice case: a warm start ACROSS problems ran into 445 cuts / the NWSR
+    // limit (replaced cut rows make a misleading homotopy), and seeding the
+    // previous problem's support planes was worse as well (348 -> 460 cuts,
+    // NWSR 880 -> 1123). The live cost was never the plane count: the real
+    // solves needed 1-9 cuts and 3-16 NWSR yet took 3-17 ms, because qpOASES's
+    // BLAS calls were fanned over OpenBLAS's thread pool (pinBlasThreads).
+    for(auto& pool:x.angular_norm_pool)pool.warm=false;
     int retained_cuts=0;
     std::size_t cuts_added=0;
+    const auto add_plane=[&](int row,const Eigen::Vector3d& normal,double limit) -> bool {
+      const int cut=retained_cuts++;
+      for(int axis=0;axis<3;++axis)
+        cuts.block(cut,axis*x.n,1,x.n)=normal[axis]*x.axes[axis+3].C.row(row);
+      const double scale=cuts.row(cut).norm();
+      // A fixed initial Bernstein control cannot be repaired by a future
+      // jerk. Refuse it without clipping the accepted splice derivatives.
+      if(scale==0)return false;
+      cuts.row(cut)/=scale;
+      cut_upper[cut]=(limit-normal.dot(angular_free_control(row)))/scale;
+      ++cuts_added;
+      return true;
+    };
     for(;;) {
       for(int row=0;row<3*x.n;++row) {
         const Eigen::Vector3d value=angular_control(row);
@@ -733,17 +753,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         // and adds only valid outer planes. The fixed storage, total NWSR and
         // wall-time budgets all remain fail-closed limits on this iteration.
         if(retained_cuts>=cut_rows)return finish(PreviewSolveStatus::IterationLimit);
-        const int cut=retained_cuts++;
-        const Eigen::Vector3d normal=value/norm;
-        for(int axis=0;axis<3;++axis)
-          cuts.block(cut,axis*x.n,1,x.n)=normal[axis]*x.axes[axis+3].C.row(row);
-        const double scale=cuts.row(cut).norm();
-        // A fixed initial Bernstein control cannot be repaired by a future
-        // jerk. Refuse it without clipping the accepted splice derivatives.
-        if(scale==0)return finish(PreviewSolveStatus::Infeasible);
-        cuts.row(cut)/=scale;
-        cut_upper[cut]=(limit-normal.dot(angular_free_control(row)))/scale;
-        ++cuts_added;
+        if(!add_plane(row,value/norm,limit))return finish(PreviewSolveStatus::Infeasible);
       }
       result.diagnostics.angular_norm_cuts=cuts_added;
       auto pool=std::find_if(x.angular_norm_pool.begin(),x.angular_norm_pool.end(),
@@ -766,14 +776,30 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
           6*cfg.max_working_set_recalculations-result.diagnostics.working_set_recalculations);
       if(iterations<=0)return finish(PreviewSolveStatus::IterationLimit);
       qpOASES::returnValue status;
-      if(q.warm)status=q.qp->hotstart(q.H.data(),q.g.data(),q.C.data(),q.lower.data(),q.upper.data(),
-                                    q.lower_c.data(),q.upper_c.data(),iterations,&remaining);
-      else {
+      const int requested_iterations=iterations;
+      ++result.diagnostics.angular_norm_rounds;
+      const auto qp_begin=Clock::now();
+      if(q.warm) {
+        status=q.qp->hotstart(q.H.data(),q.g.data(),q.C.data(),q.lower.data(),q.upper.data(),
+                              q.lower_c.data(),q.upper_c.data(),iterations,&remaining);
+        if(status!=qpOASES::SUCCESSFUL_RETURN && status!=qpOASES::RET_MAX_NWSR_REACHED) {
+          // A warm start from the previous request's active set is an
+          // optimisation, never an authority: retry cold inside the same budget.
+          result.diagnostics.working_set_recalculations+=iterations;
+          remaining=solve_budget-elapsed();
+          if(remaining<=0)return finish(PreviewSolveStatus::TimeBudgetExceeded);
+          iterations=requested_iterations;
+          q.qp->reset();
+          status=q.qp->init(q.H.data(),q.g.data(),q.C.data(),q.lower.data(),q.upper.data(),
+                           q.lower_c.data(),q.upper_c.data(),iterations,&remaining);
+        }
+      } else {
         q.qp->reset();
         status=q.qp->init(q.H.data(),q.g.data(),q.C.data(),q.lower.data(),q.upper.data(),
                          q.lower_c.data(),q.upper_c.data(),iterations,&remaining);
       }
       q.C.swap(q.previous_C); // keep the old shallow A view intact during hotstart
+      result.diagnostics.angular_norm_qp_time_sec+=std::chrono::duration<double>(Clock::now()-qp_begin).count();
       result.diagnostics.working_set_recalculations+=iterations;
       q.warm=status==qpOASES::SUCCESSFUL_RETURN;
       if(elapsed()>solve_budget)return finish(PreviewSolveStatus::TimeBudgetExceeded);

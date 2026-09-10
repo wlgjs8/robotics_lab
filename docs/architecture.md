@@ -429,6 +429,34 @@ and held/latched if it would put either TCP below the plane.
 
 Absolute joint-space target. This is a joint-space point-to-point command.
 
+#### `joint_target_profile: init_motion` — arm ownership
+
+The init_motion profile hands the move to the collision-free planner + sequencer
+(`safety.init_motion_planner`). Ownership is **per arm**, and each arm's request runs
+independently of what the other arm is doing:
+
+- A **single-arm** request drives its own exec. It never cancels, pauses or replans an
+  init already in flight on the OTHER arm — the two execs run concurrently, each
+  rewriting only its own arm's command.
+- A **both-arm** request drives ONE exec for both arms, so the two paths are planned
+  together in the combined 12-DOF configuration space. That combined plan is the only
+  thing that keeps the two arms from colliding IN TIME; two independent single-arm plans
+  each freeze the peer at its pose at plan time and rely on the reactive 500 Hz
+  `CollisionMonitor` barrier for arm-vs-arm.
+- The two are told apart by the per-arm `init_motion_request_id`: equal ids (or an
+  untagged client, id 0) mean one both-arm press; different ids mean two presses that
+  merely share a packet. `policy_runner` owns a single command channel, so while two
+  single-arm latches are up it MUST carry both arms' profile in the same packet —
+  without the id rule that packet was read as a both-arm request and the arm already
+  moving braked and replanned.
+- A single-arm request that takes an arm away from an in-flight both-arm exec **narrows**
+  that exec instead of dropping it: it keeps driving the arm it still owns to the init
+  pose, with the released column of its waypoint list pinned constant.
+
+A packet that carries NO init_motion profile on either arm is an explicit cancel and
+resets every non-idle exec (the arm holds where it is); the deadman's synthetic Hold is
+not — a committed move drives to completion across command staleness.
+
 ### `TcpPoseTarget`
 
 Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. Final TCP pose is targeted, but the intermediate TCP path is not guaranteed to be linear. Real mode is open through the real-mode gates plus `cartesian_control.allow_in_real: true`, and has been validated on the dual-arm physical Cartesian circle.

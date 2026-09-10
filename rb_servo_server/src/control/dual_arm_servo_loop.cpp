@@ -1,4 +1,5 @@
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
+#include "rb_servo/control/joint_stationarity.hpp"
 #include "rb_servo/control/hold_fold.hpp"
 #include "rb_servo/control/command_tracking_window.hpp"
 #include "rb_servo/kinematics/dual_arm_kinematics.hpp"
@@ -5243,11 +5244,33 @@ void DualArmServoLoop::coordinatePreviewRecovery(ArmCommand (&commands)[2],
                 math::rotationFromPose(raw).transpose()*math::rotationFromPose(accepted)).norm();
             preview_recovery_.abandoned_backlog_sec=std::max(preview_recovery_.abandoned_backlog_sec,e->telemetry().backlog_sec);
             const auto& previous_previous=i==0?left_prevprev_sent_q_deg_:right_prevprev_sent_q_deg_;
-            const bool ready=e->initialized()?e->requestRecovery(cause):
-                e->seedStationaryRecovery(last_loop_start_ns_*1e-9,
-                    nominalOfEmitted(arm,kinematics_->computeTcpStand(arm,ctx.prev_sent_q_deg,ctx.mount)),
-                    ctx.prev_sent_q_deg==previous_previous,cause);
-            if(!ready)recordChunkFollowerFaultRequest(arm,"preview recovery cannot certify a stop");
+            // Stationary within a numerical tolerance, not bit-identical: an interrupted
+            // session leaves the hold ramp creeping below logged precision and the exact
+            // comparison faulted every same-process restart (see joint_stationarity.hpp).
+            const double dq_sent_deg=control::maxAbsJointDeltaDeg(ctx.prev_sent_q_deg,previous_previous);
+            const bool stationary=control::sentJointsStationary(ctx.prev_sent_q_deg,previous_previous);
+            const double seed_now=last_loop_start_ns_*1e-9;
+            const Pose6D seed_nominal=nominalOfEmitted(arm,kinematics_->computeTcpStand(arm,ctx.prev_sent_q_deg,ctx.mount));
+            const bool was_initialized=e->initialized();
+            const bool ready=was_initialized?e->requestRecovery(cause):
+                e->seedStationaryRecovery(seed_now,seed_nominal,stationary,cause);
+            if(!ready) {
+                // Name the refusing precondition and the measured creep so the next
+                // occurrence is a diagnosis, not a guess.
+                std::string why;
+                if(was_initialized) {
+                    why=std::string("requestRecovery refused (executor status=")+e->telemetry().status+")";
+                } else {
+                    const char* refusal=e->stationarySeedRefusal(seed_now,seed_nominal,stationary,cause);
+                    why=refusal?std::string("seed refused: ")+refusal
+                               :std::string("brake from stationary seed failed (executor status=")+e->telemetry().status+")";
+                }
+                std::ostringstream reason;
+                reason<<"preview recovery cannot certify a stop: "<<why
+                      <<", max|dq_sent|="<<std::scientific<<dq_sent_deg<<" deg (tolerance "
+                      <<control::kSentJointStationaryToleranceDeg<<")";
+                recordChunkFollowerFaultRequest(arm,reason.str());
+            }
         }
         preview_recovery_request_=PreviewRecoveryCause::None;
     }
@@ -5328,7 +5351,7 @@ void DualArmServoLoop::applyPreviewExecution(ArmId arm, ArmCommand& command,
     const Pose6D reference=nominalOfEmitted(arm,
         kinematics_->computeTcpStand(arm,ctx.prev_sent_q_deg,ctx.mount));
     const JointArray& previous_previous=i==0?left_prevprev_sent_q_deg_:right_prevprev_sent_q_deg_;
-    const bool stationary=ctx.prev_sent_q_deg==previous_previous;
+    const bool stationary=control::sentJointsStationary(ctx.prev_sent_q_deg,previous_previous);
     const auto& gate=i==0?left_force_gate_:right_force_gate_;
     // This additional output constraint belongs to a sustained contact episode.
     // The canonical follower keeps its existing tick gate, including approach
@@ -11634,6 +11657,38 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     const auto non_idle = [](const InitMotionExec& e) {
         return e.status != InitMotionStatus::Idle;
     };
+    // Hand ONE arm of a multi-arm exec over to another exec. The exec keeps driving
+    // whatever it still owns (its planned column for that arm is untouched); it resets
+    // only when nothing is left. See flattenInitMotionWaypointColumn for why the released
+    // column has to be flattened rather than just marked inactive.
+    const auto release_init_motion_arm = [](InitMotionExec& e, bool release_left,
+                                            bool release_right) {
+        if (e.status == InitMotionStatus::Idle) return;
+        const bool takes_left = release_left && e.left_active;
+        const bool takes_right = release_right && e.right_active;
+        if (!takes_left && !takes_right) return;
+        if (takes_left) e.left_active = false;
+        if (takes_right) e.right_active = false;
+        if (!e.left_active && !e.right_active) {
+            e = InitMotionExec{};
+            return;
+        }
+        flattenInitMotionWaypointColumn(e.waypoints, e.index, takes_left, takes_right);
+        if (takes_left) e.brake_left = false;
+        if (takes_right) e.brake_right = false;
+        if (!e.brake_left && !e.brake_right) e.brake_pending = false;
+        // The peer arm's contribution to the progress metric is gone; restart the
+        // progress-aware stall timer from a clean slate so the narrowed move is not
+        // failed for a stall it never had.
+        e.best_dist_deg = std::numeric_limits<double>::infinity();
+        e.last_progress_ns = nowSteadyNs();
+        std::cerr << "[INFO] JointTarget init_motion: a single-arm request took over the "
+                  << (takes_left ? "LEFT" : "RIGHT")
+                  << " arm; the in-flight plan keeps driving the "
+                  << (e.left_active ? "LEFT" : "RIGHT")
+                  << " arm to the init pose (arm-vs-arm now guarded by the reactive "
+                     "barrier only)\n";
+    };
     // A plan that has begun (planning or streaming) is a committed go-to-init move.
     // The deadman synthesises a seq==0 Hold/Hold once the one-shot profile command
     // ages out of its freshness window. That is NOT an operator cancel: keep driving
@@ -11675,23 +11730,36 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         }
     }
 
+    // COMBINED (one both-arm request, planned together in the 12-DOF space) vs
+    // INDEPENDENT (two single-arm requests that only share a packet). See
+    // initMotionRequestIsCombined.
+    const bool combined_request = initMotionRequestIsCombined(
+        left_init, right_init,
+        command.left.init_motion_request_id, command.right.init_motion_request_id);
+
     if (is_init) {
         // Launching an init for one arm must NOT cancel an in-flight init on the OTHER,
         // disjoint arm: the left/right execs drive their own arm independently and each
         // rewrite_selected only writes its active arm's command, so they run concurrently.
-        // Reset the other exec ONLY when it OVERLAPS the arm(s) we are about to drive (a
-        // prior both-arm exec) — otherwise two execs would fight over the same arm.
-        if (left_init && right_init) {
-            // Both-arm init drives the LEFT exec for both arms; drop any separate right exec.
+        // Touch the other exec ONLY where it OVERLAPS the arm(s) we are about to drive
+        // (a prior both-arm exec) — otherwise two execs would fight over the same arm.
+        if (combined_request) {
+            // Both-arm request drives the LEFT exec for both arms; drop any separate
+            // right exec (the operator asked for one coordinated move, which outranks a
+            // single-arm move already in flight on that arm).
             if (non_idle(right_init_motion_exec_)) right_init_motion_exec_ = InitMotionExec{};
-        } else if (left_init) {
-            // Left-only: a right-ONLY exec keeps running; clear the right exec only if it
-            // also drives the LEFT arm (a both-arm exec) -> overlap.
-            if (right_init_motion_exec_.left_active) right_init_motion_exec_ = InitMotionExec{};
-        } else if (right_init) {
-            // Right-only: a left-ONLY exec keeps running; clear the left exec only if it
-            // also drives the RIGHT arm (a both-arm exec) -> overlap.
-            if (left_init_motion_exec_.right_active) left_init_motion_exec_ = InitMotionExec{};
+        } else {
+            // A single-arm request TAKES OVER its arm. If a combined exec owned that arm,
+            // narrow that exec to the arm it keeps instead of dropping it, so the peer
+            // still reaches the init pose rather than stopping half-way. Narrowing before
+            // the freshness test below is what keeps the peer from being seen as a new
+            // press (its request footprint now matches its own exec again).
+            if (left_init) {
+                release_init_motion_arm(right_init_motion_exec_, true, false);
+            }
+            if (right_init) {
+                release_init_motion_arm(left_init_motion_exec_, false, true);
+            }
         }
     }
 
@@ -12122,6 +12190,14 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             if (result.success && !result.waypoints.empty()) {
                 ex.waypoints = std::move(result.waypoints);
                 ex.index = 0;
+                // The plan may have been requested for BOTH arms and then narrowed while
+                // it was still on the worker (a single-arm request took one arm over).
+                // Pin every column this exec no longer drives; see
+                // flattenInitMotionWaypointColumn for why a varying released column
+                // corrupts the REMAINING arm's pursuit. No-op for a plan whose inactive
+                // column the planner already froze, and for a both-arm plan.
+                flattenInitMotionWaypointColumn(
+                    ex.waypoints, 0, !ex.left_active, !ex.right_active);
                 ex.escape_waypoints = result.escape_waypoints;
                 ex.status = InitMotionStatus::Executing;
                 ex.message = "executing";
@@ -12269,10 +12345,13 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     // (re)launches + advances ITS exec; any OTHER in-flight exec is CONTINUED. Crucially
     // the continuation is NOT gated on is_init: a fresh single-arm init for one arm must
     // not pause the OTHER arm's in-flight init while its command is fresh — both run
-    // concurrently. (Both-arm init drives the left exec for both arms; the right exec was
-    // reset above, so it is idle and not continued here.)
+    // concurrently. (A COMBINED both-arm request drives the left exec for both arms; the
+    // right exec was reset above, so it is idle and not continued here.)
+    // COMBINED -> the left exec drives both arms (one 12-DOF plan). INDEPENDENT -> each
+    // arm gets its own exec, so a fresh request for one arm never re-enters the other
+    // arm's committed sequence.
     const bool left_exec_requested = is_init && left_init;
-    const bool right_exec_requested = is_init && right_init && !left_init;
+    const bool right_exec_requested = is_init && right_init && !combined_request;
     // Freshness is a NEW OPERATOR REQUEST, not a new packet. A one-shot GUI command is
     // re-delivered from the command buffer with a CONSTANT seq, so seq alone used to be a
     // good proxy — but policy_runner's arm_init latch (ArmInitOverrideController::
@@ -12311,12 +12390,12 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             command.left.init_motion_request_id, command.right.init_motion_request_id);
     };
     const bool left_exec_fresh =
-        exec_is_fresh(left_init_motion_exec_, left_exec_requested, true, right_init);
+        exec_is_fresh(left_init_motion_exec_, left_exec_requested, true, combined_request);
     const bool right_exec_fresh =
         exec_is_fresh(right_init_motion_exec_, right_exec_requested, false, true);
     if (left_exec_requested) {
         process_exec(
-            left_init_motion_exec_, PlannerRequester::LeftInit, true, right_init,
+            left_init_motion_exec_, PlannerRequester::LeftInit, true, combined_request,
             left_exec_fresh);
     } else if (sequence_active(left_init_motion_exec_)) {
         process_exec(left_init_motion_exec_, PlannerRequester::LeftInit,
@@ -12378,6 +12457,38 @@ bool initMotionRequestIsFresh(
         }
     }
     return false;
+}
+
+bool initMotionRequestIsCombined(
+    bool left_init,
+    bool right_init,
+    uint64_t request_id_left,
+    uint64_t request_id_right) {
+    // Only a packet carrying BOTH profiles can be combined at all.
+    if (!left_init || !right_init) return false;
+    // Untagged client (rb_gui's one-shot): its per-arm packet puts the profile on ONE
+    // arm, so both profiles in one packet can only be the both-arm button. Keep the
+    // pre-existing combined behavior rather than inventing an independent split from
+    // information the packet does not carry.
+    if (request_id_left == 0 || request_id_right == 0) return true;
+    // Tagged client (policy_runner): one id per arm_init start, so equal ids are the
+    // same logical press and different ids are two presses that merely share a packet.
+    return request_id_left == request_id_right;
+}
+
+void flattenInitMotionWaypointColumn(
+    std::vector<std::pair<JointArray, JointArray>>& waypoints,
+    std::size_t index,
+    bool flatten_left,
+    bool flatten_right) {
+    if (waypoints.empty() || (!flatten_left && !flatten_right)) return;
+    const std::size_t at = std::min(index, waypoints.size() - 1);
+    const JointArray pin_left = waypoints[at].first;
+    const JointArray pin_right = waypoints[at].second;
+    for (auto& wp : waypoints) {
+        if (flatten_left) wp.first = pin_left;
+        if (flatten_right) wp.second = pin_right;
+    }
 }
 
 double sentJointSpeedDegS(

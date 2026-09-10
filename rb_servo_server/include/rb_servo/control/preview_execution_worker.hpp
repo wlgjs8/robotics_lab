@@ -75,6 +75,16 @@ struct PreviewExecutionRequest {
   // Nonzero cold derivatives are rejected, never clipped to zero.
   bool cold_start{false};
   PreviewMotionState cold_initial{};
+  // THE DISPATCHED STATE (2026-09-10). When the executor holds the active plan
+  // back (closing velocity clamped to the contact authority, replacing the old
+  // brake-resume), the predecessor's own sample is no longer what the arm was
+  // sent. dispatch_offset_m is the held-back displacement predicted at the splice
+  // (dispatched pose minus predecessor pose); contact_clamped_dispatch cuts the
+  // spliced closing velocity/acceleration to the knot-0 authority exactly as the
+  // executor clamps its output. Neither applies to a cold start or to a brake
+  // predecessor (a brake already starts from the dispatched state).
+  Eigen::Vector3d dispatch_offset_m{Eigen::Vector3d::Zero()};
+  bool contact_clamped_dispatch{false};
 };
 
 enum class PreviewExecutionWorkerStatus {
@@ -107,6 +117,9 @@ struct PreviewExecutionResult {
   bool solve_attempted{false};
   PreviewSolveDiagnostics diagnostics{};
   PreviewMotionState initial{};
+  // Echo of the request's dispatch_offset_m that `initial` includes; the executor
+  // keeps only the displacement refused after this prediction.
+  Eigen::Vector3d dispatch_offset_m{Eigen::Vector3d::Zero()};
   PreviewPolynomialTrajectory trajectory{};
   // Canonical forecast data only, never executable motion authority. Even a
   // rejected QP may expose this snapshot, under its original source/epoch/expiry.

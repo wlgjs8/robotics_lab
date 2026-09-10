@@ -171,11 +171,15 @@ operator stack uses GUI-enabled `opencv-python`; do not install
 
 ### InitMotion and tare completion
 
-The arm-init override assigns a per-arm `init_motion_request_id` for every new
-start/retry and reuses it while streaming that request. A matching Done latches
-motion completion and changes the override to Hold until the enabled F/T
-sensor is connected, its bias is valid, `tare_state` is `accepted`, and
-auto-tare/sample settling is over.
+The arm-init override assigns an `init_motion_request_id` for every new
+start/retry and reuses it while streaming that request. Arms selected by ONE
+press share that id; two separate presses get two ids. That is the wire signal
+the server uses to tell a both-arm request (both arms planned together in the
+combined 12-DOF space) apart from two single-arm requests that merely share a
+packet — see `initMotionRequestIsCombined` in `dual_arm_servo_loop.cpp`. A
+matching Done latches motion completion and changes the override to Hold until
+the enabled F/T sensor is connected, its bias is valid, `tare_state` is
+`accepted`, and auto-tare/sample settling is over.
 Missing telemetry remains pending once enabled F/T was observed. A positive
 `arm_init_override.ft_tare_wait_sec` is now a warning deadline: expiry displays
 `init tare blocked` and continues Hold; a subsequently accepted tare releases
@@ -204,6 +208,18 @@ that could cancel the externally committed move; the server retains motion
 ownership. It then re-anchors and requests fresh policy data. Console
 `external_start` and state `external_init_active` identify this path. Initial
 rollout startup without an observed init still requires accepted tare.
+
+"Emits no packet" means no POLICY packet. An InitMotion the runner itself was
+asked to start is still emitted while an external init is in flight, because a
+packet that carries an `init_motion` profile is not a cancel: the server sees
+`is_init`, continues the peer's exec on its own branch, and overwrites the peer
+arm's payload with that exec's pursuit waypoint. Suppressing it queued the
+second arm behind the first — measured 2026-09-10
+(`logs/servo_log_20260910_111949.csv`): the right arm's profile did not reach
+the server until 6.832 s, 22 ms after the LEFT arm's auto-tare was accepted and
+released the external latch, 1.02 s after that arm had already parked. The peer
+arm always rides as `Hold` in that packet: never the runner's own init profile
+(it does not own that request id) and never policy motion.
 `[arm_init_event]` console JSON records request IDs, start/status changes,
 tare wait/timeout/ready, resume, cancel and failure. The `arm_init` state block
 also exposes each request ID, elapsed tare wait, and timeout flag.
@@ -471,10 +487,16 @@ FLOW_INFER_DIAGNOSTIC_IMAGE_MAX_BUNDLES=120 \
 ./tools/flow_infer_real_policy.sh ...
 ```
 
-`auto` writes under `logs/flow_obs_<timestamp>`; an explicit directory may be
-used instead. Writing runs on a bounded background queue and reports queue,
-capacity, and write-error counters, so storage latency never blocks inference.
-Use `FLOW_INFER_DIAGNOSTIC_IMAGES=off` (the default) for normal runs.
+Every run gets its OWN directory, whichever form is used: `auto` writes under
+`logs/flow_obs_<timestamp>`, and an explicit path is treated as the parent, with
+the run landing in `<path>/run_<timestamp>` (`_2`, `_3`, ... if two runs start in
+the same second). Snapshot filenames carry only `bundle_seq`, and that counter
+restarts whenever camera_server restarts, so a directory shared by two runs would
+silently overwrite the earlier run's frames. The resolved path is printed at
+startup as `[flow-infer] rgb snapshots -> ...`. Writing runs on a bounded
+background queue and reports queue, capacity, and write-error counters, so
+storage latency never blocks inference. Use `FLOW_INFER_DIAGNOSTIC_IMAGES=off`
+(the default) for normal runs.
 
 Per-policy-step z/force/gripper diagnosis is also opt-in. The logger uses a
 bounded background writer; a file or queue failure disables only this telemetry

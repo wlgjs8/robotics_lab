@@ -1739,7 +1739,9 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             {"accepted_rotation_error_rad",p.accepted_rotation_error_rad},
             {"solve_time_sec",p.solve_time_sec},{"submitted",p.submitted},
             {"accepted",p.accepted},{"rejected",p.rejected},{"expired",p.expired},
-            {"contact_guard_count",p.contact_guard_count}};
+            {"contact_guard_count",p.contact_guard_count},
+            {"contact_clamp_count",p.contact_clamp_count},{"contact_clamp_active",p.contact_clamp_active},
+            {"contact_clamp_shift_m",p.contact_clamp_shift_m}};
         // This fixed wire summary retains execution/freshness authority and
         // current diagnostic reasons. Full result identities, reason arrays,
         // fold transforms and certificate details remain in the servo CSV.
