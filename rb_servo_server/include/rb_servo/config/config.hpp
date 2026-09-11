@@ -2144,16 +2144,19 @@ struct PreviewExecutionConfig {
     double max_result_age_sec = 0.0;
     double worker_poll_period_sec = 0.0;
     int max_source_rows = 0;
-    // THE PLAN LEASH: the dispatched pose may lead the source's own output by at
-    // most this much. Inside its tracking budget the plan is otherwise free to sit
-    // tens of mm away and close the gap at the tracker's full authority; measured
-    // 2026-09-10 it ran 37 mm out along a hand push and came back at 238 mm/s, and
-    // 25 mm off the floor at 2.5-4 Hz. The bound is applied as a PROJECTION of the
-    // dispatched position onto the ball of this radius around the source: no
-    // accumulator, nothing echoed to the worker, nothing to snap back. While the
-    // arm is held the command stands one leash length ahead and is carried along
-    // by the arm. Size it from the measured normal lead envelope (stack_real.yaml).
-    double max_plan_lead_m = 0.0;
+    // THE PLAN LEASH ON THE PLAN CLOCK. How far the dispatched pose may lead the
+    // source's own output before the CHUNK FOLLOWER'S CLOCK is slowed (the same
+    // ramp as the divergence leash: 1.0 at start, min_gate at full; see
+    // control::planLeashGate). Slowing the clock slows the reference and the plan
+    // together, so it cannot step the command - unlike the position clamp tried and
+    // removed on 2026-09-10, which decelerated the command at 17.7 m/s2 on entry and
+    // stepped it back up on exit. Size `start` ABOVE the tracker's designed
+    // anticipation (the reference is the follower rolled forward, so the plan stands
+    // ahead of it before every acceleration; measured max 20 mm) and `full` at the
+    // runaway scale (25-45 mm). min_gate > 0 always: the clock slows, never stops.
+    double plan_lead_leash_start_m = 0.0;
+    double plan_lead_leash_full_m = 0.0;
+    double plan_lead_leash_min_gate = 0.0;
     // Dispatch acceptance: FK of the sent joints may differ from the planned
     // Cartesian sample by at most this before the executor faults
     // (accepted_deviation). The IK's own acceptance envelope is always included;

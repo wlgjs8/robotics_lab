@@ -282,7 +282,7 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
     validateAllowedKeys(node, {"enable", "tracker", "cursor", "recovery", "replan_period_sec",
         "splice_lead_sec", "max_result_age_sec", "worker_poll_period_sec", "max_source_rows",
         "dispatch_acceptance_position_tolerance_m", "dispatch_acceptance_rotation_tolerance_rad",
-        "max_plan_lead_m"}, path);
+        "plan_lead_leash_start_m", "plan_lead_leash_full_m", "plan_lead_leash_min_gate"}, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
     const auto require = [](const YAML::Node& section, const char* key, const std::string& at) {
         if (!has(section, key)) fail(at + "." + key + " is required when preview_execution.enable=true", section);
@@ -291,7 +291,8 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
         for (const char* key : {"tracker", "cursor", "replan_period_sec", "splice_lead_sec",
                                "max_result_age_sec", "worker_poll_period_sec", "max_source_rows",
                                "dispatch_acceptance_position_tolerance_m",
-                               "dispatch_acceptance_rotation_tolerance_rad", "max_plan_lead_m"})
+                               "dispatch_acceptance_rotation_tolerance_rad", "plan_lead_leash_start_m",
+                               "plan_lead_leash_full_m", "plan_lead_leash_min_gate"})
             require(node, key, path);
     }
     for (const auto& field : std::vector<std::pair<const char*, double*>>{
@@ -300,7 +301,9 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
              {"worker_poll_period_sec", &out->worker_poll_period_sec},
              {"dispatch_acceptance_position_tolerance_m", &out->dispatch_acceptance_position_tolerance_m},
              {"dispatch_acceptance_rotation_tolerance_rad", &out->dispatch_acceptance_rotation_tolerance_rad},
-             {"max_plan_lead_m", &out->max_plan_lead_m}}) {
+             {"plan_lead_leash_start_m", &out->plan_lead_leash_start_m},
+             {"plan_lead_leash_full_m", &out->plan_lead_leash_full_m},
+             {"plan_lead_leash_min_gate", &out->plan_lead_leash_min_gate}}) {
         if (has(node, field.first)) *field.second = asDouble(node[field.first], path + "." + field.first);
     }
     if (has(node, "max_source_rows")) out->max_source_rows = asInt(node["max_source_rows"], path + ".max_source_rows");
@@ -2801,7 +2804,14 @@ void validateConfig(const DualArmConfig& cfg) {
             positive(p.splice_lead_sec, "splice_lead_sec");
             positive(p.max_result_age_sec, "max_result_age_sec");
             positive(p.worker_poll_period_sec, "worker_poll_period_sec");
-            positive(p.max_plan_lead_m, "max_plan_lead_m");
+            positive(p.plan_lead_leash_start_m, "plan_lead_leash_start_m");
+            positive(p.plan_lead_leash_full_m, "plan_lead_leash_full_m");
+            positive(p.plan_lead_leash_min_gate, "plan_lead_leash_min_gate");
+            if (p.plan_lead_leash_full_m <= p.plan_lead_leash_start_m)
+                throw std::runtime_error(at + ".plan_lead_leash_full_m must be > plan_lead_leash_start_m - "
+                                              "the leash is a ramp, not a step");
+            if (p.plan_lead_leash_min_gate > 1.0)
+                throw std::runtime_error(at + ".plan_lead_leash_min_gate must be <= 1");
             positive(p.dispatch_acceptance_position_tolerance_m, "dispatch_acceptance_position_tolerance_m");
             positive(p.dispatch_acceptance_rotation_tolerance_rad, "dispatch_acceptance_rotation_tolerance_rad");
             positive(t.planning_dt_sec, "tracker.planning_dt_sec");

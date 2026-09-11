@@ -160,9 +160,17 @@ Two invariants the hardware taught, both enforced by the loader:
   own output (it used to run 37 mm away and snap back). Both were corrected the same
   evening: the hold-back's contact DIRECTION now needs a release dwell
   (`stream_release_dwell_sec`, else a chattering push disarmed it ~30 times a second),
-  and the leash is a PROJECTION at 20 mm with no bookkeeping (booking each refusal
-  double-counted against a successor already spliced from the dispatched state and
-  sawtoothed the command at the 100 Hz replan rate). A designed contact force
+  and the leash moved OFF THE POSE AND ONTO THE PLAN CLOCK. Two position clamps were
+  built and removed on 2026-09-10 — an accumulating one that sawtoothed the command at
+  the 100 Hz replan rate, then a stateless projection that had no velocity continuity
+  (-17.7 m/s² entering, +9.6 m/s² leaving, and it held a legitimate motion off for
+  380 ms). A clamp also cannot tell a runaway from the tracker's designed anticipation:
+  the reference is the follower rolled 240 ms forward, so the lead is LARGEST when the
+  source is slow (measured max 20 mm at 0-50 mm/s vs 7 mm at 250-350 mm/s), the same
+  scale as the 25-45 mm runaways. The lead is now published
+  (`*_preview_execution_plan_lead_m`) and ramps the follower's knot clock down
+  (`preview_execution.plan_lead_leash_*`, 25 → 50 mm → gate 0.25), which slows the
+  reference and the plan together and can never step the command. A designed contact force
   still needs `ref_force` (CM 0039) — its equilibrium `d = (F - F_ref)/k` is
   offset-free at `F_ref` by construction, and with `k = 0` it does not change the
   delay margin, so that is the shape to try next.

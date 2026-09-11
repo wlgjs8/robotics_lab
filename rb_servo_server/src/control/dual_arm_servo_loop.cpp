@@ -6464,6 +6464,32 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         leash_gate = control::planLeashGate(
             abc.follower_divergence_pos_m, abc.follower_divergence_ang_rad, leash);
     }
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    // THE PREVIEW LEASH READS THE EXECUTOR'S LEAD (2026-09-10 pm, operator decision).
+    // Under preview execution the divergence above is the wrong signal (the executor
+    // sits between this plan and the robot), so the leash reads how far the DISPATCHED
+    // pose leads this follower's own output (last tick's - the executor runs after this
+    // stage - which is 2 ms of a quantity that moves in tens of ms), and it acts on the
+    // CLOCK. The preview reference is this follower rolled forward BY A COPY that carries
+    // the same gate, so a slowed clock slows the reference and the plan with it. Slowing the
+    // clock slows the reference and, through it, the plan - the command is never
+    // stepped. The position clamp that did step it was removed the same evening
+    // (live_preview_execution.cpp). The ramp starts above the tracker's designed
+    // anticipation, so ordinary motion never touches it.
+    if (rf.plan_leash_enable && rf.preview_execution.enable) {
+        if (const auto* executor = preview_executor_[arm_id == ArmId::Left ? 0 : 1]) {
+            control::PlanLeashParams leash;
+            leash.start_m = rf.preview_execution.plan_lead_leash_start_m;
+            leash.full_m = rf.preview_execution.plan_lead_leash_full_m;
+            // Position only. The angular ramp is left degenerate (start == full == 0),
+            // which planLeashGate evaluates to 1.0 for the 0 passed here: the plan's
+            // rotation rides the same clock, so slowing on the position lead slows it.
+            leash.min_gate = rf.preview_execution.plan_lead_leash_min_gate;
+            leash_gate = std::min(leash_gate,
+                control::planLeashGate(executor->telemetry().plan_lead_m, 0.0, leash));
+        }
+    }
+#endif
     abc.follower_leash_gate = leash_gate;
     // THE PLAN CLOCK WAITS FOR THE EXECUTOR (2026-09-10 pm, operator decision).
     // While the preview executor is braking (an expired plan, a contact stop) or

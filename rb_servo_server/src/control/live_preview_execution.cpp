@@ -188,7 +188,7 @@ bool LivePreviewExecution::beginBrake(const char* reason,bool contact_only) {
   // A brake starts from the accepted (dispatched, already held-back) sample:
   // nothing is held back against it.
   contact_clamp_shift_.setZero();contact_clamp_active_=false;telemetry_.contact_clamp_shift_m=0;
-  telemetry_.plan_leash_shift_m=0;
+  telemetry_.plan_lead_m=0;
   contact_clamp_ceiling_m_s_=0;contact_clamp_decel_m_s2_=0;
   PreviewMotionState initial;
   if(accepted_epoch_) {
@@ -332,7 +332,7 @@ bool LivePreviewExecution::stagedCurrent(const CartesianChunkFollower& raw) cons
 LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFollower& raw,
     const Pose6D& accepted_nominal,bool stationary,double contact_gate,
     const Eigen::Vector3d& contact_normal) {
-  telemetry_.active=false;telemetry_.plan_leash_shift_m=0.0;
+  telemetry_.active=false;telemetry_.plan_lead_m=0.0;
   LivePreviewOutput out;out.pose=accepted_nominal;
   if(faulted_) {out.fault=true;out.reason=telemetry_.status;return out;}
   if(recovering()) return recoveryOutput(now);
@@ -471,40 +471,22 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
         } else clampContact(step_dt,raw_sample,contact_normal);
         if(!contact_clamp_shift_.isZero(0))
           shiftPose(sample_.pose,-contact_clamp_shift_,Eigen::Quaterniond::Identity());
-        // THE PLAN LEASH (2026-09-10 pm, see PreviewExecutionConfig::max_plan_lead_m).
-        // Whatever produces it, an excursion away from the source's own output is not
-        // dispatched: the dispatched position is projected onto the ball of radius
-        // max_plan_lead_m around the source. A BRAKE IS NEVER LEASHED - a finite stop
-        // must land where its own dynamics put it - which is why this sits inside the
-        // active-plan branch.
-        //
-        // STATELESS BY CONSTRUCTION (2026-09-10 pm, second revision). The first version
-        // booked each tick's refusal into the held-back shift, i.e. into the next
-        // request's dispatch_offset_m. That double-counts: the successor is spliced FROM
-        // the dispatched state, so every refusal taken against the PREDECESSOR is already
-        // inside it, and re-applying the residual stepped the command back at the replan
-        // rate. Measured (servo_log_20260910_183004, right arm 46.0-47.1 s): the held-back
-        // shift sawtoothed 0.0 -> 7.8 -> 0.7 -> 2.0 -> 3.6 -> 1.5 -> 0.4 -> 4.2 -> 5.8 mm
-        // at 100 Hz, the dispatch acceptance error climbed 0.001 -> 1.94 mm and the arm
-        // shook until accepted_deviation latched. A projection has no memory: it is
-        // continuous in the plan and in the source, so while the arm is held the command
-        // simply stands one leash-length ahead and is carried along by the source. That
-        // IS the intended "cannot go there, keeps trying".
-        //
-        // The bound is the measured envelope, not the typical lead. Same run, right arm,
-        // 45 s of normal policy motion (n=22491, uncensored): |lead| p50 1.6 / p99 10.3 /
-        // max 13.6 mm, flat in source speed (max 13.6 at 5-20 mm/s, 10.5 at 200-400 mm/s),
-        // so no speed-proportional allowance is warranted. The runaways under a hand push
-        // were 25-45 mm. 20 mm sits 1.5x over the normal maximum and well under a runaway.
-        const double max_lead=config_.preview_execution.max_plan_lead_m;
-        const Eigen::Vector3d lead=xyz(sample_.pose)-xyz(raw_sample.pose);
-        const double distance=lead.norm();
-        if(distance>max_lead) {
-          const Eigen::Vector3d refused=lead*(1.0-max_lead/distance);
-          shiftPose(sample_.pose,-refused,Eigen::Quaterniond::Identity());
-          ++telemetry_.plan_leash_count;
-          telemetry_.plan_leash_shift_m=refused.norm();
-        }
+        // HOW FAR THE PLAN LEADS ITS SOURCE - MEASURED HERE, BOUNDED ELSEWHERE
+        // (2026-09-10 pm, third revision). This executor does NOT clamp the lead. A
+        // position clamp was tried twice and removed: it has no velocity continuity,
+        // so entering it decelerated the dispatched command at -17.7 m/s2 and leaving
+        // it stepped back up to +9.6 m/s2 (servo_log_20260910_190550, right arm
+        // 153.02 and 153.40 s, q_sent jerk 2.8 M deg/s^3 = 6x the same run's quiet
+        // windows). Worse, it cannot tell a runaway from the tracker's DESIGNED
+        // anticipation: the reference is this follower rolled 240 ms forward, so the
+        // plan legitimately stands ahead of the follower's current output whenever the
+        // source is about to accelerate. Measured in that run, the lead is LARGEST at
+        // low source speed (max 20.0 mm at 0-50 mm/s, 7.3 mm at 250-350 mm/s) - it is
+        // anticipation, not lag - and the runaways it was meant to catch are 25-45 mm,
+        // the same order. The lead is published instead, and the servo loop leashes the
+        // PLAN CLOCK with it (control::planLeashGate), which slows the reference and the
+        // plan together and cannot step the command.
+        telemetry_.plan_lead_m=(xyz(sample_.pose)-xyz(raw_sample.pose)).norm();
       }
     }
   }
@@ -749,7 +731,6 @@ const PreviewExecutionTelemetry& LivePreviewExecution::telemetry() const {
   auto& t=telemetry_;const auto& d=admission_diagnostics_;const auto w=worker_.diagnostics();
   t.gate_revision=gate_revision_;t.gauge_revision=gauge_revision_;t.request_id=request_id_;
   t.contact_clamp_active=contact_clamp_active_;t.contact_clamp_shift_m=contact_clamp_shift_.norm();
-  // plan_leash_count is accumulated in step(); nothing to refresh here.
   for(std::size_t i=0;i<3;++i)t.gauge_translation_m[i]=fold_translation_[i];
   for(std::size_t i=0;i<4;++i)t.gauge_quaternion_xyzw[i]=fold_rotation_.coeffs()[i];
   t.parent_plan_id=brake_trajectory_.valid?brake_plan_id_:(active_.accepted()?active_.identity.request_id:0);

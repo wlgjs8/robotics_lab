@@ -3216,29 +3216,32 @@ cartesian_control:
           # far below any safety-clamp magnitude (mm) and the 35 mm actual-lead latch.
           dispatch_acceptance_position_tolerance_m: 0.002
           dispatch_acceptance_rotation_tolerance_rad: 0.005
-          # THE PLAN LEASH (2026-09-10 pm, jhkim; re-sized the same evening). How far the
-          # dispatched pose may lead this follower's own output. Inside its tracking
-          # budget (20 mm tolerance + 60 mm slack) the plan is otherwise free to sit tens
-          # of mm away: measured 37 mm out along a hand push with a 238 mm/s return
-          # (servo_log_20260910_175117 right arm 76.1-77.1 s) and 25 mm off the floor at
-          # 2.5-4 Hz.
+          # THE PLAN LEASH ON THE PLAN CLOCK (2026-09-10 pm, jhkim). How far the
+          # dispatched pose may lead this follower's own output before the follower's
+          # KNOT CLOCK is slowed (ramp: 1.0 at start, min_gate at full). It replaces a
+          # position clamp on the same quantity, which was tried twice and removed:
+          # a clamp has no velocity continuity, so entering it decelerated the sent
+          # command at -17.7 m/s^2 and leaving it stepped it back up at +9.6 m/s^2
+          # (servo_log_20260910_190550, right arm 153.02 / 153.40 s; q_sent jerk
+          # 2.8 M deg/s^3 = 6x that run's quiet windows), and it held a legitimate
+          # motion off for 380 ms before releasing it at 127 mm/s.
           #
-          # 15 mm was too tight and was sized from the wrong statistic. Uncensored normal
-          # policy motion in servo_log_20260910_183004 (right arm, 45 s, n=22491) leads by
-          # p50 1.6 / p99 10.3 / max 13.6 mm, and the lead does NOT grow with speed
-          # (max 13.6 mm at 5-20 mm/s, 10.5 mm at 200-400 mm/s), so no speed-proportional
-          # allowance is warranted - only headroom. At 15 mm the leash sat 1.4 mm above the
-          # normal maximum and pinned for the whole 1.1 s of a hand push. 20 mm is 1.5x the
-          # normal maximum and still less than any observed runaway (25-45 mm).
+          # WHY start IS 25 mm AND NOT 15-20. The lead is mostly the tracker's DESIGNED
+          # anticipation: its reference is this follower rolled 240 ms forward, so the
+          # plan stands ahead of the follower's current output before every acceleration.
+          # Measured in that run (both arms, 227 s), the lead is LARGEST when the source
+          # is SLOW - max 20.0 mm at 0-50 mm/s against 7.3 mm at 250-350 mm/s, p99 7-11 mm
+          # at every speed - which is the opposite of a lag. 15 mm and 20 mm both cut into
+          # it. The runaways this is meant to bleed off are 25-45 mm (2026-09-10 17:51 and
+          # the floor bounce), so the ramp starts just past the anticipation envelope and
+          # is fully engaged at the runaway scale.
           #
-          # The leash is a PROJECTION with no memory: the refusal is not booked and not
-          # echoed to the worker (booking it double-counted against a successor that is
-          # already spliced from the dispatched state, and sawtoothed the command at the
-          # 100 Hz replan rate). While the arm is held the command simply stands one leash
-          # length ahead and is carried along by the arm. Watch
-          # *_preview_execution_plan_leash_count (nonzero = the plan tried to run) and
-          # *_preview_execution_plan_leash_shift_m (this tick's refusal).
-          max_plan_lead_m: 0.020
+          # min_gate 0.25: the clock SLOWS, it never stops. A stopped clock is the
+          # expiry-brake cycle. Watch *_follower_leash_gate (1.0 = untouched) and
+          # *_preview_execution_plan_lead_m.
+          plan_lead_leash_start_m: 0.025
+          plan_lead_leash_full_m: 0.050
+          plan_lead_leash_min_gate: 0.25
           # Offline candidate jerk_2000_r10.json. Six physical ceilings are
           # inherited from this follower, with angular norm semantics in the QP.
           tracker:

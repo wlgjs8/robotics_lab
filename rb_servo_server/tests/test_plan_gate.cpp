@@ -59,6 +59,19 @@ static void testPlanLeash() {
     prev = g;
   }
   check(mono, "monotone non-increasing in divergence");
+
+  // The PREVIEW leash rides the same ramp but reads the executor's LEAD and leaves the
+  // orientation ramp degenerate (start == full == 0), because the plan's rotation rides
+  // the same clock. A degenerate ramp fed 0 must not pull the gate down.
+  PlanLeashParams preview;   // stack_real.yaml preview_execution values
+  preview.start_m = 0.025; preview.full_m = 0.050; preview.min_gate = 0.25;
+  check(planLeashGate(0.020, 0.0, preview) == 1.0,
+        "preview: the tracker's measured anticipation envelope (20 mm) is untouched");
+  check(planLeashGate(0.025, 0.0, preview) == 1.0, "preview: at start -> still 1.0");
+  check(std::fabs(planLeashGate(0.0375, 0.0, preview) - 0.5) < 1e-9, "preview: halfway -> 0.5");
+  check(std::fabs(planLeashGate(0.050, 0.0, preview) - 0.25) < 1e-9, "preview: at full -> min_gate");
+  check(std::fabs(planLeashGate(0.200, 0.0, preview) - 0.25) < 1e-9,
+        "preview: a runaway slows the clock to min_gate, never stops it");
   PlanLeashParams degenerate = p;
   degenerate.full_m = degenerate.start_m;
   check(planLeashGate(0.011, 0.0, degenerate) == 0.25 && planLeashGate(0.009, 0.0, degenerate) == 1.0,
