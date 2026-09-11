@@ -170,10 +170,37 @@ Two invariants the hardware taught, both enforced by the loader:
   scale as the 25-45 mm runaways. The lead is now published
   (`*_preview_execution_plan_lead_m`) and ramps the follower's knot clock down
   (`preview_execution.plan_lead_leash_*`, 25 → 50 mm → gate 0.25), which slows the
-  reference and the plan together and can never step the command. A designed contact force
-  still needs `ref_force` (CM 0039) — its equilibrium `d = (F - F_ref)/k` is
-  offset-free at `F_ref` by construction, and with `k = 0` it does not change the
-  delay margin, so that is the shape to try next.
+  reference and the plan together and can never step the command. **2026-09-11 — THE CONTACT FORCE IS DECLARED, IN TWO NUMBERS.** The gate was CM's
+  pre-0049 shape: a knee-less smoothstep reaching ZERO at `max_force_n`. That bounds the
+  force and converges to 0 N, because the law keeps yielding (`F/b`) exactly where the
+  gate has stopped the plan — measured by hand on the floor
+  (`servo_log_20260911_123239`): 28 N of reaction, then 6.3 mm of retreat and a rest at
+  0.1-1.0 N, with no spring anywhere (`fc_dev_norm_m` ≤ 0.18 mm at 50 N, because the fold
+  books it). A pure damper's only equilibrium IS `F = 0`. Replaced by CM 0049's curve,
+  adopted identically: `g(F) = (v_cross/v_s)^((F/peak_force_n)^q)`, `q = 2` compiled in,
+  `v_cross = (peak_force_n − rest_force_n)/b`, `b` DERIVED from the pair (raise-only,
+  logged at load), and `max_force_n` / `max_torque_nm` / the whole sustained-contact
+  stream channel refused as deleted keys. At `peak_force_n` the curve returns `v_cross`
+  whatever the stream speed is, and that point is on the law's own yield line, so the two
+  cross AT the declaration: verified closed-loop at the measured 4.4 N/mm with 18 ms of
+  delay, 12.00 N at 30 / 60 / 150 mm/s, 0.00 N p-p.
+  `rest_force_n` IS OURS, NOT CM'S, and it is the second half: CM runs rest = 0, which
+  pins the force only while the plan advances faster than `v_cross` — at `v_s → 0` (a hand
+  press, or a policy's own press-and-hold) their equilibrium is `F = 0` again. A ONE-SIDED
+  rest force (`mode: force` on the declared press row) makes `|F| ≤ rest_force_n` a
+  continuum of equilibria: the axis does not move there, so free space can never be sought
+  (the walk CM has to bound with a fence) and a contact RESTS at the declaration. The
+  PRESS AXIS IS DECLARED, not inferred — the law's single `mode: force` translation row in
+  the TOOL triad (re-aimed every tick), with only its SIGN taken from the measurement.
+  That deleted the arm/release Schmitt, the release dwell, the 2 Hz slow-vector direction
+  and the complete hold-back with it: an axis cannot rotate, and the leak a proportional
+  fade used to be blamed for IS the equilibrium now. What this does NOT fix is the impact
+  peak (`v·sqrt(k_env·m)`, 39.5 N at a 115 mm/s approach): 10 N is the steady state, not
+  the transient. ONE-SIDED FORCE AXES ARE FOLDABLE, and they must be: the first hardware
+  run declined the fold on the declared press row (`pureDamperTriad` excluded FORCE mode,
+  an argument written for the two-sided setpoint's free-space walk), so a hand push
+  accumulated its whole yield in the overlay and pinned the 40 mm fence — the arm went
+  rigid there (`servo_log_20260911_133829`: dev 40.0 mm, `bounded` for 3606 ticks).
   Since the evening of 2026-09-03 rotation is RIGID on both laws and the hold law
   carries a hand-guide ENGAGEMENT LATCH (`hold_engage_force_n` 5 / `hold_release_force_n`
   2, judged on the physical pre-deadzone |F|; `control::HoldEngageLatch`), with the

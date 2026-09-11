@@ -70,10 +70,28 @@ public:
     const math::Matrix3& workspaceFrame() const { return r_ws_; }
 
     // RT: one tick of the virtual dynamics, driven by the STAND-frame wrench
-    // referenced at the TCP. `gate` (0..1) throttles the FORCE-mode walk only — a
-    // gated axis stops WALKING, it does not stop yielding.
+    // referenced at the TCP. TWO WRENCHES, deliberately:
+    //   * `force_stand` / `torque_stand` are DEADZONED - what a COMPLIANCE axis
+    //     integrates, because the deadzone is what keeps sensor noise out of a bare
+    //     integrator.
+    //   * `force_stand_physical` / `torque_stand_physical` are the compensated,
+    //     PRE-deadzone wrench - what a FORCE axis is judged on, so `ref_force` means
+    //     the force a sensor reads and not that force plus the deadzone. The 3 N
+    //     deadzone would otherwise make a declared 10 N rest at 13 N.
+    // THE GATE DOES NOT ENTER HERE (2026-09-11). It used to multiply the FORCE-mode
+    // drive, which cancels at the operating point: v_cmd = v_s*g against a yield
+    // g*(F-ref)/b solves to F = ref + b*v_s, i.e. the stream speed is back in the
+    // converged force - exactly what the new curve exists to remove. The gate
+    // attenuates the PLAN's advance and nothing else.
     void step(const math::Vector3& force_stand, const math::Vector3& torque_stand,
-              double gate = 1.0);
+              const math::Vector3& force_stand_physical,
+              const math::Vector3& torque_stand_physical);
+    // Offline/unit use: one wrench in both roles. Legal exactly when no deadzone sits
+    // upstream of the caller, which is the case for every closed-loop model in the
+    // tests; the live path always passes the two it actually has.
+    void step(const math::Vector3& force_stand, const math::Vector3& torque_stand) {
+        step(force_stand, torque_stand, force_stand, torque_stand);
+    }
 
     // RT: the overlay is leaving service. FREEZE the displacement, DROP the momentum.
     // The stored momentum is stale after a pause; a resume re-derives it from the
@@ -123,11 +141,15 @@ public:
     // the identical edit becomes CM's 2026-08-04 force-ceiling leash (the ORIGIN WALK
     // reverted on hardware the same day).
     //
-    // A FORCE-mode axis (ref_force != 0) is EXCLUDED DELIBERATELY, not for want of an
-    // argument about its k: such an axis is DESIGNED to walk until it meets the fence
-    // when nothing presses back, and handing that walk to the plan would delete the
-    // designed stop. RIGID axes are admitted: they hold d = 0 by construction and
-    // contribute nothing to the transfer either way.
+    // A ONE-SIDED FORCE-mode axis IS ADMITTED (2026-09-11), and it has to be: the fold
+    // is what keeps the plan where the arm actually is, so declining it on the press
+    // axis made a hand push accumulate its whole yield in the overlay and pin the
+    // fence. The exclusion this replaces was written for the TWO-SIDED setpoint
+    // (drive = f - ref), which walks to the fence when nothing presses back - handing
+    // THAT walk to the plan would delete its designed stop. One-sided has |f| <= ref
+    // as an equilibrium, so there is no walk, and the drive still reads only the
+    // MEASURED wrench, so with k = 0 the gauge change stays exact. RIGID axes are
+    // admitted too: they hold d = 0 by construction.
     //
     // Translation and rotation answer INDEPENDENTLY; the caller folds only when BOTH
     // say yes, because the plan is shifted as one SE(3) displacement.
@@ -193,31 +215,48 @@ private:
 // The FORCE GATE. The plan advance's reflection ratio falls as the contact force
 // rises — CM's own framing: *"힘이 큰 방향으로는 조심스럽게 움직인다"*.
 //
+// ONE CURVE, AND ITS CROSSING IS THE DESIGN (CM 0049, adopted 2026-09-11). The ratio
+// is not a fade to zero: it returns an ABSOLUTE speed at the declared force, so the
+// gate curve and the law's yield line cross AT that force for every stream speed. See
+// ForceControlConfig's gate block for the equations and the measurements.
+//
 // APPLIED PROJECTIVELY, and that is the whole design: scaling the WHOLE advance
 // would kill sliding along a contact surface AND would throttle backing OUT of it,
 // which is exactly the escape an operator needs. Only the component pushing INTO the
-// measured wrench is attenuated.
+// contact is attenuated.
 //
-// THE FORCE DIRECTION is used rather than the deviation direction because it is
-// available AT FIRST CONTACT, when the deviation is still ~0 and a deviation-directed
-// projection would do nothing at the moment it is most needed.
+// THE DIRECTION IS DECLARED, NOT INFERRED (2026-09-11). It used to be the measured
+// force direction (and then a 2 Hz filtered, armed, latched version of it), because
+// at first contact the deviation is still ~0 and only the wrench knows where the
+// surface is. Measured cost of inferring it: while the tool rang the F/T the
+// direction turned > 45 deg on 18 % of ticks, and with the hold-back the servo loop
+// applied it flipped the whole advance on/off at ~30 Hz (servo_log_20260910_183004).
+// The task knows its own contact axis - it is the tool axis it presses along - so the
+// law DECLARES it (a FORCE-mode row in the tool-frame triad) and the servo loop hands
+// the gate that axis with the sign of the measured component. An axis cannot rotate;
+// only its sign can flip, and that needs the component to cross zero, which is what
+// "no contact on this axis" means. A contact off the declared axis is not gated: the
+// other axes' law, the fence and the downstream limits own it.
 class ForceGate {
 public:
     void configure(const ForceControlConfig& cfg, double control_period_sec);
     void reset();
 
-    // RT: fold this tick's wrench into the gate. Both channels use a KNEE-LESS
-    // smoothstep — g(0) = 1 and g(1) = 0 EXACTLY, both endpoints with zero slope, so
-    // free space costs nothing and the advance can actually reach a full stop (which
-    // is what creates the equilibrium that bounds the deviation at F/k). A knee
-    // would double the gate's loop gain, which is why one is refused at load.
-    // `force_magnitude_n` / `torque_magnitude_nm` >= 0 override the magnitude the fade
-    // is judged on while the DIRECTION still comes from the vectors. The servo loop
-    // passes the PHYSICAL (pre-deadzone, filtered) magnitudes: judged on the deadzoned
-    // wrench the gate closed 3 N late and a "10 N" contact settled at 13 N (measured
-    // in the closed-loop model, 2026-09-04).
+    // RT: fold this tick's wrench into the gate (the CM 0049 curve; see
+    // ForceControlConfig for the derivation and the measurement behind it).
+    //   g = (v_cross/v_s)^((|F|/peak_force_n)^q),  v_cross = (peak-rest)/b_eff
+    // and g = 1 whenever the stream is no faster than v_cross - below that speed
+    // F = rest + b*v_s cannot reach the declaration, so the gate has nothing to give.
+    // `force_magnitude_n` / `torque_magnitude_nm` >= 0 override the magnitude judged
+    // while the DIRECTION still comes from the vectors; the servo loop passes the
+    // PHYSICAL (pre-deadzone, filtered) magnitudes, because judged on the deadzoned
+    // wrench the gate arrives 3 N late.
+    // `stream_speed_m_s` is the plan's DEMANDED advance speed, pre-gate. It must not
+    // be the achieved speed: at the operating point the achieved speed IS v_cross, so
+    // a gate fed its own output reads g = 1, re-opens, and the crossing is gone.
     void update(const math::Vector3& force_stand, const math::Vector3& torque_stand,
-                double force_magnitude_n = -1.0, double torque_magnitude_nm = -1.0);
+                double force_magnitude_n, double torque_magnitude_nm,
+                double stream_speed_m_s);
 
     // Attenuate one plan advance. Returns the surviving advance; `removed` reports
     // the magnitude taken out, so a log can say how much the gate actually did.
@@ -233,50 +272,16 @@ public:
     const math::Vector3& forceDirection() const { return force_dir_; }
     bool closed() const { return gate_t_ < 0.02 || gate_r_ < 0.02; }
 
-    // ---- THE STREAM CHANNEL (2026-09-04) -----------------------------------
-    // The gate as applied to the ABSOLUTE-TARGET path (UMI / TcpPoseTarget through
-    // the pose-track SMD). It is judged on a SUSTAINED contact, not on the tick:
-    //
-    //   * the physical force VECTOR (stand frame, before the deadzone) is low-
-    //     passed at `gate_stream_judge_lpf_hz` (a contact band, ~2 Hz) and BOTH the
-    //     judged magnitude and the ARMED cut direction come from that filtered vector.
-    //     After disarming, retain the last armed normal until the existing scalar
-    //     slew reaches fully open; the measured vector continues to detect recontact.
-    //     The vector, not the magnitude: a zero-mean vibration averages to nothing
-    //     in the vector, whereas its magnitude rectifies into a DC level (replayed
-    //     on the day's logs: a 3 Hz filter on |F| still armed 10-47 % of the
-    //     moving time; the same filter on the vector, 0-2 %);
-    //   * the channel ARMS only after the slow |F| has stood above
-    //     `gate_stream_arm_force_n` for `gate_stream_arm_dwell_sec`, and disarms
-    //     below `gate_stream_release_force_n` (a Schmitt trigger). A pressed
-    //     contact of 15 N arms it in ~180 ms; a vibration cycle never does.
-    //
-    // WHY A SECOND CHANNEL: the tick-judged gate (above) drives the chunk follower's
-    // MAGNITUDE fade (validated on hardware); since 2026-09-10 the follower's contact
-    // DIRECTION comes from this channel's slow vector too (servo loop, arm/release
-    // Schmitt without the dwell). On the streamed path the tick judgement turned
-    // the tool's own motion-excited vibration into the command. Measured on the
-    // UMI teleop logs of 2026-09-04: the compensated force while MOVING in free
-    // space was 3-5 N RMS in 8-30 Hz against 0.3 N below 2 Hz, its excursions over
-    // the 10 N fade point lasted 12-33 ms (one vibration cycle), the gate stood
-    // below 0.9 for 45-74 % of the moving time and cut the advance on 13-26 % of
-    // the moving ticks with a direction that flipped sign - an incoherent 6-30 Hz
-    // injection the operator felt as shaking. With the gate off the same runs were
-    // an ideal 2 Hz tracker replay. Tool-inertia compensation was ruled out (fitted
-    // 0.02-0.2 kg, 0 % of the variance explained), so the fix is the JUDGEMENT,
-    // not the model.
-    // `force_stand_nodz`: the compensated force, stand frame, BEFORE the deadzone.
-    void updateStream(const math::Vector3& force_stand_nodz);
-    math::Vector3 applyStreamTranslation(const math::Vector3& advance_stand, double* removed) const;
-    double streamTranslation() const { return stream_t_; }
-    double streamForceN() const { return stream_force_n_; }   // |slow force vector|
-    bool streamArmed() const { return stream_armed_; }
-    double streamOverSec() const { return stream_over_sec_; }
-    // Applied stand-frame normal. During release it retains the last armed
-    // normal; the measured vector still updates to detect a fresh contact.
-    const math::Vector3& streamForceDirection() const { return stream_dir_; }
-    const math::Vector3& streamMeasuredForce() const { return stream_force_filt_; }
-    bool streamReleasing() const { return !stream_armed_ && stream_t_ < 1.0; }
+    // ---- WHAT THE GATE ACTUALLY RAN AT (CM 0049's five columns) -------------
+    // The effective damping and mass AFTER the loader's raise-only derivation, the
+    // crossing speed the curve is pinned to, and the stream speed it was fed. There
+    // is deliberately NO deviation-POSITION reading here: on a fold path the
+    // deviation is booked into the plan every tick, so dev ~ 0 by construction and
+    // would read as "force did nothing". What survives the fold is the VELOCITY.
+    double bEff() const { return b_eff_; }
+    double mEff() const { return m_eff_; }
+    double crossSpeedMs() const { return v_cross_; }
+    double streamSpeedMs() const { return stream_speed_; }
 
 private:
     static double snapOpen(double g);   // 1 - 1e-6 < g  ->  exactly 1.0
@@ -288,14 +293,11 @@ private:
     math::Vector3 torque_dir_ = math::Vector3::Zero();
     double force_n_ = 0.0;
     double torque_nm_ = 0.0;
-    // stream channel
-    double stream_t_ = 1.0;
-    double stream_force_n_ = 0.0;
-    bool stream_force_primed_ = false;
-    bool stream_armed_ = false;
-    double stream_over_sec_ = 0.0;
-    math::Vector3 stream_force_filt_ = math::Vector3::Zero();   // the slow force vector
-    math::Vector3 stream_dir_ = math::Vector3::Zero();          // applied normal, held during release
+    // The curve's two derived numbers, fixed at configure() from the declared pair.
+    double b_eff_ = 0.0;
+    double m_eff_ = 0.0;
+    double v_cross_ = 0.0;
+    double stream_speed_ = 0.0;
 };
 
 // THE HAND-GUIDE ENGAGEMENT LATCH (2026-09-03). A Schmitt trigger on the physical

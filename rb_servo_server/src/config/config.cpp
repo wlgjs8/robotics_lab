@@ -2599,8 +2599,15 @@ void validateConfig(const DualArmConfig& cfg) {
                     "controller-manager k = 0 hand-off), or disable the gate");
             }
             if (fc.gate_enable) {
-                validatePositiveFinite(fc.gate_max_force_n, "force_control.force_gate.max_force_n");
-                validatePositiveFinite(fc.gate_max_torque_nm, "force_control.force_gate.max_torque_nm");
+                validatePositiveFinite(fc.gate_peak_force_n, "force_control.force_gate.peak_force_n");
+                validateNonNegativeFinite(fc.gate_rest_force_n, "force_control.force_gate.rest_force_n");
+                validatePositiveFinite(fc.gate_peak_vel_mm_s, "force_control.force_gate.peak_vel_mm_s");
+                if (fc.gate_rest_force_n >= fc.gate_peak_force_n) {
+                    throw std::runtime_error(
+                        "force_control.force_gate.rest_force_n must be < peak_force_n - the gate's "
+                        "crossing speed is (peak - rest)/b, so equal values leave the curve with no "
+                        "speed to return at the declared force and the equilibrium disappears");
+                }
                 validatePositiveFinite(fc.gate_close_tau_s, "force_control.force_gate.close_tau_s");
                 validatePositiveFinite(fc.gate_open_tau_s, "force_control.force_gate.open_tau_s");
                 // FAST TO CLOSE, SLOW TO OPEN. Reversing them makes the gate a relay
@@ -2610,26 +2617,37 @@ void validateConfig(const DualArmConfig& cfg) {
                         "force_control.force_gate.close_tau_s must be <= open_tau_s - a gate that "
                         "re-opens faster than it closes is a relay against the contact");
                 }
-                // THE STREAM CHANNEL. Judged on a sustained contact: a contact-band corner
-                // (0 = off, the judge reads the raw vector - same convention as
-                // wrench_filter_hz), an arm level with a dwell, a release level strictly
-                // below the arm level (a Schmitt trigger with no hysteresis is a relay on
-                // the noise).
-                validateNonNegativeFinite(fc.gate_stream_judge_lpf_hz, "force_control.force_gate.stream_judge_lpf_hz");
-                validatePositiveFinite(fc.gate_stream_arm_force_n, "force_control.force_gate.stream_arm_force_n");
-                validatePositiveFinite(fc.gate_stream_release_force_n, "force_control.force_gate.stream_release_force_n");
-                validateNonNegativeFinite(fc.gate_stream_arm_dwell_sec, "force_control.force_gate.stream_arm_dwell_sec");
-                validateNonNegativeFinite(fc.gate_stream_release_dwell_sec, "force_control.force_gate.stream_release_dwell_sec");
-                if (fc.gate_stream_release_force_n >= fc.gate_stream_arm_force_n) {
+                int press_axes = 0;
+                for (const ForceAxisConfig& ax : fc.stream.translation)
+                    if (ax.mode == ForceAxisMode::Force) ++press_axes;
+                if (fc.gate_rest_force_n > 0.0 && press_axes == 0) {
                     throw std::runtime_error(
-                        "force_control.force_gate.stream_release_force_n must be < stream_arm_force_n - "
-                        "the stream channel is a Schmitt trigger and needs hysteresis");
+                        "force_control.force_gate.rest_force_n > 0 but no force_control.stream."
+                        "translation row declares mode: force - nothing would hold the contact at "
+                        "that force, and the axis the gate attenuates along IS that row's axis "
+                        "(the tool-frame triad, re-aimed every tick)");
                 }
-                if (fc.gate_stream_arm_force_n > fc.gate_max_force_n) {
+                if (press_axes > 1) {
                     throw std::runtime_error(
-                        "force_control.force_gate.stream_arm_force_n must be <= max_force_n - arming "
-                        "above the point where the fade is already fully closed makes the stream "
-                        "channel a step, not a fade");
+                        "force_control.stream.translation declares " + std::to_string(press_axes) +
+                        " mode: force rows - the press axis must be exactly one, because the servo "
+                        "loop hands the gate that single axis as the contact direction");
+                }
+                // THE TWO LAWS SHIP THE SAME TRANSLATION ROWS (operator, 2026-09-11):
+                // *"hold 는 스트리밍이랑 동일한 파라미터로 하자. 그래야지 스트리밍의 테스트를
+                // 내가 손으로 hold 하면서 할 수 있을거야."* A hand press is then a valid
+                // test of the streamed law, and the gate's single b_eff is the whole story.
+                for (std::size_t i = 0; i < fc.stream.translation.size(); ++i) {
+                    const ForceAxisConfig& a = fc.stream.translation[i];
+                    const ForceAxisConfig& b = fc.hold.translation[i];
+                    if (a.mode != b.mode || a.m != b.m || a.b != b.b || a.k != b.k ||
+                        a.ref_force != b.ref_force) {
+                        throw std::runtime_error(
+                            "force_control.stream.translation[" + std::to_string(i) + "] and "
+                            "force_control.hold.translation[" + std::to_string(i) + "] must be "
+                            "identical - a hand press must reproduce the streamed law exactly, "
+                            "and the gate derives ONE b from the stream rows");
+                    }
                 }
             }
             validatePositiveFinite(fc.max_velocity_m_s, "force_control.max_velocity_m_s");
@@ -4827,20 +4845,84 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "hold")) parse_law(sec["hold"], fc.hold, "force_control.hold");
         if (has(sec, "force_gate")) {
             const YAML::Node g = sec["force_gate"];
-            validateAllowedKeys(g, {"enable", "max_force_n", "max_torque_nm", "close_tau_s", "open_tau_s",
-                                    "stream_judge_lpf_hz", "stream_arm_force_n", "stream_release_force_n",
-                                    "stream_arm_dwell_sec", "stream_release_dwell_sec"},
+            // DELETED KEYS ARE REFUSED, NOT IGNORED (2026-09-11, CM 0049's rule). A
+            // config that still declares `max_force_n` asks for a gate that fades to
+            // ZERO at that force, which converges the contact to 0 N, not to it.
+            for (const char* dead : {"max_force_n", "max_torque_nm", "stream_judge_lpf_hz",
+                                     "stream_arm_force_n", "stream_release_force_n",
+                                     "stream_arm_dwell_sec", "stream_release_dwell_sec"}) {
+                if (has(g, dead))
+                    fail(std::string("force_control.force_gate.") + dead + " was DELETED on "
+                         "2026-09-11. The gate is one exponential whose crossing with the law's "
+                         "yield line is pinned at (peak_force_n, peak_vel_mm_s); a fade to zero "
+                         "converges the contact to 0 N instead of to the declaration, and the "
+                         "sustained-contact stream channel it needed a direction from is gone "
+                         "(the contact axis is DECLARED by a force-mode law row)", g);
+            }
+            validateAllowedKeys(g, {"enable", "peak_force_n", "rest_force_n", "peak_vel_mm_s",
+                                    "close_tau_s", "open_tau_s"},
                                 "force_control.force_gate");
             if (has(g, "enable")) fc.gate_enable = asBool(g["enable"], "force_control.force_gate.enable");
-            if (has(g, "max_force_n")) fc.gate_max_force_n = asDouble(g["max_force_n"], "force_control.force_gate.max_force_n");
-            if (has(g, "max_torque_nm")) fc.gate_max_torque_nm = asDouble(g["max_torque_nm"], "force_control.force_gate.max_torque_nm");
+            if (has(g, "peak_force_n")) fc.gate_peak_force_n = asDouble(g["peak_force_n"], "force_control.force_gate.peak_force_n");
+            if (has(g, "rest_force_n")) fc.gate_rest_force_n = asDouble(g["rest_force_n"], "force_control.force_gate.rest_force_n");
+            if (has(g, "peak_vel_mm_s")) fc.gate_peak_vel_mm_s = asDouble(g["peak_vel_mm_s"], "force_control.force_gate.peak_vel_mm_s");
             if (has(g, "close_tau_s")) fc.gate_close_tau_s = asDouble(g["close_tau_s"], "force_control.force_gate.close_tau_s");
             if (has(g, "open_tau_s")) fc.gate_open_tau_s = asDouble(g["open_tau_s"], "force_control.force_gate.open_tau_s");
-            if (has(g, "stream_judge_lpf_hz")) fc.gate_stream_judge_lpf_hz = asDouble(g["stream_judge_lpf_hz"], "force_control.force_gate.stream_judge_lpf_hz");
-            if (has(g, "stream_arm_force_n")) fc.gate_stream_arm_force_n = asDouble(g["stream_arm_force_n"], "force_control.force_gate.stream_arm_force_n");
-            if (has(g, "stream_release_force_n")) fc.gate_stream_release_force_n = asDouble(g["stream_release_force_n"], "force_control.force_gate.stream_release_force_n");
-            if (has(g, "stream_arm_dwell_sec")) fc.gate_stream_arm_dwell_sec = asDouble(g["stream_arm_dwell_sec"], "force_control.force_gate.stream_arm_dwell_sec");
-            if (has(g, "stream_release_dwell_sec")) fc.gate_stream_release_dwell_sec = asDouble(g["stream_release_dwell_sec"], "force_control.force_gate.stream_release_dwell_sec");
+            if (fc.gate_enable && fc.gate_peak_force_n > 0.0 && fc.gate_peak_vel_mm_s > 0.0 &&
+                fc.gate_peak_force_n > fc.gate_rest_force_n) {
+                // ---- b IS NOT TYPED, IT IS DERIVED (CM 0049) -----------------------
+                // b = (peak_force_n - rest_force_n) / peak_vel_mm_s, RAISE-ONLY on every
+                // compliant translation row of BOTH laws, and m raised after it so the
+                // semi-implicit integrator stays at half its stability limit. A
+                // declaration can never WEAKEN the damping the contact loop needs, and
+                // it is the same b the gate computes its crossing speed from - one
+                // source for both halves, or the crossing drifts. Both raises are
+                // printed: this is the number an operator predicts the robot from.
+                const double b_needed = (fc.gate_peak_force_n - fc.gate_rest_force_n) /
+                                        (fc.gate_peak_vel_mm_s * 1e-3);
+                const double m_needed = 2.0 * b_needed * 0.002;   // dt: the nominal 500 Hz tick
+                const auto derive = [&](std::array<ForceAxisConfig, 3>& rows, const char* who) {
+                    for (std::size_t i = 0; i < rows.size(); ++i) {
+                        ForceAxisConfig& ax = rows[i];
+                        if (ax.mode == ForceAxisMode::Rigid || !(ax.m > 0.0) || ax.b < 0.0) continue;
+                        if (ax.b < b_needed) {
+                            std::cerr << "[INFO] force_control." << who << ".translation[" << i
+                                      << "].b " << ax.b << " -> " << b_needed
+                                      << " N*s/m (DERIVED from force_gate{peak "
+                                      << fc.gate_peak_force_n << " N, rest " << fc.gate_rest_force_n
+                                      << " N, " << fc.gate_peak_vel_mm_s << " mm/s}, raise-only)\n";
+                            ax.b = b_needed;
+                        }
+                        if (ax.m < m_needed) {
+                            std::cerr << "[INFO] force_control." << who << ".translation[" << i
+                                      << "].m " << ax.m << " -> " << m_needed
+                                      << " kg (raised after b to hold b < m/dt)\n";
+                            ax.m = m_needed;
+                        }
+                    }
+                };
+                derive(fc.stream.translation, "stream");
+                derive(fc.hold.translation, "hold");
+                // ---- ONE NUMBER, ONE PLACE -----------------------------------------
+                // The law's rest point and the gate's crossing must be the SAME force or
+                // there is no equilibrium: if they disagree the arm either creeps (the
+                // gate still open where the law has stopped) or the crossing moves. So a
+                // FORCE-mode row does not type its own ref_force; the loader writes it.
+                const auto arm_force_rows = [&](std::array<ForceAxisConfig, 3>& rows,
+                                                const char* who) {
+                    for (std::size_t i = 0; i < rows.size(); ++i) {
+                        if (rows[i].mode != ForceAxisMode::Force) continue;
+                        if (rows[i].ref_force != 0.0)
+                            fail(std::string("force_control.") + who + ".translation[" +
+                                 std::to_string(i) + "].ref_force may not be typed - it IS "
+                                 "force_control.force_gate.rest_force_n (one number for the law's "
+                                 "rest point and the gate's crossing)", g);
+                        rows[i].ref_force = fc.gate_rest_force_n;
+                    }
+                };
+                arm_force_rows(fc.stream.translation, "stream");
+                arm_force_rows(fc.hold.translation, "hold");
+            }
         }
         if (has(sec, "max_deviation_m")) fc.max_deviation_m = asDouble(sec["max_deviation_m"], "force_control.max_deviation_m");
         if (has(sec, "max_deviation_rad")) fc.max_deviation_rad = asDouble(sec["max_deviation_rad"], "force_control.max_deviation_rad");

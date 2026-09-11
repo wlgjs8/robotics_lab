@@ -9,16 +9,6 @@ namespace {
 
 double clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// KNEE-LESS SMOOTHSTEP. g(0) = 1 and g(1) = 0 EXACTLY, both endpoints with zero
-// slope. The exact endpoints matter: g(0) = 1 means free space and light contact
-// cost the plan nothing, and g(1) = 0 means the advance can actually STOP, which is
-// what creates the equilibrium that bounds the deviation at F/k.
-double fade(double u) {
-    if (u <= 0.0) return 1.0;
-    if (u >= 1.0) return 0.0;
-    return 1.0 - 3.0 * u * u + 2.0 * u * u * u;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -49,7 +39,8 @@ void AdmittanceOverlay::reset() {
 
 void AdmittanceOverlay::step(const math::Vector3& force_stand,
                              const math::Vector3& torque_stand,
-                             double gate) {
+                             const math::Vector3& force_stand_physical,
+                             const math::Vector3& torque_stand_physical) {
     ++osc_tick_;
     if (osc_frozen_) {
         // Latched by the oscillation guard: hold the deviation, drop momentum,
@@ -82,7 +73,8 @@ void AdmittanceOverlay::step(const math::Vector3& force_stand,
     math::Vector3 wv = rw.transpose() * w_;
     const math::Vector3 fw = rw.transpose() * force_stand;
     const math::Vector3 mw = rw.transpose() * torque_stand;
-    const double g = clamp(gate, 0.0, 1.0);
+    const math::Vector3 fp = rw.transpose() * force_stand_physical;
+    const math::Vector3 mp = rw.transpose() * torque_stand_physical;
 
     for (int i = 0; i < 6; ++i) {
         const bool rot = i >= 3;
@@ -99,13 +91,27 @@ void AdmittanceOverlay::step(const math::Vector3& force_stand,
             continue;
         }
 
-        // FORCE mode drops the stiffness and regulates against ref_force; the GATE
-        // throttles that walk, because in free space the walk has nothing to stop it
-        // but the fence.
-        const double drive = (ax.mode == ForceAxisMode::Force)
-                                 ? (f - ax.ref_force) * g
-                                 : f;
-        const double k = (ax.mode == ForceAxisMode::Force) ? 0.0 : ax.k;
+        // FORCE MODE IS ONE-SIDED AND JUDGED ON THE PHYSICAL COMPONENT (2026-09-11).
+        // Only the EXCESS over ref_force drives the deviation, in the direction the
+        // force points. Three properties follow, and all three are requirements:
+        //   * |f| <= ref_force is an equilibrium, so the axis does not move at all
+        //     there. FREE SPACE (f = 0) can therefore never be sought - the walk a
+        //     two-sided setpoint has to stop with a fence does not exist here.
+        //   * A contact RESTS at ref_force instead of retreating to zero, which is
+        //     what a pure damper does (its only equilibrium is f = 0; measured
+        //     2026-09-11: 28 N at the floor, then 6.3 mm of retreat to 0.1-1.0 N).
+        //   * The yield line is v = (|f| - ref)/b, which is what the gate's curve is
+        //     pinned to cross at peak_force_n.
+        // The stiffness is dropped: a spring plus a setpoint converges at the balance
+        // w = ref + k*d, which is a different (and surface-position dependent) force.
+        const double phys = rot ? mp[i - 3] : fp[i];
+        double drive = f;
+        double k = ax.k;
+        if (ax.mode == ForceAxisMode::Force) {
+            const double excess = std::abs(phys) - ax.ref_force;
+            drive = excess > 0.0 ? std::copysign(excess, phys) : 0.0;
+            k = 0.0;
+        }
         double a = (drive - ax.b * v - k * d) / ax.m;
 
         const double a_max = rot ? cfg_.max_acceleration_rad_s2 : cfg_.max_acceleration_m_s2;
@@ -254,8 +260,23 @@ bool AdmittanceOverlay::pureDamperTriad(const std::array<ForceAxisConfig, 3>& ax
     for (const ForceAxisConfig& ax : axes) {
         // RIGID holds d = 0 by construction - it neither helps nor hinders the transfer.
         if (ax.mode == ForceAxisMode::Rigid || !(ax.m > 0.0) || ax.b < 0.0) continue;
-        if (ax.mode != ForceAxisMode::Compliance) return false;   // FORCE walks by design
-        if (ax.k != 0.0 || ax.ref_force != 0.0) return false;
+        // A SPRING ALWAYS REFUSES: at any k != 0 the -k*d term revives and the gauge
+        // change becomes an origin walk.
+        if (ax.k != 0.0) return false;
+        // A ONE-SIDED FORCE AXIS IS FOLDABLE (2026-09-11). The old exclusion was written
+        // for the TWO-SIDED setpoint (drive = f - ref), which is designed to walk until
+        // it meets the fence when nothing presses back; handing that walk to the plan
+        // would have deleted the designed stop. The one-sided drive - only the excess
+        // over ref_force, in the direction the force points - has |f| <= ref as an
+        // equilibrium, so there is no free-space walk to hand over at all. And the
+        // gauge argument is untouched: the drive is a function of the MEASURED wrench
+        // only, so with k = 0 the deviation is still a bare integrator nothing reads
+        // back. REFUSING IT WAS A REAL BUG: with the press axis declared and the fold
+        // declined, a hand push accumulated the whole yield in the overlay and pinned
+        // the 40 mm fence - the arm went rigid there, 3606 ticks of bounded() in
+        // servo_log_20260911_133829 (right arm, |F| 21 N).
+        if (ax.mode == ForceAxisMode::Force) continue;
+        if (ax.ref_force != 0.0) return false;   // a ref on a COMPLIANCE row is malformed
     }
     return true;
 }
@@ -293,6 +314,24 @@ bool HoldEngageLatch::update(double force_magnitude_n) {
 void ForceGate::configure(const ForceControlConfig& cfg, double control_period_sec) {
     cfg_ = cfg;
     dt_ = control_period_sec > 0.0 ? control_period_sec : 0.002;
+    // `b` FOR THE CROSSING IS THE LARGEST COMPLIANT TRANSLATION DAMPING, never row 0
+    // (CM found this twice in review): a RIGID row carries b = 0, which would leave
+    // v_cross = 0 and disable the gate on all axes, and with anisotropic damping the
+    // crossing would be pinned to one axis while the contact is on another. The max
+    // is conservative in both cases - a larger b means a smaller v_cross, so the
+    // converged force lands AT or BELOW the declaration, never above it. The loader
+    // WARNs when the three rows disagree, because only then is one v_cross the whole
+    // story. The STREAM law owns this: the hold law ships the same rows by decision
+    // and the loader refuses a disagreement.
+    b_eff_ = 0.0;
+    m_eff_ = 0.0;
+    for (const ForceAxisConfig& ax : cfg_.stream.translation) {
+        if (ax.mode == ForceAxisMode::Rigid || !(ax.m > 0.0) || ax.b < 0.0) continue;
+        if (ax.b > b_eff_) b_eff_ = ax.b;
+        if (ax.m > m_eff_) m_eff_ = ax.m;
+    }
+    const double span = cfg_.gate_peak_force_n - cfg_.gate_rest_force_n;
+    v_cross_ = (b_eff_ > 1e-9 && span > 0.0) ? span / b_eff_ : 0.0;
     reset();
 }
 
@@ -303,33 +342,49 @@ void ForceGate::reset() {
     torque_dir_.setZero();
     force_n_ = 0.0;
     torque_nm_ = 0.0;
-    stream_t_ = 1.0;
-    stream_force_n_ = 0.0;
-    stream_force_primed_ = false;
-    stream_armed_ = false;
-    stream_over_sec_ = 0.0;
-    stream_force_filt_.setZero();
-    stream_dir_.setZero();
+    stream_speed_ = 0.0;
 }
 
 void ForceGate::update(const math::Vector3& force_stand, const math::Vector3& torque_stand,
-                       double force_magnitude_n, double torque_magnitude_nm) {
+                       double force_magnitude_n, double torque_magnitude_nm,
+                       double stream_speed_m_s) {
     const double fv = force_stand.norm();
     const double mv = torque_stand.norm();
     force_n_ = force_magnitude_n >= 0.0 ? force_magnitude_n : fv;
     torque_nm_ = torque_magnitude_nm >= 0.0 ? torque_magnitude_nm : mv;
     force_dir_ = fv > 1e-9 ? math::Vector3(force_stand / fv) : math::Vector3::Zero();
     torque_dir_ = mv > 1e-9 ? math::Vector3(torque_stand / mv) : math::Vector3::Zero();
+    stream_speed_ = std::isfinite(stream_speed_m_s) && stream_speed_m_s > 0.0
+                        ? stream_speed_m_s : 0.0;
 
     if (!cfg_.gate_enable) {
         gate_t_ = 1.0;
         gate_r_ = 1.0;
         return;
     }
-    const double t_raw =
-        cfg_.gate_max_force_n > 0.0 ? fade(force_n_ / cfg_.gate_max_force_n) : 1.0;
-    const double r_raw =
-        cfg_.gate_max_torque_nm > 0.0 ? fade(torque_nm_ / cfg_.gate_max_torque_nm) : 1.0;
+    // THE CURVE (CM 0049). Only attenuate when the stream is actually faster than the
+    // crossing speed: below it the contact converges to rest + b*v_s < peak_force_n on
+    // its own and the gate has nothing to give. NOTE the scope this leaves open, the
+    // same one CM records: v_s is a TRANSLATION rate, so a rotation-dominant stream is
+    // ungated and its contact torque is bounded by the rotational law alone - which on
+    // this cell is RIGID, so there is no rotational yield to run away, but also no
+    // rotational compliance to absorb the torque.
+    double t_raw = 1.0;
+    if (cfg_.gate_peak_force_n > 0.0 && v_cross_ > 0.0 && stream_speed_ > v_cross_) {
+        const double u = force_n_ / cfg_.gate_peak_force_n;
+        const double e = std::pow(u, ForceControlConfig::kGateCurveExponent);
+        t_raw = std::pow(v_cross_ / stream_speed_, e);
+        // A NON-FINITE RESULT CLOSES THE GATE, IT DOES NOT OPEN IT: the only way here
+        // is a non-finite force, i.e. the F/T pipeline produced a NaN, and the one
+        // thing that must not follow a broken force sensor is the stream running on at
+        // full authority into whatever it was pressing.
+        if (!std::isfinite(t_raw)) t_raw = 0.0;
+        t_raw = clamp(t_raw, 0.0, 1.0);
+    }
+    // ROTATION TAKES THE RATIO THE FORCE PRODUCED (CM 0049 SS5.11). A single contact
+    // point carries a torque that is a dependent component of the same force, so there
+    // is no second threshold to declare and `max_torque_nm` is gone.
+    const double r_raw = t_raw;
 
     // ASYMMETRIC first-order slew: FAST TO CLOSE, SLOW TO OPEN. A fast re-open is
     // what turns the gate into a relay against the contact and sustains a limit cycle.
@@ -364,76 +419,6 @@ math::Vector3 ForceGate::applyTranslation(const math::Vector3& advance_stand,
     const double proj = advance_stand.dot(force_dir_);
     if (proj >= 0.0) return advance_stand;
     const math::Vector3 cut = (1.0 - gate_t_) * proj * force_dir_;
-    if (removed != nullptr) *removed = cut.norm();
-    return advance_stand - cut;
-}
-
-void ForceGate::updateStream(const math::Vector3& force_stand_nodz) {
-    // The slow force VECTOR the channel is judged on. Seeded on the first tick after
-    // a reset so it does not ramp up from a stale zero into a contact already
-    // standing. Filtering the vector (not |F|) is what makes a zero-mean vibration
-    // average out instead of rectifying into a DC level.
-    if (!stream_force_primed_) {
-        stream_force_filt_ = force_stand_nodz;
-        stream_force_primed_ = true;
-    } else {
-        const double hz = cfg_.gate_stream_judge_lpf_hz;
-        double a = 1.0;
-        if (hz > 0.0) {
-            const double tau = 1.0 / (2.0 * M_PI * hz);
-            a = std::min(1.0, dt_ / (tau + dt_));
-        }
-        stream_force_filt_ += a * (force_stand_nodz - stream_force_filt_);
-    }
-    stream_force_n_ = stream_force_filt_.norm();
-    if (!cfg_.gate_enable) {
-        stream_t_ = 1.0;
-        stream_armed_ = false;
-        stream_over_sec_ = 0.0;
-        stream_dir_.setZero();
-        return;
-    }
-    // ARMING: a Schmitt trigger with a dwell on the slow |F|. A spike that is over
-    // the arm level for less than the dwell never arms the channel.
-    if (!stream_armed_) {
-        if (stream_force_n_ >= cfg_.gate_stream_arm_force_n) {
-            stream_over_sec_ += dt_;
-            if (stream_over_sec_ + 1e-9 >= cfg_.gate_stream_arm_dwell_sec) stream_armed_ = true;
-        } else {
-            stream_over_sec_ = 0.0;
-        }
-    } else if (stream_force_n_ < cfg_.gate_stream_release_force_n) {
-        stream_armed_ = false;
-        stream_over_sec_ = 0.0;
-    }
-    // Only a sustained contact owns a new cut direction. In the 2026-09-06
-    // UMI logs the channel had DISARMED before the 8-9 Hz SMD ripple: its slow
-    // reopen still cut along a small, rotating residual force. Keep the last
-    // armed normal through that reopen, with the existing scalar slew unchanged.
-    // Measurement, thresholds and dwell keep running above, so a new sustained
-    // contact (including a different normal) immediately regains ownership.
-    if (stream_armed_) {
-        stream_dir_ = stream_force_n_ > 1e-6
-            ? math::Vector3(stream_force_filt_ / stream_force_n_)
-            : math::Vector3::Zero();
-    }
-    const double t_raw = (stream_armed_ && cfg_.gate_max_force_n > 0.0)
-        ? fade(stream_force_n_ / cfg_.gate_max_force_n)
-        : 1.0;
-    // The same asymmetric slew as the tick channel: fast to close, slow to open.
-    const double tau = (t_raw < stream_t_) ? cfg_.gate_close_tau_s : cfg_.gate_open_tau_s;
-    const double a = tau > 1e-6 ? std::min(dt_ / tau, 1.0) : 1.0;
-    stream_t_ = snapOpen(stream_t_ + (t_raw - stream_t_) * a);
-    if (!stream_armed_ && stream_t_ == 1.0) stream_dir_.setZero();
-}
-
-math::Vector3 ForceGate::applyStreamTranslation(const math::Vector3& advance_stand,
-                                                double* removed) const {
-    if (removed != nullptr) *removed = 0.0;
-    if (stream_t_ >= 1.0 || stream_dir_.squaredNorm() < 0.5) return advance_stand;
-    const double proj = advance_stand.dot(stream_dir_);
-    if (proj >= 0.0) return advance_stand;
-    const math::Vector3 cut = (1.0 - stream_t_) * proj * stream_dir_;
     if (removed != nullptr) *removed = cut.norm();
     return advance_stand - cut;
 }

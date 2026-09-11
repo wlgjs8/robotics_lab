@@ -297,7 +297,14 @@ ArmCommand applyPoseTrackSmd(
     // Stand-frame twist to seed the tracker with when THIS call activates it (the
     // chunk follower's state velocity at a fallback). Null = seed at rest (legacy).
     const Vec6* seed_stand_twist = nullptr,
-    ForceControlTelemetry* gate_trace = nullptr
+    ForceControlTelemetry* gate_trace = nullptr,
+    // The DECLARED contact normal, stand frame (see DualArmServoLoop::
+    // declaredContactNormal). Null or zero = no contact on the declared axis.
+    const math::Vector3* contact_normal_stand = nullptr,
+    // Out: this tick's GOAL rate [m/s] - the demand the force gate's curve reads on
+    // this path. Taken from the goal, which the gate never touches (it holds the
+    // tracker's STATE), so it can never become a function of the gate's own output.
+    double* stream_demand_m_s = nullptr
 ) {
     if (!tracker) return command;
     // PROFILE BINDING (2026-09-06): an ACTIVE tracker's own profile decides whether it
@@ -407,16 +414,26 @@ ArmCommand applyPoseTrackSmd(
         held.tcp_target_stand = reference;
         return held;
     }
+    if (stream_demand_m_s != nullptr && dt_sec > 0.0) {
+        const Pose6D previous_goal = tracker->goalPose();
+        *stream_demand_m_s = math::positionDistance(previous_goal, command.tcp_target_stand) / dt_sec;
+    }
     tracker->updateGoalFromCommand(command.tcp_target_stand);
+    // THE DECLARED CONTACT NORMAL (2026-09-11). The press axis is the law's
+    // force-mode row in the TOOL triad, mapped to stand and signed by the measured
+    // component; the servo loop computes it once per tick and hands it here. Zero
+    // means "no contact on the declared axis" and the gate is not applied at all.
+    const math::Vector3 normal =
+        contact_normal_stand != nullptr ? *contact_normal_stand : math::Vector3::Zero();
     if (gate != nullptr && gate_trace != nullptr) {
         gate_trace->smd_gate_sample_valid = true;
-        gate_trace->smd_gate_armed = gate->streamArmed();
-        gate_trace->smd_gate_releasing = gate->streamReleasing();
-        gate_trace->smd_gate_translation = gate->streamTranslation();
-        const auto& n = gate->streamForceDirection();
-        const auto& f = gate->streamMeasuredForce();
-        gate_trace->smd_gate_normal_stand = {n.x(), n.y(), n.z()};
-        gate_trace->smd_gate_measured_force_stand_n = {f.x(), f.y(), f.z()};
+        gate_trace->smd_gate_armed = normal.squaredNorm() > 0.5;
+        gate_trace->smd_gate_releasing = false;
+        gate_trace->smd_gate_translation = gate->translation();
+        gate_trace->smd_gate_normal_stand = {normal.x(), normal.y(), normal.z()};
+        const auto& f = gate->forceDirection();
+        gate_trace->smd_gate_measured_force_stand_n =
+            {f.x() * gate->forceN(), f.y() * gate->forceN(), f.z() * gate->forceN()};
     }
     ArmCommand smoothed = command;
     const Pose6D before = tracker->currentPose();
@@ -426,34 +443,35 @@ ArmCommand applyPoseTrackSmd(
     // drove this tracker into it, the spring stretched to the 40 mm fence, and the arm
     // went rigid - a spring without its gate, the exact pairing the loader refuses.
     // Same projective rule as the follower's (only the component pushing INTO the
-    // measured force is cut); the difference is where the cut is booked: the
-    // tracker's STATE is held here (constrainTranslation), the goal is left alone.
+    // contact is cut); the difference is where the cut is booked: the tracker's STATE
+    // is held here (constrainTranslation), the goal is left alone.
     //
-    // JUDGED ON THE GATE'S STREAM CHANNEL, NOT ITS TICK CHANNEL (2026-09-04 pm). The
-    // tick-judged gate fed the tool's own 8-30 Hz motion vibration (3-5 N RMS while
-    // moving, 12-33 ms excursions over 10 N) back into this tracker as a sign-
-    // flipping cut - the shaking the operator felt in every UMI run of the day, and
-    // absent with force control off. The stream channel arms only on a SUSTAINED
-    // contact and cuts along a low-passed direction; see ForceGate::updateStream.
-    if (gate != nullptr && gate->streamTranslation() < 1.0 &&
-        gate->streamForceDirection().squaredNorm() > 0.5) {
+    // JUDGED ON THE ONE CURVE, ALONG THE DECLARED AXIS (2026-09-11). This used to run
+    // a second "stream channel" of the gate - a 2 Hz filtered force vector with its
+    // own arm/release Schmitt - because the tick-judged fade fed the tool's own 8-30 Hz
+    // motion vibration (3-5 N RMS while moving) back into the tracker as a sign-
+    // flipping cut. The curve is judged on the same filtered physical magnitude but it
+    // no longer fades to zero, and the DIRECTION is declared rather than inferred, so
+    // the vibration has nothing to flip: both halves of that failure are gone and the
+    // second channel with them.
+    if (gate != nullptr && gate->translation() < 1.0 && normal.squaredNorm() > 0.5) {
         const math::Vector3 p0(before.x, before.y, before.z);
         const math::Vector3 p1(smoothed.tcp_target_stand.x, smoothed.tcp_target_stand.y,
                                smoothed.tcp_target_stand.z);
-        double removed = 0.0;
-        const math::Vector3 kept = gate->applyStreamTranslation(p1 - p0, &removed);
-        if (removed > 0.0) {
-            const math::Vector3 held = p0 + kept;
+        const double proj = (p1 - p0).dot(normal);
+        if (proj < 0.0) {
+            const math::Vector3 cut = (1.0 - gate->translation()) * proj * normal;
+            const double removed = cut.norm();
+            const math::Vector3 held = p0 + (p1 - p0) - cut;
             // The velocity drop is PROPORTIONAL to the closure, like the cut.
-            tracker->constrainTranslation(held, gate->streamForceDirection(),
-                                          1.0 - gate->streamTranslation());
+            tracker->constrainTranslation(held, normal, 1.0 - gate->translation());
             smoothed.tcp_target_stand.x = held.x();
             smoothed.tcp_target_stand.y = held.y();
             smoothed.tcp_target_stand.z = held.z();
+            if (gate_removed_m != nullptr) *gate_removed_m = removed;
+            if (gate_trace != nullptr && dt_sec > 0.0)
+                gate_trace->smd_gate_removed_velocity_m_s = removed / dt_sec;
         }
-        if (gate_removed_m != nullptr) *gate_removed_m = removed;
-        if (gate_trace != nullptr && dt_sec > 0.0)
-            gate_trace->smd_gate_removed_velocity_m_s = removed / dt_sec;
     }
     return smoothed;
 }
@@ -2109,6 +2127,13 @@ DualArmServoLoop::DualArmServoLoop(
     right_overlay_.configure(config.force_control, control_period_sec);
     left_force_gate_.configure(config.force_control, control_period_sec);
     right_force_gate_.configure(config.force_control, control_period_sec);
+    // THE PRESS AXIS, fixed here. The loader has already refused anything but exactly
+    // one mode:force translation row (and refused a stream/hold disagreement), so this
+    // single index is the declared contact axis for both laws and both arms.
+    press_axis_index_ = -1;
+    for (int i = 0; i < 3; ++i)
+        if (config.force_control.stream.translation[i].mode == ForceAxisMode::Force)
+            press_axis_index_ = i;
     left_hold_engage_.configure(config.force_control.hold_engage_force_n,
                                 config.force_control.hold_release_force_n);
     right_hold_engage_.configure(config.force_control.hold_engage_force_n,
@@ -2177,33 +2202,41 @@ DualArmServoLoop::DualArmServoLoop(
         std::cerr << "[INFO]   hold law (an operator pushing by hand):\n";
         for (int i = 0; i < 3; ++i) axis_line(tnames[i], config.force_control.hold.translation[i]);
         for (int i = 0; i < 3; ++i) axis_line(rnames[i], config.force_control.hold.rotation[i]);
-        std::cerr << "[INFO]   gate " << (config.force_control.gate_enable ? "ON" : "OFF")
-                  << " converges to " << config.force_control.gate_max_force_n << " N / "
-                  << config.force_control.gate_max_torque_nm << " Nm (close "
-                  << config.force_control.gate_close_tau_s << " s, open "
-                  << config.force_control.gate_open_tau_s << " s)\n";
-        std::cerr << "[INFO]   fence " << config.force_control.max_deviation_m * 1e3 << " mm / "
-                  << config.force_control.max_deviation_rad * 180.0 / M_PI << " deg"
-                  << (config.force_control.hold_compliance ? ", Hold is COMPLIANT" : "")
-                  << "\n";
-        // The deviation a converged contact will settle at, printed because it is the
-        // number an operator can check against the arm with a ruler.
-        const double k = config.force_control.stream.translation[2].k;
-        if (k > 0.0 && config.force_control.gate_max_force_n > 0.0) {
-            std::cerr << "[INFO]   streamed contact converges at max_force_n / k = "
-                      << config.force_control.gate_max_force_n / k * 1e3 << " mm\n";
-        } else if (k == 0.0) {
-            // No spring: the gate stops the plan, the damper retreats until the
-            // wrench is inside the deadzone. The deviation is what the fold books
-            // into the plan every tick, so there is no F/k to print.
-            std::cerr << "[INFO]   stream law is a pure mass-damper (k = 0): the gate stops "
-                         "the plan at " << config.force_control.gate_max_force_n
-                      << " N, the damper yields at F/b = "
-                      << (config.force_control.stream.translation[2].b > 0.0
-                              ? 10.0 / config.force_control.stream.translation[2].b * 1e3
-                              : 0.0)
-                      << " mm/s per 10 N; fold "
-                      << (config.force_control.fold_deviation ? "ON" : "OFF") << "\n";
+        // THE BANNER IS WHAT AN OPERATOR PREDICTS THE ROBOT FROM, so it prints the
+        // two forces, the crossing they pin, and the b that was actually installed
+        // after the raise-only derivation - not the numbers as typed.
+        {
+            const ForceControlConfig& f = config.force_control;
+            double b_eff = 0.0;
+            for (const ForceAxisConfig& ax : f.stream.translation)
+                if (ax.mode != ForceAxisMode::Rigid && ax.m > 0.0 && ax.b > b_eff) b_eff = ax.b;
+            const double v_cross = (b_eff > 0.0 && f.gate_peak_force_n > f.gate_rest_force_n)
+                ? (f.gate_peak_force_n - f.gate_rest_force_n) / b_eff : 0.0;
+            std::cerr << "[INFO]   gate " << (f.gate_enable ? "ON" : "OFF")
+                      << ": a STREAMED contact converges at " << f.gate_peak_force_n
+                      << " N for every stream speed (crossing " << v_cross * 1e3
+                      << " mm/s, b_eff " << b_eff << " N*s/m, q "
+                      << ForceControlConfig::kGateCurveExponent << ", close "
+                      << f.gate_close_tau_s << " s, open " << f.gate_open_tau_s << " s)\n";
+            std::cerr << "[INFO]   an EXTERNAL contact (a hand, or a press the plan has "
+                         "stopped driving) rests at rest_force_n = " << f.gate_rest_force_n
+                      << " N: below that the declared press axis does not move at all, so "
+                         "free space is never sought\n";
+            std::cerr << "[INFO]   fence " << f.max_deviation_m * 1e3 << " mm / "
+                      << f.max_deviation_rad * 180.0 / M_PI << " deg"
+                      << (f.hold_compliance ? ", Hold is COMPLIANT" : "") << "\n";
+            int press = -1;
+            for (int i = 0; i < 3; ++i)
+                if (f.stream.translation[i].mode == ForceAxisMode::Force) press = i;
+            if (press >= 0) {
+                std::cerr << "[INFO]   press axis: TOOL " << tnames[press]
+                          << "(re-aimed every tick); the other two translations stay "
+                             "compliant and rotation is rigid\n";
+            } else {
+                std::cerr << "[INFO]   NO press axis declared: every translation row is "
+                             "plain compliance, so a contact retreats to 0 N (the pure "
+                             "damper's only equilibrium)\n";
+            }
         }
         std::cerr << "[INFO]   fold_deviation "
                   << (config.force_control.fold_deviation ? "ON" : "OFF")
@@ -6053,7 +6086,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
                                     : right_force_control_telemetry_).gate_removed_m,
             handoff_velocity ? &*handoff_velocity : nullptr,
-            &(arm_id == ArmId::Left ? left_force_control_telemetry_ : right_force_control_telemetry_));
+            &(arm_id == ArmId::Left ? left_force_control_telemetry_ : right_force_control_telemetry_),
+            &declared_contact_normal_[arm_id == ArmId::Left ? 0 : 1],
+            &force_stream_speed_m_s_[arm_id == ArmId::Left ? 0 : 1]);
         applyPoseTrackWallFold(arm_id, smd_tracker, dt_sec, &out);
         return with_stage_telemetry(out);
     };
@@ -6512,48 +6547,23 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         const auto& force=left?left_force_control_telemetry_:right_force_control_telemetry_;
         const bool roi_owns=left?left_roi_fold_active_:right_roi_fold_active_;
         if(force.reference_strip_enabled && !roi_owns) {
+            // ONE CURVE, ONE DECLARED AXIS (2026-09-11). The gate's ratio attenuates the
+            // plan's advance INTO the declared press axis; it no longer fades to zero, so
+            // there is no "complete hold-back" and no arming to decide when to apply one.
+            // What that replaces, and why:
+            //   * the 2 Hz slow-vector direction with its arm/release Schmitt and release
+            //     dwell - the axis is declared now, so nothing has to be inferred from a
+            //     ringing wrench (it turned > 45 deg on 18 % of ticks, and the all-or-
+            //     nothing hold-back it fed flipped the whole advance at ~30 Hz,
+            //     servo_log_20260910_183004);
+            //   * the hold-back itself - the reference used to wind 3-13 mm past a surface
+            //     because a proportional fade leaked 5-20 % of the advance, and the answer
+            //     was to remove ALL of it. With a crossing at peak_force_n the leak IS the
+            //     equilibrium: the advance that survives is exactly the law's yield, so
+            //     the reference stands still at the declared force instead of winding.
             const auto& gate=left?left_force_gate_:right_force_gate_;
-            // THE CONTACT DIRECTION COMES FROM THE SLOW VECTOR (2026-09-10 pm, operator
-            // decision). This direction decides what the follower's advance gate, the
-            // executor's contact slew and the QP contact authority all treat as
-            // "closing". Taken from the raw deadzoned wrench it was rewritten every tick:
-            // a 3.5 N, 4 ms deadzone-edge blip on a 200 mm/s move flipped it and cut the
-            // whole move (servo_log_20260910_141150 @-24.25 s), and while the tool rang
-            // the F/T at 20-40 Hz it turned > 45 deg in 18 % of ticks (@134846 fault).
-            // Now: the gate's 2 Hz-filtered force vector (a zero-mean ring averages to
-            // nothing there), adopted only once its magnitude stands over the stream
-            // arm level and kept down to the release level (Schmitt). The tick-judged
-            // MAGNITUDE still drives the fade, so a real contact closes as fast as before
-            // once its direction is known: ~30 ms for a 15 N press, ~55 ms for 10 N.
-            //
-            // THE RELEASE DWELL (2026-09-10 pm, second revision). "The filter already
-            // outlasts a vibration cycle" was wrong: fed a sign-alternating 46 N push the
-            // 2 Hz vector still moves ~1 N per tick, so it crossed the 5 N arm level and
-            // the 2 N release level inside 16 ms and the dispatched direction flipped
-            // 1.00 <-> 0.00 at ~30 Hz (servo_log_20260910_183004, right arm 56.27 and
-            // 56.41 s). Arming stays instant; releasing now needs the slow vector to stand
-            // below the release level for gate_stream_release_dwell_sec.
-            auto& arming=left?left_follower_contact_dir_:right_follower_contact_dir_;
-            const bool armed=control::updateFollowerContactDirectionArming(arming,
-                gate.streamMeasuredForce(),dt_sec,
-                config_.force_control.gate_stream_arm_force_n,
-                config_.force_control.gate_stream_release_force_n,
-                config_.force_control.gate_stream_release_dwell_sec);
-            // A COMPLETE HOLD-BACK WHILE A SUSTAINED CONTACT STANDS (2026-09-10 pm).
-            // The gate used to attenuate the into-contact advance PROPORTIONALLY, so at
-            // |F| 8-9 N (gate 0.05-0.20) 5-20 % of it kept passing and the reference
-            // wound 3-13 mm PAST the floor, at ~14 mm/s; the plan then dived onto that
-            // error, contacted, was lifted, and dived again - the 2.5-4 Hz bounce
-            // (servo_log_20260910_172712, right arm 27.5-29.0 s). Armed means the gate's
-            // 2 Hz slow vector has stood over the arm level, i.e. a contact IS there:
-            // the advance into it is then removed ENTIRELY. That is "cannot go, keeps
-            // trying" instead of "creeps in", and it is not a rule about what the policy
-            // may command - the plan keeps asking and the fold keeps the plan where the
-            // arm actually is. Nothing is removed below the arm level (approach is
-            // untouched), and tangential / retreating advances are never touched at all.
-            // The tick fade itself stays observable in *_fc_gate_translation.
-            follower->setAdvanceGate(armed?0.0:gate.translation(),
-                armed?arming.direction:math::Vector3::Zero());
+            follower->setAdvanceGate(gate.translation(),
+                                     declared_contact_normal_[left?0:1]);
         }
     }
     // Contact-aware following is gone with the F/T stack: no external reaction
@@ -6623,6 +6633,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         follower->updateActualLead(actual_feedback_pose);
     }
     const control::FollowerDiag& diag = follower->diag();
+    // THE GATE'S CURVE READS THE DEMAND (2026-09-11). Updated once per segment by the
+    // follower, before its own attenuation - see FollowerDiag::demanded_advance_m_s.
+    force_stream_speed_m_s_[arm_id == ArmId::Left ? 0 : 1] = diag.demanded_advance_m_s;
     abc.follower_projection_error_m = diag.projection_error_m;
     abc.follower_projection_error_rad = diag.projection_error_rad;
     abc.follower_projection_error_count = diag.consecutive_projection_errors;
@@ -6973,7 +6986,9 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
                                     : right_force_control_telemetry_).gate_removed_m,
             nullptr,
-            &(arm_id == ArmId::Left ? left_force_control_telemetry_ : right_force_control_telemetry_));
+            &(arm_id == ArmId::Left ? left_force_control_telemetry_ : right_force_control_telemetry_),
+            &declared_contact_normal_[arm_id == ArmId::Left ? 0 : 1],
+            &force_stream_speed_m_s_[arm_id == ArmId::Left ? 0 : 1]);
         applyPoseTrackWallFold(arm_id, smd_tracker, dt_sec, &out);
         return with_stage_telemetry(out);
     };
@@ -11131,18 +11146,44 @@ void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
             m_phys_filt = m_phys_raw;
         }
     }
-    gate.update(f_stand, m_stand, f_phys_filt, m_phys_filt);
-    // The STREAM channel (absolute-target path) is judged on the PRE-deadzone
-    // stand-frame force VECTOR, low-passed inside the gate into a contact band with
-    // a dwell (the same vector-then-norm rule FtPipeline::loadForceN follows).
-    {
-        const Wrench6D& nodz_stand = pipe.compStandNoDeadzone();
-        gate.updateStream(math::Vector3(nodz_stand.fx, nodz_stand.fy, nodz_stand.fz));
-    }
+    // THE STREAM SPEED IS THE PLAN'S DEMAND, one tick old (on the preview path this
+    // preparation runs before the stages). Two milliseconds of staleness on a quantity
+    // that moves in tens of ms, against the alternative of feeding the gate its own
+    // output - which reads g = 1 at the operating point and loses the crossing.
+    gate.update(f_stand, m_stand, f_phys_filt, m_phys_filt, force_stream_speed_m_s_[i]);
 
     prepared_force_tick_[i]=last_loop_start_ns_;
+    // THE PHYSICAL (pre-deadzone) STAND WRENCH: what a FORCE-mode axis and the declared
+    // normal are judged on, so rest_force_n means the force a sensor reads and not that
+    // force plus the deadzone.
+    const Wrench6D& nodz_stand = pipe.compStandNoDeadzone();
+    prepared_force_physical_[i]={nodz_stand.fx,nodz_stand.fy,nodz_stand.fz,
+                                 nodz_stand.tx,nodz_stand.ty,nodz_stand.tz};
     prepared_force_wrench_[i]={f_stand.x(),f_stand.y(),f_stand.z(),m_stand.x(),m_stand.y(),m_stand.z()};
     prepared_force_magnitude_[i]=f_phys_raw;
+    declared_contact_normal_[i]=declaredContactNormal(arm);
+}
+
+math::Vector3 DualArmServoLoop::declaredContactNormal(ArmId arm) const {
+    // THE AXIS IS DECLARED, ONLY ITS SIGN IS MEASURED (2026-09-11). The press axis is
+    // the law's single mode:force translation row, and the frame is the TOOL's, re-aimed
+    // every tick by the overlay - so the axis follows the tool around a curve without
+    // ever being inferred from the wrench. The sign comes from the measured component
+    // because only the sensor knows which side the surface is on; a sign can flip but it
+    // cannot rotate, and flipping needs the component to cross zero, which is exactly
+    // what "no contact on this axis" means. Inside rest_force_n the normal is ZERO:
+    // there is no advance to attenuate (the law is not yielding there either), which is
+    // what keeps free space free.
+    if (press_axis_index_ < 0) return math::Vector3::Zero();
+    const bool left = arm == ArmId::Left;
+    const control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
+    const Vec6& phys = prepared_force_physical_[left ? 0 : 1];
+    const math::Vector3 axis = overlay.workspaceFrame().col(press_axis_index_);
+    const double component = axis.dot(math::Vector3(phys.x, phys.y, phys.z));
+    if (!std::isfinite(component) ||
+        std::abs(component) <= config_.force_control.gate_rest_force_n)
+        return math::Vector3::Zero();
+    return component > 0.0 ? axis : math::Vector3(-axis);
 }
 
 bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target) {
@@ -11189,7 +11230,11 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     // The gate throttles the FORCE-mode walk; compliance keeps yielding regardless.
     // A gated axis stops WALKING, it does not stop being soft.
     if (engaged) {
-        overlay.step(f_stand, m_stand, gate.translation());
+        // TWO WRENCHES: the deadzoned one for the compliance axes, the physical
+        // (pre-deadzone) one for the declared FORCE axis - see AdmittanceOverlay::step.
+        const Vec6& phys = prepared_force_physical_[i];
+        overlay.step(f_stand, m_stand, math::Vector3(phys.x, phys.y, phys.z),
+                     math::Vector3(phys.rx, phys.ry, phys.rz));
     } else {
         overlay.freeze();
     }
@@ -11233,9 +11278,12 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     tel.gate_translation = gate.translation();
     tel.gate_rotation = gate.rotation();
     tel.gate_force_n = gate.forceN();
-    tel.gate_stream_translation = gate.streamTranslation();
-    tel.gate_stream_force_n = gate.streamForceN();
-    tel.gate_stream_armed = gate.streamArmed();
+    tel.gate_b_eff = gate.bEff();
+    tel.gate_m_eff = gate.mEff();
+    tel.gate_cross_speed_m_s = gate.crossSpeedMs();
+    tel.gate_stream_speed_m_s = gate.streamSpeedMs();
+    tel.gate_rest_force_n = config_.force_control.gate_rest_force_n;
+    tel.gate_peak_force_n = config_.force_control.gate_peak_force_n;
     tel.gate_torque_nm = gate.torqueNm();
     tel.gate_closed = gate.closed();
 
@@ -11254,11 +11302,12 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
 
     bool& gate_prev = left ? left_gate_closed_prev_ : right_gate_closed_prev_;
     if (tel.gate_closed && !gate_prev) {
-        std::cerr << "[INFO] force gate " << toString(arm) << " CLOSED (|F| " << tel.gate_force_n
-                  << " N vs " << config_.force_control.gate_max_force_n << ", |M| "
-                  << tel.gate_torque_nm << " Nm vs " << config_.force_control.gate_max_torque_nm
-                  << ") - the plan is held while the contact stands. This is the design: the "
-                     "command converges to the declared force\n";
+        std::cerr << "[INFO] force gate " << toString(arm) << " nearly shut (|F| "
+                  << tel.gate_force_n << " N vs peak " << config_.force_control.gate_peak_force_n
+                  << " N, rest " << config_.force_control.gate_rest_force_n << " N, stream "
+                  << tel.gate_stream_speed_m_s * 1e3 << " mm/s) - the plan's advance into the "
+                     "declared axis is down to the law's own yield. This is the design: the "
+                     "contact converges to peak_force_n\n";
     } else if (!tel.gate_closed && gate_prev) {
         std::cerr << "[INFO] force gate " << toString(arm) << " re-opened\n";
     }

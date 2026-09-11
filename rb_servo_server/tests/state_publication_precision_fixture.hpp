@@ -298,7 +298,8 @@ void taredForce(FtTelemetry& ft, ForceControlTelemetry& fc) {
   fc.gate_translation=.91234567891234567;fc.gate_rotation=1.;
   fc.gate_force_n=3.1234567891234567;fc.gate_torque_nm=.31234567891234567;
   fc.gate_removed_m=.0012345678912345678;fc.gate_removed_rad=.00012345678912345678;
-  fc.gate_stream_translation=.9876543219876543;fc.gate_stream_force_n=2.1234567891234567;
+  fc.gate_b_eff=500.;fc.gate_m_eff=20.;fc.gate_cross_speed_m_s=.0039876543219876543;
+  fc.gate_stream_speed_m_s=.09876543219876543;fc.gate_rest_force_n=10.;fc.gate_peak_force_n=12.;
   fc.hold_force_n=5.1234567891234567;
 }
 } // namespace state_publication_fixture

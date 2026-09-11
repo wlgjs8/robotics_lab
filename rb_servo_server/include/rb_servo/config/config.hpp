@@ -1726,8 +1726,8 @@ struct FtConfig {
 
 // One axis of the per-axis hybrid law.
 enum class ForceAxisMode {
-    Compliance,   // m*dd + b*d' + k*d = w      springs back to the nominal
-    Force,        // m*dd + b*d'       = w - f  walks until the wrench matches f
+    Compliance,   // m*dd + b*d' + k*d = w                 springs back to the nominal
+    Force,        // m*dd + b*d'       = (|w|-ref)+ * sgn w  ONE-SIDED: rests at ref
     Rigid,        // does not deviate at all
 };
 
@@ -1736,7 +1736,12 @@ struct ForceAxisConfig {
     double m = 0.0;        // <= 0 -> RIGID
     double b = 0.0;        // <  0 -> RIGID
     double k = 0.0;
-    double ref_force = 0.0;   // FORCE mode only [N] or [Nm]
+    // FORCE mode only [N] or [Nm]. NOT typed per row: the loader writes
+    // force_gate.rest_force_n here so the gate's crossing and the law's rest point
+    // are ONE number (a row that types its own value is refused). The axis is judged
+    // on the PHYSICAL, pre-deadzone component - the declared number is the force a
+    // sensor reads, not that force plus whatever the deadzone happens to be.
+    double ref_force = 0.0;
 };
 
 // ---- force control ----------------------------------------------------------
@@ -1792,32 +1797,45 @@ struct ForceControlConfig {
     // 40 s); the gate with k = 0 bounds the force but not the deviation (9.5 m of
     // offset in 300 s). The loader refuses either half.
     bool gate_enable = false;
-    double gate_max_force_n = 0.0;
-    double gate_max_torque_nm = 0.0;
+    // THE CONVERGENCE PAIR (CM wiki/decisions/0049, adopted here 2026-09-11). The gate
+    // used to be a knee-less smoothstep that reached ZERO at a declared `max_force_n`.
+    // That bounds the force but it does not CONVERGE to it: with k = 0 the law's yield
+    // at that force is still F/b, so the only equilibrium a closed gate leaves is
+    // F = 0 - the arm retreats off the surface. Measured 2026-09-11 (hand press onto
+    // the floor, servo_log_20260911_123239): 28 N at contact, then 6.3 mm of retreat
+    // and a rest at 0.1-1.0 N. CM's structural statement of the same fact: with k = 0
+    // the steady state is the pure velocity balance F = b*v_cmd, and "a gate can only
+    // reduce a speed - it can never change an exchange rate".
+    //
+    // So the gate returns an ABSOLUTE speed at the declared force instead:
+    //
+    //     v_cross = (peak_force_n - rest_force_n) / b
+    //     g(F)    = (v_cross / v_s) ^ ((F / peak_force_n) ^ q)      [v_s > v_cross]
+    //     g(F)    = 1                                              [v_s <= v_cross]
+    //
+    // At F = 0 it is exactly 1, so free space and light contact cost the plan nothing.
+    // At F = peak_force_n it returns exactly v_cross WHATEVER v_s IS, and that point
+    // lies on the law's own yield line v = (F - rest_force_n)/b, so the two curves
+    // cross AT THE DECLARED FORCE for every stream speed. CM measured the converged
+    // force moving < 0.2 N over a 5x speed sweep, against > 3 N for the smoothstep.
+    //
+    // `rest_force_n` IS THE SECOND HALF OF THE DESIGN and it is ours, not CM's. CM runs
+    // rest = 0 (a pure damper), which pins the force only while the plan keeps advancing
+    // faster than v_cross; at v_s -> 0 - a hand push with the policy stopped, or a
+    // policy's own press-and-hold phase - their equilibrium is F = 0 again. A one-sided
+    // rest force makes |F| <= rest_force_n a whole continuum of equilibria: the axis
+    // does not move at all there, so free space cannot be sought (the walk CM's
+    // f_ref has to bound with a fence) and a contact RESTS at rest_force_n instead of
+    // retreating to zero. rest_force_n = 0 reproduces CM exactly.
+    double gate_peak_force_n = 0.0;    // [N]    streamed contact CONVERGES here
+    double gate_rest_force_n = 0.0;    // [N]    an external contact RESTS here
+    double gate_peak_vel_mm_s = 0.0;   // [mm/s] the yield speed at peak_force_n; DERIVES b
+    // THE CURVE'S BEND, not exposed in yaml. CM 0049 SS3.2/3.3 verified 2: higher q
+    // leaves light contact freer but steepens the operating point, and the pair
+    // (light-contact margin, loop gain) is best there. Moving it is a design change.
+    static constexpr double kGateCurveExponent = 2.0;
     double gate_close_tau_s = 0.10;   // fast to close - protective
     double gate_open_tau_s = 0.40;    // slow to open  - a fast re-open makes it a relay
-    // THE STREAM CHANNEL (2026-09-04): how the gate is judged on the absolute-target
-    // path (UMI / TcpPoseTarget through the pose-track SMD). Sustained contact only:
-    // the physical force VECTOR low-passed into a contact band (magnitude AND cut
-    // direction from the filtered vector), an arm level held for a dwell, a release
-    // level below it. The chunk follower keeps the tick-judged gate. See
-    // ForceGate::updateStream for the measurement that forced the split.
-    // 0 = off: the judge reads the raw force vector (updateStream already treats
-    // hz <= 0 as pass-through; the loader accepts it since 2026-09-07).
-    double gate_stream_judge_lpf_hz = 2.0;
-    double gate_stream_arm_force_n = 5.0;
-    double gate_stream_release_force_n = 2.0;
-    double gate_stream_arm_dwell_sec = 0.10;
-    // RELEASE DWELL (2026-09-10 pm). Used by the servo loop's contact-DIRECTION
-    // Schmitt (dual_arm_servo_loop, preview path): the slow vector must stand
-    // below gate_stream_release_force_n for this long before the direction is
-    // disarmed. Without it a violently varying push toggled the arming at ~30 Hz
-    // (servo_log_20260910_183004, right arm 56.27/56.28 and 56.41/56.43 s: the
-    // dispatched contact direction flipped 1.00 <-> 0.00 within 16 ms), because a
-    // 2 Hz filter fed a sign-alternating 46 N ring still crosses 5 N and 2 N inside
-    // a few ticks. The gate's own stream channel keeps its arm dwell and needs no
-    // release dwell: its output is already slewed.
-    double gate_stream_release_dwell_sec = 0.20;
 
     // ---- the fence ---------------------------------------------------------
     // A DEAD BACKSTOP, not an operating limit. Non-positive = no fence on that part.

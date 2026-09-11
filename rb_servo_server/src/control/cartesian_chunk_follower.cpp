@@ -443,6 +443,18 @@ void CartesianChunkFollower::stepToNextSegment() {
     // THE GATE, AT THE SEGMENT BOUNDARY. This is our input-period equivalent of the
     // controller-manager follow path's per-delta gate: one knot is consumed per
     // segment, so this is where an advance exists to attenuate.
+    {
+      // THE DEMANDED ADVANCE, BEFORE ANY ATTENUATION (2026-09-11). This is the speed
+      // the force gate's curve is a function of, and it must be the DEMAND: fed the
+      // achieved speed the gate reads its own output, and at the operating point the
+      // achieved speed IS the crossing speed, so it would re-open and the crossing
+      // would be gone (CM 0049's warning, stated as code). Updated once per segment,
+      // which is the input period the demand is defined on.
+      const auto& p0 = core_.p0();
+      const Eigen::Vector3d demand = positionOf(window_.poseAt(k)) + plan_shift_ +
+                                     fold_shift_ - Eigen::Vector3d(p0[0], p0[1], p0[2]);
+      diag_.demanded_advance_m_s = seg_dt_ > 1e-9 ? demand.norm() / seg_dt_ : 0.0;
+    }
     if (advance_gate_ < 1.0 && into_contact_dir_.squaredNorm() > 1e-18) {
       const auto& p0 = core_.p0();
       const Eigen::Vector3d advance = positionOf(window_.poseAt(k)) + plan_shift_ +

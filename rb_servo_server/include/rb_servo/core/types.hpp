@@ -931,9 +931,16 @@ struct ForceControlTelemetry {
     double gate_removed_rad = 0.0;
     // THE STREAM CHANNEL (absolute-target path, 2026-09-04): the slow |F| it is
     // judged on, whether the sustained-contact trigger is armed, and its fade.
-    double gate_stream_translation = 1.0;
-    double gate_stream_force_n = 0.0;
-    bool gate_stream_armed = false;
+    // CM 0049's five columns: the two derived law numbers, the crossing speed the
+    // curve is pinned to, and the demand it was fed. No deviation-POSITION column on
+    // purpose - on a fold path the deviation is booked into the plan every tick, so it
+    // reads ~0 and would say "force did nothing"; the VELOCITY survives the fold.
+    double gate_b_eff = 0.0;
+    double gate_m_eff = 0.0;
+    double gate_cross_speed_m_s = 0.0;
+    double gate_stream_speed_m_s = 0.0;
+    double gate_rest_force_n = 0.0;
+    double gate_peak_force_n = 0.0;
     // CSV-only: exact gate snapshot consumed by pose-track SMD, BEFORE this
     // tick's force update. The legacy fields above describe the updated gate.
     bool smd_gate_sample_valid = false;

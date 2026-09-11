@@ -228,8 +228,9 @@ rb_servo::ForceControlConfig shippedLaw() {
         c.hold.rotation[i] = {rb_servo::ForceAxisMode::Compliance, 1.0, 37.94, 249.91, 0.0};
     }
     c.gate_enable = true;
-    c.gate_max_force_n = 10.0;
-    c.gate_max_torque_nm = 1.4;
+    c.gate_peak_force_n = 12.0;
+    c.gate_rest_force_n = 10.0;
+    c.gate_peak_vel_mm_s = 4.0;
     c.max_deviation_m = 0.040;
     c.max_deviation_rad = 0.2617993878;
     return c;
@@ -303,10 +304,11 @@ bool testGateAttenuatesOnlyIntoTheContact() {
     rb_servo::ForceControlConfig cfg = shippedLaw();
     rb_servo::control::ForceGate gate;
     gate.configure(cfg, 0.002);
-    // Drive the gate closed against a +Z reaction (the environment pushes the tool up).
+    // Drive the gate shut against a +Z reaction (the environment pushes the tool up)
+    // with a stream far above the crossing speed, where the curve's ratio is small.
     const rb_servo::math::Vector3 f(0.0, 0.0, 20.0);
     const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
-    for (int i = 0; i < 5000; ++i) gate.update(f, m);
+    for (int i = 0; i < 5000; ++i) gate.update(f, m, 20.0, -1.0, 0.200);
     CHECK(gate.translation() < 0.02);
 
     double removed = 0.0;
@@ -342,15 +344,15 @@ bool testGateIsAsymmetric() {
     // ONE tick of closing from a fully open gate: gap 1.0.
     rb_servo::control::ForceGate closing;
     closing.configure(cfg, 0.002);
-    closing.update(hard, m);
+    closing.update(hard, m, 20.0, -1.0, 0.200);
     const double close_step = 1.0 - closing.translation();
 
     // ONE tick of opening from a fully closed gate: the same gap of 1.0.
     rb_servo::control::ForceGate opening;
     opening.configure(cfg, 0.002);
-    for (int i = 0; i < 5000; ++i) opening.update(hard, m);   // drive it to ~0
+    for (int i = 0; i < 5000; ++i) opening.update(hard, m, 20.0, -1.0, 0.200);  // -> ~0
     const double closed = opening.translation();
-    opening.update(none, m);
+    opening.update(none, m, 0.0, -1.0, 0.200);
     const double open_step = opening.translation() - closed;
 
     CHECK(close_step > 0.0);
@@ -365,7 +367,7 @@ bool testGateIsOpenInFreeSpace() {
     rb_servo::control::ForceGate gate;
     gate.configure(shippedLaw(), 0.002);
     const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
-    for (int i = 0; i < 1000; ++i) gate.update(zero, zero);
+    for (int i = 0; i < 1000; ++i) gate.update(zero, zero, -1.0, -1.0, 0.200);
     CHECK(near(gate.translation(), 1.0, 1e-12));
     double removed = 1.0;
     const auto adv = gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
@@ -374,266 +376,7 @@ bool testGateIsOpenInFreeSpace() {
     return true;
 }
 
-// THE STREAM CHANNEL IGNORES A VIBRATION AND HOLDS ON A SUSTAINED CONTACT
-// (2026-09-04). A zero-mean 15 Hz force of 20 N amplitude (the tool's motion-
-// excited vibration, measured 3-5 N RMS with 12-33 ms excursions over 10 N) closes
-// the tick channel; the stream channel, judged on the low-passed VECTOR, must not
-// arm. Pressed steadily it must arm after the dwell and cut only INTO the contact.
-bool testGateStreamChannelIgnoresVibrationAndHoldsSustainedContact() {
-    rb_servo::ForceControlConfig cfg = shippedLaw();
-    cfg.gate_stream_judge_lpf_hz = 2.0;
-    cfg.gate_stream_arm_force_n = 5.0;
-    cfg.gate_stream_release_force_n = 2.0;
-    cfg.gate_stream_arm_dwell_sec = 0.10;
-    rb_servo::control::ForceGate gate;
-    gate.configure(cfg, 0.002);
-    const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
-    const rb_servo::math::Vector3 into(0.0, 0.0, -0.001);
-    double min_tick = 1.0;
-    double max_stream_removed = 0.0;
-    double max_slow = 0.0;
-    for (int i = 0; i < 2000; ++i) {
-        // Ring-up over 0.2 s like a real resonance: a full-amplitude vibration that
-        // starts abruptly has a one-sided first half-cycle (a 5 N transient in the
-        // slow filter) that no physical tool produces.
-        const double ring_up = std::min(1.0, i / 100.0);
-        const double f = ring_up * 20.0 * std::sin(2.0 * M_PI * 15.0 * i * 0.002);
-        const rb_servo::math::Vector3 vib(0.0, 0.0, f);
-        gate.update(vib, zero, std::abs(f));
-        gate.updateStream(vib);
-        min_tick = std::min(min_tick, gate.translation());
-        max_slow = std::max(max_slow, gate.streamForceN());
-        double removed = 0.0;
-        gate.applyStreamTranslation(into, &removed);
-        max_stream_removed = std::max(max_stream_removed, removed);
-        CHECK(!gate.streamArmed());
-    }
-    CHECK(min_tick < 0.5);                       // the tick channel did react
-    CHECK(max_slow < 4.0);                       // 20 N at 15 Hz is ~2.6 N after the 2 Hz vector LPF
-    CHECK(near(gate.streamTranslation(), 1.0, 1e-9));
-    CHECK(near(max_stream_removed, 0.0));        // the stream channel did nothing
-    // A sustained 20 N push (+Z reaction): arms after the dwell, closes, cuts INTO only.
-    const rb_servo::math::Vector3 push(0.0, 0.0, 20.0);
-    int armed_at = -1;
-    for (int i = 0; i < 1000; ++i) {
-        gate.update(push, zero, 20.0);
-        gate.updateStream(push);
-        if (armed_at < 0 && gate.streamArmed()) armed_at = i;
-    }
-    CHECK(armed_at >= 50);                       // not before the 100 ms dwell
-    CHECK(armed_at < 250);                       // and not long after the 2 Hz LPF crosses 5 N
-    CHECK(gate.streamTranslation() < 0.02);
-    double removed = 0.0;
-    const auto held = gate.applyStreamTranslation(into, &removed);
-    CHECK(std::abs(held.z()) < 1e-4);
-    CHECK(removed > 0.0);
-    const auto tang = gate.applyStreamTranslation(rb_servo::math::Vector3(0.001, 0.0, 0.0), &removed);
-    CHECK(near(tang.x(), 0.001, 1e-12));
-    CHECK(near(removed, 0.0));
-    const auto out = gate.applyStreamTranslation(rb_servo::math::Vector3(0.0, 0.0, 0.001), &removed);
-    CHECK(near(out.z(), 0.001, 1e-12));
-    CHECK(near(removed, 0.0));
-    // Release: the force goes away, the channel disarms below 2 N and re-opens slowly.
-    int disarmed_at = -1;
-    for (int i = 0; i < 2000; ++i) {
-        gate.update(zero, zero, 0.0);
-        gate.updateStream(zero);
-        if (disarmed_at < 0 && !gate.streamArmed()) disarmed_at = i;
-    }
-    CHECK(disarmed_at > 0);
-    CHECK(disarmed_at < 500);
-    CHECK(gate.streamTranslation() > 0.9);
-    return true;
-}
-
-bool testStreamReleaseKeepsNormalAndAllowsRecontact() {
-    auto cfg = shippedLaw();
-    cfg.gate_open_tau_s = 1.0;
-    rb_servo::control::ForceGate gate;
-    gate.configure(cfg, .002);
-    using V = rb_servo::math::Vector3;
-    for (int i = 0; i < 500; ++i) gate.updateStream(V(0, 0, 20));
-    CHECK(gate.streamArmed());
-    for (int i = 0; i < 1000 && gate.streamArmed(); ++i) gate.updateStream(V::Zero());
-    CHECK(gate.streamReleasing());
-    const V normal = gate.streamForceDirection();
-    CHECK((normal - V::UnitZ()).norm() < 1e-12);
-    for (int i = 0; i < 400; ++i) {
-        // Below-threshold residual force rotates across the old contact normal.
-        // It must neither redirect the lingering cut nor delay the scalar release.
-        const double phase = 2 * M_PI * 9 * .002 * i;
-        const double before = gate.streamTranslation();
-        gate.updateStream(V(.5 * std::cos(phase), .5 * std::sin(phase), 0));
-        CHECK(!gate.streamArmed());
-        CHECK(gate.streamReleasing());
-        CHECK((gate.streamForceDirection() - normal).norm() < 1e-12);
-        CHECK(near(gate.streamTranslation(), before + (1 - before) * .002, 1e-12));
-        double removed = 0;
-        const V tangential = gate.applyStreamTranslation(V(.001, 0, 0), &removed);
-        CHECK((tangential - V(.001, 0, 0)).norm() < 1e-12 && removed == 0);
-        const V retreat = gate.applyStreamTranslation(V(0, 0, .001), &removed);
-        CHECK((retreat - V(0, 0, .001)).norm() < 1e-12 && removed == 0);
-        const V into = gate.applyStreamTranslation(V(0, 0, -.001), &removed);
-        CHECK(near(into.z(), -.001 * gate.streamTranslation(), 1e-12));
-    }
-    // A real contact in a new direction must regain ownership while the old
-    // release is still running; freezing the measurement would fail this case.
-    int armed_at = -1;
-    for (int i = 0; i < 500; ++i) {
-        gate.updateStream(V(20, 0, 0));
-        if (gate.streamArmed()) { armed_at = i; break; }
-    }
-    CHECK(armed_at >= 49 && armed_at < 200);
-    CHECK(!gate.streamReleasing());
-    CHECK(gate.streamForceDirection().dot(V::UnitX()) > .99);
-    for (int i = 0; i < 500; ++i) gate.updateStream(V(20, 0, 0));
-    double removed = 0;
-    const V into_new = gate.applyStreamTranslation(V(-.001, 0, 0), &removed);
-    CHECK(std::abs(into_new.x()) < .00002 && removed > .00098);
-    for (int i = 0; i < 8000; ++i) gate.updateStream(V::Zero());
-    CHECK(gate.streamTranslation() == 1.0 && !gate.streamReleasing());
-    CHECK(gate.streamForceDirection().isZero(0));
-    gate.reset();
-    CHECK(gate.streamMeasuredForce().isZero(0));
-    CHECK(!gate.streamArmed() && !gate.streamReleasing());
-    return true;
-}
-
-bool testPreviewConstraintUsesExistingSustainedContactClassifier() {
-    auto cfg=shippedLaw();
-    cfg.gate_enable=true;cfg.gate_max_force_n=10.;cfg.gate_max_torque_nm=1.4;
-    cfg.gate_close_tau_s=.10;cfg.gate_open_tau_s=1.;
-    cfg.gate_stream_judge_lpf_hz=2.;cfg.gate_stream_arm_force_n=5.;
-    cfg.gate_stream_release_force_n=2.;cfg.gate_stream_arm_dwell_sec=.10;
-    rb_servo::control::ForceGate gate;gate.configure(cfg,.002);
-    const rb_servo::math::Vector3 zero=rb_servo::math::Vector3::Zero();
-    const rb_servo::math::Vector3 tail(-1e-5,0.,0.);
-    // A tiny filtered deadzoned vector can outlive the instantaneous direction
-    // while a scalar physical magnitude still closes the tick gate. It is not
-    // an armed sustained contact and must not activate the extra QP constraint.
-    gate.update(tail,zero,6.,0.);gate.updateStream(rb_servo::math::Vector3(-.5,0.,0.));
-    CHECK(gate.translation()<1.);CHECK(gate.forceDirection().norm()>0.9);CHECK(!gate.streamArmed());
-    auto authority=rb_servo::control::sustainedPreviewContactAuthority(true,gate);
-    CHECK(authority.gate==1.&&authority.normal_into_stand.isZero(0.));
-    bool saw_dwell=false;int armed_at=-1;
-    for(int i=0;i<500;++i) {
-        // 15 N physical press, 12 N after the existing 3 N vector deadzone.
-        gate.update(rb_servo::math::Vector3(-12.,0.,0.),zero,15.,0.);
-        gate.updateStream(rb_servo::math::Vector3(-15.,0.,0.));
-        authority=rb_servo::control::sustainedPreviewContactAuthority(true,gate);
-        if(!gate.streamArmed()) {
-            saw_dwell=saw_dwell||gate.streamOverSec()>0.;
-            CHECK(authority.gate==1.&&authority.normal_into_stand.isZero(0.));
-            CHECK(gate.translation()<1.); // the canonical tick protection remains live during dwell
-        } else {armed_at=i;break;}
-    }
-    CHECK(saw_dwell&&armed_at>=49&&armed_at<500);
-    CHECK(authority.gate==gate.translation()&&authority.gate<1.);
-    CHECK((authority.normal_into_stand-rb_servo::math::Vector3::UnitX()).norm()<1e-12);
-    const double tick_before=gate.translation(),stream_before=gate.streamTranslation();
-    const auto direction_before=gate.forceDirection();const double force_before=gate.streamForceN();
-    authority=rb_servo::control::sustainedPreviewContactAuthority(false,gate);
-    CHECK(authority.gate==1.&&authority.normal_into_stand.isZero(0.));
-    CHECK(gate.translation()==tick_before&&gate.streamTranslation()==stream_before);
-    CHECK((gate.forceDirection()-direction_before).norm()==0.&&gate.streamForceN()==force_before&&gate.streamArmed());
-    bool released=false;
-    for(int i=0;i<500;++i) {
-        gate.update(tail,zero,0.,0.);gate.updateStream(zero);
-        if(!gate.streamArmed()) {
-            released=true;CHECK(gate.streamForceN()<cfg.gate_stream_release_force_n);
-            CHECK(gate.translation()<1.&&gate.streamTranslation()<1.);
-            CHECK(gate.forceDirection().norm()>0.9);
-            const double old_tick=gate.translation(),old_stream=gate.streamTranslation();
-            authority=rb_servo::control::sustainedPreviewContactAuthority(true,gate);
-            CHECK(authority.gate==1.&&authority.normal_into_stand.isZero(0.));
-            CHECK(gate.translation()==old_tick&&gate.streamTranslation()==old_stream);
-            break;
-        }
-    }
-    CHECK(released);return true;
-}
-
-// THE FOLLOWER'S CONTACT DIRECTION SURVIVES A CHATTERING PUSH (2026-09-10 pm).
-// Replays what the hand push did to the 2 Hz slow vector: a ~3.5 N mean push with a
-// 30 Hz +-46 N ring on it. Filtered at 2 Hz the ring still leaves ~3 N of ripple, so
-// the slow magnitude crosses BOTH the 5 N arm level and the 2 N release level every
-// cycle. Without a release dwell that disarms the direction ~30 times a second, and
-// the arm alternates between a complete hold-back and a free advance at 30 Hz
-// (servo_log_20260910_183004, right arm 56.27 and 56.41 s). The dwell must hold it
-// armed; a real release must still disarm it, and no later than it should.
-bool testFollowerContactDirectionSurvivesAChatteringPush() {
-    using rb_servo::math::Vector3;
-    auto cfg=shippedLaw();
-    cfg.gate_enable=true;cfg.gate_max_force_n=10.;cfg.gate_max_torque_nm=1.4;
-    cfg.gate_stream_judge_lpf_hz=2.;cfg.gate_stream_arm_force_n=5.;
-    cfg.gate_stream_release_force_n=2.;cfg.gate_stream_arm_dwell_sec=.10;
-    const double dt=.002,dwell=.20;
-    const int ticks_to_dwell=static_cast<int>(dwell/dt);
-    struct Run {
-        rb_servo::control::ForceGate gate;
-        rb_servo::control::FollowerContactDirectionArming arming;
-        int disarms=0,below=0;
-    };
-    const auto tick=[&](Run& r,const Vector3& force,double dwell_sec) {
-        r.gate.updateStream(force);
-        if(r.gate.streamForceN()<cfg.gate_stream_release_force_n)++r.below;
-        const bool was=r.arming.armed;
-        const bool armed=rb_servo::control::updateFollowerContactDirectionArming(r.arming,
-            r.gate.streamMeasuredForce(),dt,cfg.gate_stream_arm_force_n,
-            cfg.gate_stream_release_force_n,dwell_sec);
-        if(was&&!armed)++r.disarms;
-        return armed;
-    };
-    const auto push=[&](int i) {
-        return Vector3(-(3.5+46.*std::sin(2.*M_PI*30.*i*dt)),0.,0.);
-    };
-    // The chatter really does re-cross both levels: with no dwell it disarms
-    // repeatedly. This negative control is what makes the positive case mean
-    // something - it is the behaviour that shook the arm.
-    {
-        Run control;control.gate.configure(cfg,dt);
-        for(int i=0;i<1500;++i)tick(control,push(i),0.);
-        CHECK(control.below>0);CHECK(control.disarms>=10);
-    }
-    Run run;run.gate.configure(cfg,dt);
-    for(int i=0;i<1500;++i)tick(run,push(i),dwell);   // 3 s of the same push
-    CHECK(run.below>0);        // the slow magnitude did dip under the release level
-    CHECK(run.disarms==0);     // ... and the direction never let go
-    CHECK(run.arming.armed);
-    CHECK((run.arming.direction+Vector3::UnitX()).norm()<1e-9);
-    // While the contact fades, the latched direction must not follow the small,
-    // noisy remainder: the direction of a 1 N residue is not a contact normal.
-    Vector3 latched=Vector3::Zero();
-    for(int i=0;i<60&&latched.isZero(0.);++i) {
-        tick(run,Vector3::Zero(),dwell);
-        if(run.arming.release_sec>0.)latched=run.arming.direction;
-    }
-    CHECK(!latched.isZero(0.)&&run.arming.armed);
-    const int elapsed=static_cast<int>(std::llround(run.arming.release_sec/dt));
-    for(int i=0;i<ticks_to_dwell-elapsed-1;++i)tick(run,Vector3(0.,-1.,0.),dwell);
-    CHECK(run.arming.armed);                                  // still inside the dwell
-    CHECK((run.arming.direction-latched).norm()==0.);         // and still the same normal
-    // A real release: the slow vector stands under the release level for the dwell.
-    bool released=false;
-    for(int i=0;i<2000&&!released;++i) {
-        const double standing=run.arming.release_sec;
-        if(!tick(run,Vector3::Zero(),dwell)) {
-            released=true;
-            CHECK(standing+dt>=dwell-1e-12);        // never before the dwell is served
-            CHECK(run.arming.direction.isZero(0.)); // and the normal is dropped
-        }
-    }
-    CHECK(released&&run.disarms==1);
-    CHECK(run.below>=ticks_to_dwell);
-    // Arming is never delayed: one sample over the arm level arms it.
-    rb_servo::control::FollowerContactDirectionArming fresh;
-    CHECK(rb_servo::control::updateFollowerContactDirectionArming(fresh,Vector3(0.,0.,-6.),dt,
-        cfg.gate_stream_arm_force_n,cfg.gate_stream_release_force_n,dwell));
-    CHECK((fresh.direction+Vector3::UnitZ()).norm()<1e-12);
-    return true;
-}
-
-// A RELEASED GATE RE-OPENS TO EXACTLY 1.0 - on both channels. A first-order slew
+// A RELEASED GATE RE-OPENS TO EXACTLY 1.0. A first-order slew
 // only approaches 1; without the snap a gate that closed once stayed at 0.9999...
 // and its nanometre "cuts" kept invoking the tracker's hold (2026-09-04 22:32).
 bool testGateReopensToExactlyOneAfterRelease() {
@@ -643,23 +386,12 @@ bool testGateReopensToExactlyOneAfterRelease() {
     gate.configure(cfg, 0.002);
     const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
     const rb_servo::math::Vector3 push(0.0, 0.0, 20.0);
-    for (int i = 0; i < 500; ++i) {
-        gate.update(push, zero, 20.0);
-        gate.updateStream(push);
-    }
+    for (int i = 0; i < 500; ++i) gate.update(push, zero, 20.0, -1.0, 0.200);
     CHECK(gate.translation() < 0.02);
-    CHECK(gate.streamTranslation() < 0.02);
     // Release and wait 15 tau: the exponential alone would sit at 1 - 3e-7.
-    for (int i = 0; i < 7500; ++i) {
-        gate.update(zero, zero, 0.0);
-        gate.updateStream(zero);
-    }
+    for (int i = 0; i < 7500; ++i) gate.update(zero, zero, 0.0, -1.0, 0.200);
     CHECK(gate.translation() == 1.0);
-    CHECK(gate.streamTranslation() == 1.0);
-    // The slow force direction has decayed too; even a stale one must cut nothing.
     double removed = 1.0;
-    gate.applyStreamTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
-    CHECK(removed == 0.0);
     gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
     CHECK(removed == 0.0);
     return true;
@@ -703,47 +435,6 @@ bool testHoldFoldDeltaFloorAndCap() {
     snap.y += 0.05;
     CHECK(!rb_servo::control::computeHoldFold(emitted, snap, lim, &d, &capped));
     CHECK(capped);
-    return true;
-}
-
-// A SIGN-FLIPPING DIRECTION CUTS NOTHING. With the tick channel, a 20 N force that
-// alternates +Z / -Z each tick cut the tracker on every other tick (the chopping
-// measured on 2026-09-04); judged on the low-passed VECTOR it is no force at all.
-bool testGateStreamChannelAveragesOutAFlippingDirection() {
-    rb_servo::ForceControlConfig cfg = shippedLaw();
-    cfg.gate_stream_judge_lpf_hz = 2.0;
-    cfg.gate_stream_arm_force_n = 5.0;
-    cfg.gate_stream_release_force_n = 2.0;
-    cfg.gate_stream_arm_dwell_sec = 0.10;
-    rb_servo::control::ForceGate gate;
-    gate.configure(cfg, 0.002);
-    const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
-    const rb_servo::math::Vector3 up(0.0, 0.0, 20.0);
-    const rb_servo::math::Vector3 down(0.0, 0.0, -20.0);
-    // Prime in free space first: the slow filter seeds on its first sample (so a
-    // contact already standing at enable is not ramped into from a stale zero), and
-    // this test is about the steady state, not the seed.
-    for (int i = 0; i < 200; ++i) {
-        gate.update(zero, zero, 0.0);
-        gate.updateStream(zero);
-    }
-    double tick_removed_total = 0.0;
-    double stream_removed_total = 0.0;
-    for (int i = 0; i < 1000; ++i) {
-        const auto& f = (i % 2 == 0) ? up : down;
-        gate.update(f, zero, 20.0);
-        gate.updateStream(f);
-        double r = 0.0;
-        gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &r);
-        tick_removed_total += r;
-        gate.applyStreamTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &r);
-        stream_removed_total += r;
-    }
-    CHECK(!gate.streamArmed());
-    CHECK(gate.streamForceN() < 1.0);
-    CHECK(near(gate.streamTranslation(), 1.0, 1e-9));
-    CHECK(tick_removed_total > 0.1);             // the tick channel chopped
-    CHECK(near(stream_removed_total, 0.0));      // the stream channel did not
     return true;
 }
 
@@ -1062,9 +753,34 @@ rb_servo::ForceControlConfig springlessLaw() {
     return c;
 }
 
-// THE PURE-DAMPER PREDICATE IS THE WHOLE GATE ON THE FOLD. k == 0 with no force
-// target, per triad; a rigid axis neither helps nor hinders; any spring or any
-// FORCE-mode axis refuses.
+// THE SHIPPED PRESS LAW (2026-09-11): the tool-frame triad with Z declared as the
+// press axis, x/y plain compliance, and the gate pair the crossing is built from. b is
+// what the loader's raise-only derivation installs from (peak - rest)/peak_vel =
+// 2 N / 4 mm/s = 500 N*s/m, which is the value this cell already ran.
+rb_servo::ForceControlConfig pressLaw() {
+    rb_servo::ForceControlConfig c = shippedLaw();
+    for (int i = 0; i < 3; ++i) {
+        c.stream.translation[i] = {rb_servo::ForceAxisMode::Compliance, 20.0, 500.0, 0.0, 0.0};
+        c.stream.rotation[i] = {rb_servo::ForceAxisMode::Rigid, 0.0, 0.0, 0.0, 0.0};
+        c.hold.translation[i] = c.stream.translation[i];
+        c.hold.rotation[i] = c.stream.rotation[i];
+    }
+    // TOOL Z carries the press; the loader writes rest_force_n into ref_force.
+    c.stream.translation[2].mode = rb_servo::ForceAxisMode::Force;
+    c.stream.translation[2].ref_force = c.gate_rest_force_n;
+    c.hold.translation[2] = c.stream.translation[2];
+    c.fold_deviation = true;
+    c.wrench_filter_hz = 25.0;
+    c.gate_close_tau_s = 0.10;
+    c.gate_open_tau_s = 1.0;
+    return c;
+}
+
+// THE PURE-DAMPER PREDICATE IS THE WHOLE GATE ON THE FOLD. k == 0 per triad; a rigid
+// axis neither helps nor hinders; a spring refuses; a ONE-SIDED force axis is admitted,
+// because it has no free-space walk to hand over and the fold is what keeps the plan
+// where the arm is. Declining it pinned the 40 mm fence on a hand push
+// (servo_log_20260911_133829, right arm: dev 40.0 mm, bounded for 3606 ticks).
 bool testPureDamperPredicate() {
     rb_servo::control::AdmittanceOverlay overlay;
     overlay.configure(shippedLaw(), 0.002);                 // k = 400: a spring
@@ -1079,9 +795,20 @@ bool testPureDamperPredicate() {
     law.translation[0].mode = rb_servo::ForceAxisMode::Rigid;
     overlay.setLaw(law);
     CHECK(overlay.pureDamperTranslation());
-    // A FORCE-mode axis walks by design and must keep its designed stop (the fence).
+    // THE SHIPPED PRESS LAW MUST FOLD. This is the assertion whose absence let a
+    // declared press axis silently walk the deviation to the fence.
+    rb_servo::ForceControlConfig press = pressLaw();
+    overlay.setLaw(press.stream);
+    CHECK(overlay.pureDamperTranslation());
+    CHECK(overlay.pureDamperRotation());
+    // A SPRING on the press axis still refuses: at k != 0 the gauge change becomes an
+    // origin walk, whatever the mode says.
+    law = press.stream;
+    law.translation[2].k = 400.0;
+    overlay.setLaw(law);
+    CHECK(!overlay.pureDamperTranslation());
+    // And a ref_force on a COMPLIANCE row is malformed, not a press declaration.
     law = k0.stream;
-    law.translation[2].mode = rb_servo::ForceAxisMode::Force;
     law.translation[2].ref_force = -10.0;
     overlay.setLaw(law);
     CHECK(!overlay.pureDamperTranslation());
@@ -1145,6 +872,7 @@ struct WallLoop {
     std::size_t head = 0;
     double f_filt = 0.0;
     double f_phys_filt = 0.0;
+    double f_phys_signed = 0.0;   // the filtered PHYSICAL (pre-deadzone) z component
     bool primed = false;
     double plan_z = 0.0;
     double emitted_z = 0.0;
@@ -1166,30 +894,40 @@ struct WallLoop {
         const double f_dz = std::abs(f_raw) <= deadzone_n
             ? 0.0 : (f_raw < 0.0 ? f_raw + deadzone_n : f_raw - deadzone_n);
         if (lpf_hz > 0.0) {
-            if (!primed) { f_filt = f_dz; f_phys_filt = std::abs(f_raw); primed = true; }
-            else {
+            if (!primed) {
+                f_filt = f_dz; f_phys_filt = std::abs(f_raw); f_phys_signed = f_raw;
+                primed = true;
+            } else {
                 const double tau = 1.0 / (2.0 * M_PI * lpf_hz);
                 const double a = std::min(1.0, dt / (tau + dt));
                 f_filt += a * (f_dz - f_filt);
                 f_phys_filt += a * (std::abs(f_raw) - f_phys_filt);
+                f_phys_signed += a * (f_raw - f_phys_signed);
             }
         } else {
             f_filt = f_dz;
             f_phys_filt = std::abs(f_raw);
+            f_phys_signed = f_raw;
         }
         force_seen = f_raw;   // the TRUE contact force (what the wall feels)
         const rb_servo::math::Vector3 f(0.0, 0.0, f_filt);
         const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
-        gate.update(f, m, gate_on_physical ? f_phys_filt : -1.0, -1.0);
+        const rb_servo::math::Vector3 f_phys(0.0, 0.0, f_phys_signed);
+        // THE DEMAND, not the achieved advance: `v_cmd` is what the plan asks for and
+        // the gate never touches it, which is the property the crossing rests on.
+        gate.update(f, m, gate_on_physical ? f_phys_filt : -1.0, -1.0, v_cmd);
         // The plan advance into the wall, projectively gated (the chunk follower's
         // setAdvanceGate does this per segment; per tick is the same law).
         double removed = 0.0;
         const rb_servo::math::Vector3 adv =
             gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, v_cmd * dt), &removed);
         plan_z += adv.z();
-        overlay.step(f, m, gate.translation());
+        overlay.step(f, m, f_phys, m);
         emitted_z = plan_z + overlay.deviation().z();
-        if (fold) {
+        // THE LIVE LOOP GATES THE FOLD ON THE PREDICATE (foldForceDeviation), so this
+        // harness must too - folding unconditionally is what hid the 2026-09-11 fence
+        // bug from every unit test while the arm went rigid on hardware.
+        if (fold && overlay.pureDamperTranslation() && overlay.pureDamperRotation()) {
             const double d = overlay.deviation().z();
             plan_z += d;
             absorbed_z += d;
@@ -1221,50 +959,147 @@ bool testFoldIsInvisibleToTheContact() {
     return true;
 }
 
-// WITH k = 0 THE CONTACT FORCE IS A BY-PRODUCT, NOT A DESIGNED NUMBER (CM 0028 SS2):
-// the plan creeps in at g(F)*v_cmd while the damper retreats at F/b, so a streamed
-// contact rests where b*v_cmd*g(F/F_max) = F - here ~7.6 N for 50 mm/s at b = 1000,
-// below the 10 N gate and well above zero. And the loop's stability against a rigid
-// surface is a DELAY margin (docs/reference/force_control_stability_margin.md):
-// b = 1000 at 18 ms of delay is +4.7 dB against 30.7 kN/m and settles; the old
-// b = 434.7 / m = 15 row is -3.7 dB there and rings.
-bool testSpringlessContactSettlesAtTheDamperFixedPointAndTheOldRowRings() {
-    auto run = [](const rb_servo::ForceControlConfig& cfg, double* p2p_last_s, double* f_mean) {
-        WallLoop w(cfg, true, 9);           // 18 ms of delay
-        double fmin = 1e9, fmax = -1e9, fsum = 0.0;
-        for (int i = 0; i < 3000; ++i) {    // 6 s
+// ============================================================================
+// THE TWO THINGS THE FORCE DESIGN PROMISES (2026-09-11). Everything else in this
+// file is a property of one of its parts; these two are the contract.
+// ============================================================================
+
+// (1) A STREAMED CONTACT CONVERGES AT peak_force_n, FOR EVERY STREAM SPEED. That is
+// the whole point of the curve: the old smoothstep bounded the force and converged to
+// b*v_s (CM measured 6.16 N at 50 mm/s, 4.01 at 25, 1.87 at 10 - the same wall giving a
+// different force to a fast hand than to a slow one), and our own fade-to-zero version
+// converged to 0 N because the law kept yielding where the gate had stopped the plan.
+bool testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed() {
+    rb_servo::ForceControlConfig cfg = pressLaw();
+    const auto converged = [&](double v_mm_s) {
+        WallLoop w(cfg, true, 9);           // 18 ms of transport delay
+        // THE MEASURED CONTACT STIFFNESS, not a rigid jig: 39.5 N at 8.9 mm of
+        // penetration on the floor (servo_log_20260911_100038, right arm 197.8 s) is
+        // 4.4 N/mm, arm compliance included. At a rigid 30.7 kN/m this law rings by its
+        // own delay-margin table (tools/force_loop_margin.py: -1.3 dB at 18 ms) and no
+        // gate curve changes that - the crossing is a steady-state property.
+        w.k_env = 4400.0;
+        w.v_cmd = v_mm_s * 1e-3;
+        w.gate_on_physical = true;
+        double fsum = 0.0, fmin = 1e9, fmax = -1e9;
+        for (int i = 0; i < 6000; ++i) {    // 12 s
             w.tick();
-            if (i >= 2500) {                // the last second
-                fmin = std::min(fmin, w.force_seen);
-                fmax = std::max(fmax, w.force_seen);
-                fsum += w.force_seen;
+            if (i >= 5500) {
+                const double f = std::abs(w.force_seen);
+                fsum += f; fmin = std::min(fmin, f); fmax = std::max(fmax, f);
             }
         }
-        *p2p_last_s = fmax - fmin;
-        *f_mean = -fsum / 500.0;
+        std::printf("    v_s %6.1f mm/s -> %.2f N (p-p %.3f)\n", v_mm_s, fsum / 500.0,
+                    fmax - fmin);
+        return fsum / 500.0;
     };
-    double p2p_live = 0.0, f_live = 0.0, p2p_old = 0.0, f_old = 0.0;
-    run(springlessLaw(), &p2p_live, &f_live);
-    rb_servo::ForceControlConfig old = springlessLaw();
-    for (int i = 0; i < 3; ++i) {
-        old.stream.translation[i].m = 15.0;
-        old.stream.translation[i].b = 434.7;
+    std::printf("  the crossing, swept 5x in stream speed (declared %.1f N):\n",
+                cfg.gate_peak_force_n);
+    const double f30 = converged(30.0), f60 = converged(60.0), f150 = converged(150.0);
+    const double lo = std::min({f30, f60, f150}), hi = std::max({f30, f60, f150});
+    // AT the declaration, not merely bounded by it.
+    CHECK(std::abs(f30 - cfg.gate_peak_force_n) < 1.0);
+    CHECK(std::abs(f150 - cfg.gate_peak_force_n) < 1.0);
+    // And the SPREAD is what a declared force means: CM measured < 0.2 N over 5x.
+    CHECK(hi - lo < 0.5);
+    return true;
+}
+
+// (2) AN EXTERNAL CONTACT RESTS AT rest_force_n, AND FREE SPACE IS NEVER SOUGHT.
+// This is the operator's acceptance test in software: *"양팔을 당겨서 바닥으로 밀거야.
+// 그러면 10N 이상이 센싱 될것이고, 그렇다면 10 N 까지만 유지되도록 로봇이 동작하면 돼."*
+// The plan is NOT advancing here (v_cmd = 0), which is exactly the case a gate cannot
+// answer - it can only reduce a speed the plan asked for, and the plan asked for none.
+bool testExternalContactRestsAtTheRestForceAndFreeSpaceIsNeverSought() {
+    rb_servo::ForceControlConfig cfg = pressLaw();
+    rb_servo::control::AdmittanceOverlay overlay;
+    overlay.configure(cfg, 0.002);
+    const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
+    // FREE SPACE: a force axis with nothing to press against must not move. A two-sided
+    // setpoint (CM's f_ref) walks to its fence here and publishes bounded(); one-sided
+    // makes |F| <= rest an equilibrium, so there is nothing to bound.
+    for (int i = 0; i < 30000; ++i) overlay.step(zero, zero);   // 60 s
+    CHECK(overlay.deviation().norm() == 0.0);
+    CHECK(!overlay.bounded());
+    // A HAND PRESS, held: 40 N against the tool's press axis with no plan advance. The
+    // arm yields the EXCESS only, so it stops when the contact reads rest_force_n.
+    // Modelled as a wall the arm is pressed into: the force falls as the arm retreats.
+    double pen = 40.0 / 4400.0;                 // 40 N at the measured 4.4 N/mm
+    double retreat = 0.0;
+    for (int i = 0; i < 30000; ++i) {
+        const double f = -4400.0 * std::max(0.0, pen - retreat);
+        overlay.step(rb_servo::math::Vector3(0.0, 0.0, f), zero);
+        retreat = -overlay.deviation().z();
     }
-    run(old, &p2p_old, &f_old);
-    std::printf("  b=1000/m=12: last-second force %.2f N mean, %.3f N p-p | b=434.7/m=15: "
-                "%.2f N mean, %.3f N p-p\n", f_live, p2p_live, f_old, p2p_old);
-    // Fixed point b*v_cmd*g(F/10) = F for b*v_cmd = 50 N is F = 7.6 N.
-    CHECK(f_live > 6.5 && f_live < 8.7);
-    CHECK(p2p_live < 0.5);                  // settled flat (0.00 N p-p in the model)
-    CHECK(p2p_old > 4.0);                   // the old row rings (16 N p-p in the model)
-    // The same live law with the OLD gate re-open (0.40 s) rings 9 N p-p: the gate is a
-    // second loop, and its re-open speed is what feeds the damper ring at this delay.
-    rb_servo::ForceControlConfig fast_gate = springlessLaw();
-    fast_gate.gate_open_tau_s = 0.40;
-    double p2p_fast = 0.0, f_fast = 0.0;
-    run(fast_gate, &p2p_fast, &f_fast);
-    std::printf("  b=1000 with gate open_tau 0.40: %.2f N mean, %.3f N p-p\n", f_fast, p2p_fast);
-    CHECK(p2p_fast > 4.0);
+    const double settled = 4400.0 * std::max(0.0, pen - retreat);
+    std::printf("  hand press with no plan advance: 40.0 N -> %.2f N at %.2f mm of yield "
+                "(declared rest %.1f N)\n", settled, retreat * 1e3, cfg.gate_rest_force_n);
+    CHECK(std::abs(settled - cfg.gate_rest_force_n) < 0.5);
+    // And it STAYS: no spring, so nothing pulls the arm back off the surface.
+    const double held = overlay.deviation().z();
+    for (int i = 0; i < 5000; ++i) {
+        const double f = -4400.0 * std::max(0.0, pen + overlay.deviation().z());
+        overlay.step(rb_servo::math::Vector3(0.0, 0.0, f), zero);
+    }
+    CHECK(std::abs(overlay.deviation().z() - held) < 1e-4);
+    // A SUSTAINED DRAG MUST NOT REACH THE FENCE. A hand that follows the arm holds a
+    // constant 20 N, so the axis yields (20-10)/b = 20 mm/s for as long as it is pushed.
+    // With the fold that travel belongs to the PLAN and the overlay's own deviation
+    // stays near zero; without it the overlay accumulates the whole drag and pins the
+    // 40 mm fence, which is what the arm did on hardware before the fold predicate
+    // admitted a one-sided force axis (servo_log_20260911_133829).
+    overlay.reset();
+    CHECK(overlay.pureDamperTranslation() && overlay.pureDamperRotation());
+    double plan_z = 0.0;
+    for (int i = 0; i < 1000; ++i) {                       // 2 s of a 20 N drag
+        overlay.step(rb_servo::math::Vector3(0.0, 0.0, -20.0), zero);
+        plan_z += overlay.deviation().z();                 // the fold books it
+        overlay.dropDeviation();
+        CHECK(!overlay.bounded());
+    }
+    std::printf("  2 s of a 20 N drag: plan moved %.1f mm (want (20-10)/500 = 20 mm/s), "
+                "overlay deviation %.4f mm, fence never pinned\n", plan_z * 1e3,
+                overlay.deviation().norm() * 1e3);
+    CHECK(plan_z < -0.030 && plan_z > -0.045);
+    return true;
+}
+
+// THE CURVE'S FIXED POINTS, CLOSED FORM. g(0) = 1 exactly (free space and light contact
+// cost the plan nothing) and g(peak) = v_cross/v_s exactly, whatever v_s is - which is
+// the algebra behind (1). Below the crossing speed the gate is wide open by design:
+// F = rest + b*v_s cannot reach the declaration, so there is nothing to give.
+bool testCurveFixedPointsAndMonotonicity() {
+    rb_servo::ForceControlConfig cfg = pressLaw();
+    rb_servo::control::ForceGate gate;
+    gate.configure(cfg, 0.002);
+    const double b = 500.0, v_cross = (cfg.gate_peak_force_n - cfg.gate_rest_force_n) / b;
+    CHECK(std::abs(gate.bEff() - b) < 1e-9);
+    CHECK(std::abs(gate.crossSpeedMs() - v_cross) < 1e-12);
+    const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
+    const auto raw_gate = [&](double force_n, double v_s) {
+        rb_servo::control::ForceGate g;
+        g.configure(cfg, 0.002);
+        // Step the slew to convergence so the raw curve is what is read back.
+        for (int i = 0; i < 20000; ++i)
+            g.update(rb_servo::math::Vector3(0.0, 0.0, -force_n), zero, force_n, -1.0, v_s);
+        return g.translation();
+    };
+    for (const double v_s : {0.030, 0.060, 0.150, 0.500}) {
+        const double g_peak = raw_gate(cfg.gate_peak_force_n, v_s);
+        std::printf("  g(peak) at v_s %5.0f mm/s = %.6f, want v_cross/v_s = %.6f\n",
+                    v_s * 1e3, g_peak, v_cross / v_s);
+        CHECK(std::abs(g_peak - v_cross / v_s) < 2e-3);
+    }
+    CHECK(raw_gate(0.0, 0.150) == 1.0);
+    // Below the crossing speed: open, by the same argument that pins the crossing.
+    CHECK(raw_gate(cfg.gate_peak_force_n, v_cross * 0.5) == 1.0);
+    // Monotone non-increasing in |F| at a fixed speed.
+    double previous = 1.0;
+    for (double force = 0.0; force < 3.0 * cfg.gate_peak_force_n; force += 0.5) {
+        const double g = raw_gate(force, 0.150);
+        CHECK(g <= previous + 1e-12);
+        previous = g;
+    }
     return true;
 }
 
@@ -1292,50 +1127,6 @@ bool testHoldEngageLatchHysteresis() {
     CHECK(!off.enabled());
     CHECK(off.engaged());
     CHECK(off.update(0.0));
-    return true;
-}
-
-// A SPRING UNDER THE GATE HOLDS THE CONFIGURED FORCE AT ANY SPEED (CM 0028, the
-// 2026-09-04 stream law: k 400 / m 6 / b 500, gate 10 N judged on the PHYSICAL force
-// through a 3 N deadzone). The pure-damper law settles wherever gate creep and damper
-// retreat balance - a by-product of speed - and limit-cycles at the policy's 100+ mm/s.
-bool testSpringUnderTheGateHoldsTheConfiguredForce() {
-    auto sustained = [](double k, bool physical, double v_cmd, double* ripple) {
-        rb_servo::ForceControlConfig cfg = springlessLaw();
-        for (int i = 0; i < 3; ++i) cfg.stream.translation[i] = {rb_servo::ForceAxisMode::Compliance, 6.0, 500.0, k, 0.0};
-        cfg.gate_max_force_n = 10.0;
-        WallLoop w(cfg, k == 0.0, 13);      // 26 ms of delay; fold only on the pure damper
-        w.k_env = 15000.0;
-        w.v_cmd = v_cmd;
-        w.deadzone_n = 3.0;
-        w.gate_on_physical = physical;
-        double fmin = 1e9, fmax = -1e9, fsum = 0.0;
-        for (int i = 0; i < 6000; ++i) {
-            w.tick();
-            if (i >= 5000) { fmin = std::min(fmin, -w.force_seen); fmax = std::max(fmax, -w.force_seen); fsum += -w.force_seen; }
-        }
-        *ripple = fmax - fmin;
-        return fsum / 1000.0;
-    };
-    double r = 0.0;
-    std::printf("  sustained contact force, gate 10 N (true force):\n");
-    for (double v : {0.02, 0.05, 0.135}) {
-        const double f_spring = sustained(400.0, true, v, &r);
-        double r0 = 0.0;
-        const double f_damper = sustained(0.0, false, v, &r0);
-        std::printf("    v=%3.0f mm/s: spring+gate %.1f N (p-p %.2f) | pure damper %.1f N (p-p %.2f)\n",
-                    v * 1e3, f_spring, r, f_damper, r0);
-        CHECK(f_spring > 9.0 && f_spring < 12.0);   // the configured 10 N, +/- the deadzone's bite
-        CHECK(r < 1.0);                              // and it HOLDS there
-    }
-    // Judged on the deadzoned wrench the same law settles ~3 N high.
-    const double f_dz = sustained(400.0, false, 0.05, &r);
-    std::printf("    v= 50 mm/s judged on the deadzoned wrench: %.1f N\n", f_dz);
-    CHECK(f_dz > 12.0);
-    // The pure damper at the policy's speed limit-cycles.
-    double r_lc = 0.0;
-    sustained(0.0, false, 0.135, &r_lc);
-    CHECK(r_lc > 4.0);
     return true;
 }
 
@@ -1373,14 +1164,16 @@ bool testGateMagnitudeOverride() {
     rb_servo::control::ForceGate gate;
     gate.configure(cfg, 0.002);
     const rb_servo::math::Vector3 small(0.0, 0.0, 1.0);   // the deadzoned wrench: 1 N
-    gate.update(small, rb_servo::math::Vector3::Zero(), 12.0, 0.0);   // physical: 12 N
+    gate.update(small, rb_servo::math::Vector3::Zero(), 12.0, 0.0, 0.200);  // physical: 12 N
     CHECK(near(gate.forceN(), 12.0));
-    CHECK(gate.translation() < 0.01);                    // closed on the physical magnitude
+    // g(peak) = v_cross/v_s = 4/200 = 0.02 here: the curve does not reach zero, and
+    // that is the point - the surviving advance IS the law's yield at the crossing.
+    CHECK(gate.translation() < 0.03);
     const rb_servo::math::Vector3 adv(0.0, 0.0, -0.001);  // into the +z force
     double removed = 0.0;
     gate.applyTranslation(adv, &removed);
-    CHECK(removed > 0.00099);                           // and it cuts along the vector's direction
-    gate.update(small, rb_servo::math::Vector3::Zero());  // no override: the vector's own 1 N
+    CHECK(removed > 0.0009);                            // and it cuts along the vector's direction
+    gate.update(small, rb_servo::math::Vector3::Zero(), -1.0, -1.0, 0.200);  // no override
     CHECK(near(gate.forceN(), 1.0));
     return true;
 }
@@ -1406,40 +1199,43 @@ bool testPoseTrackGateHoldsStateNotGoal() {
     rb_servo::ForceControlConfig fc = shippedLaw();
     fc.gate_close_tau_s = 0.002;
     gate.configure(fc, 0.002);
-    // THE SHIPPED PATH USES THE STREAM CHANNEL (2026-09-04 pm): judged on the slow
-    // force vector with a dwell, so a wall pushing +z at 12 N arms it after ~150 ms.
+    // THE SHIPPED PATH USES THE ONE CURVE AND THE DECLARED NORMAL (2026-09-11). The
+    // wall pushes +z at 12 N and the press axis is the tool's z, so the normal handed
+    // in is +z; the stream demand is the GOAL rate, which the gate never touches.
     const rb_servo::math::Vector3 wall(0.0, 0.0, 12.0);   // wall pushes +z
-    for (int i = 0; i < 200; ++i) {
-        gate.update(wall, rb_servo::math::Vector3::Zero());
-        gate.updateStream(wall);
-    }
-    CHECK(gate.streamArmed());
-    CHECK(gate.streamTranslation() < 0.01);
+    const rb_servo::math::Vector3 normal(0.0, 0.0, 1.0);  // declared, signed by the wrench
+    for (int i = 0; i < 200; ++i)
+        gate.update(wall, rb_servo::math::Vector3::Zero(), 12.0, -1.0, 0.200);
+    CHECK(gate.translation() < 0.03);
     double z_min = 1.0, x_last = 0.0;
     for (int i = 0; i < 500; ++i) {
-        gate.update(wall, rb_servo::math::Vector3::Zero());
-        gate.updateStream(wall);
+        gate.update(wall, rb_servo::math::Vector3::Zero(), 12.0, -1.0, 0.200);
         const rb_servo::Pose6D before = tracker.currentPose();
         rb_servo::Pose6D out = tracker.step(0.002);
         const rb_servo::math::Vector3 p0(before.x, before.y, before.z), p1(out.x, out.y, out.z);
-        double removed = 0.0;
-        const rb_servo::math::Vector3 kept = gate.applyStreamTranslation(p1 - p0, &removed);
-        if (removed > 0.0) {
-            tracker.constrainTranslation(p0 + kept, gate.streamForceDirection(),
-                                         1.0 - gate.streamTranslation());
+        const double proj = (p1 - p0).dot(normal);
+        if (proj < 0.0) {
+            const rb_servo::math::Vector3 cut = (1.0 - gate.translation()) * proj * normal;
+            tracker.constrainTranslation(p0 + (p1 - p0) - cut, normal,
+                                         1.0 - gate.translation());
         }
         const rb_servo::Pose6D now = tracker.currentPose();
         z_min = std::min(z_min, now.z);
         x_last = now.x;
     }
-    CHECK(z_min > 0.100 - 1e-6);              // never advanced into the +z force
+    // NOT "never advanced": the curve leaves exactly the law's own yield share, which
+    // is what makes the contact converge at peak_force_n instead of at 0 N. What must
+    // hold is that the 50 mm the goal asked for does not happen - measured residual
+    // here is under 1 mm against an ungated 50 mm.
+    std::printf("  pose-track: %.3f mm of residual advance into the contact (goal asked "
+                "50 mm), %.1f mm of sliding\n", (0.100 - z_min) * 1e3, x_last * 1e3);
+    CHECK(z_min > 0.100 - 0.001);
     CHECK(x_last > 0.015);                    // but slid sideways toward the goal
     CHECK(near(tracker.goalPose().z, 0.050, 1e-9));   // the goal is untouched
     // Release: the gate opens, the tracker resumes toward the goal from rest, no jump.
-    for (int i = 0; i < 21; ++i) {
-        gate.update(rb_servo::math::Vector3::Zero(), rb_servo::math::Vector3::Zero());
-        gate.updateStream(rb_servo::math::Vector3::Zero());
-    }
+    for (int i = 0; i < 21; ++i)
+        gate.update(rb_servo::math::Vector3::Zero(), rb_servo::math::Vector3::Zero(),
+                    0.0, -1.0, 0.200);
     const rb_servo::Pose6D a = tracker.step(0.002);
     const rb_servo::Pose6D b = tracker.step(0.002);
     CHECK(std::abs(b.z - a.z) < 1e-4);        // one tick of ordinary SMD motion, not a lunge
@@ -1470,14 +1266,15 @@ bool testExternallyVerifiedSensorDoesNotGrantTareOrAcceptInvalidWrench() {
 int main() {
     testExternallyVerifiedSensorDoesNotGrantTareOrAcceptInvalidWrench();
     testPoseTrackGateHoldsStateNotGoal();
-    testSpringUnderTheGateHoldsTheConfiguredForce();
     testStripInvertsCompose();
     testGateMagnitudeOverride();
     testHoldEngageLatchHysteresis();
     testPureDamperPredicate();
     testDropDeviationKeepsTheVelocity();
     testFoldIsInvisibleToTheContact();
-    testSpringlessContactSettlesAtTheDamperFixedPointAndTheOldRowRings();
+    testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed();
+    testExternalContactRestsAtTheRestForceAndFreeSpaceIsNeverSought();
+    testCurveFixedPointsAndMonotonicity();
     testWrenchFilterFlattensShockAndKeepsSteadyForce();
     testOscillationGuardTripsFreezesAndReleases();
     testAxisMapIsTheMeasuredLeftHandedBasis();
@@ -1492,11 +1289,6 @@ int main() {
     testGateAttenuatesOnlyIntoTheContact();
     testGateIsAsymmetric();
     testGateIsOpenInFreeSpace();
-    testGateStreamChannelIgnoresVibrationAndHoldsSustainedContact();
-    testStreamReleaseKeepsNormalAndAllowsRecontact();
-    testPreviewConstraintUsesExistingSustainedContactClassifier();
-    testFollowerContactDirectionSurvivesAChatteringPush();
-    testGateStreamChannelAveragesOutAFlippingDirection();
     testGateReopensToExactlyOneAfterRelease();
     testHoldFoldDeltaFloorAndCap();
     testHoldLawTurnsFarLessThanTheStreamLawForTheSamePush();

@@ -100,6 +100,10 @@ struct FollowerDiag {
   // Segment solves Ruckig refused (ErrorInvalidInput etc.). Each one is served by a
   // ring-down from the chained state instead of replaying the stale trajectory.
   int solve_failure_count{0};
+  // The advance this segment DEMANDED, before the force gate attenuated it [m/s].
+  // The gate's curve is a function of this and may not be a function of the achieved
+  // speed - see the comment at the assignment in stepToNextSegment.
+  double demanded_advance_m_s{0.0};
 };
 
 enum class HoldResumeResult {

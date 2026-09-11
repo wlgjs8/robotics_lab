@@ -215,8 +215,9 @@ DualArmConfig fixtureConfig(ArmId selected, bool rotation) {
     auto& fc = cfg.force_control;
     fc.enable = true;
     fc.gate_enable = true;
-    fc.gate_max_force_n = 10.0;
-    fc.gate_max_torque_nm = 1.4;
+    fc.gate_peak_force_n = 12.0;
+    fc.gate_rest_force_n = 10.0;
+    fc.gate_peak_vel_mm_s = 4.0;
     fc.max_deviation_m = 0.04;
     fc.max_deviation_rad = 0.03;
     fc.coverage_recover_sec = 0.5;

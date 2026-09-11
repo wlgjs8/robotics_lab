@@ -42,7 +42,7 @@ def diagnostic_columns():
     cols = ['safety_verdict', 'projection_active', 'projection_min_headroom_class',
             'projection_min_headroom_pair', 'projection_min_headroom_m']
     for arm in SIDES:
-        cols += [arm+'_'+k for k in ['fc_covered', 'fc_gate_translation', 'fc_gate_stream_armed',
+        cols += [arm+'_'+k for k in ['fc_covered', 'fc_gate_translation',
                     'projection_applied_correction_deg_s', 'reach_engaged']]
         cols += [arm+'_fc_dev_'+axis for axis in ['x_m','y_m','z_m','rx_rad','ry_rad','rz_rad']]
         cols += [arm+'_fc_wrench_filt_f'+axis+'_n' for axis in 'xyz']
@@ -50,7 +50,7 @@ def diagnostic_columns():
 
 def contact_columns():
     return [arm+'_'+key for arm in SIDES for key in
-            ['fc_covered','fc_gate_translation','fc_gate_stream_armed',
+            ['fc_covered','fc_gate_translation',
              'fc_wrench_filt_fx_n','fc_wrench_filt_fy_n','fc_wrench_filt_fz_n']]
 
 def reconstruct_hold_fold(row, arm):
@@ -96,7 +96,11 @@ def contact_event(row, arm):
     if not np.isfinite(gate) or not 0 <= gate <= 1:
         raise ValueError('invalid recorded contact gate')
     return {'schema':'robotics_lab.preview_contact_input.v2', 'tick':int(row['loop_start_time_ns']),
-            'covered':covered, 'stream_armed':bool(row[arm+'_fc_gate_stream_armed']),
+            # 2026-09-11: the gate's sustained-contact stream channel is gone (the
+            # press axis is declared, so nothing has to be armed before the direction
+            # can be trusted). The replay schema keeps the field so recorded v2 inputs
+            # still parse; it is always True and the consumer ignores it.
+            'covered':covered, 'stream_armed':True,
             'gate':gate if covered else 1., 'normal_into_stand':normal.tolist() if covered else [0.,0.,0.]}
 
 def sha256(path):

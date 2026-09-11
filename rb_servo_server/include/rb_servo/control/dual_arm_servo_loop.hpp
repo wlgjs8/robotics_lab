@@ -242,6 +242,10 @@ private:
     void prepareForceOverlayInput(ArmId arm);
     std::array<std::uint64_t,2> prepared_force_tick_{};
     std::array<Vec6,2> prepared_force_wrench_{};
+    // The compensated, PRE-deadzone stand wrench: what a FORCE-mode axis and the
+    // declared contact normal are judged on, so `rest_force_n` means the force a
+    // sensor reads rather than that force plus the deadzone.
+    std::array<Vec6,2> prepared_force_physical_{};
     std::array<double,2> prepared_force_magnitude_{};
     ServoTarget computeServoTarget(
         const RobotState& left_state,
@@ -1104,8 +1108,17 @@ private:
     // has stayed below gate_stream_release_force_n for gate_stream_release_dwell_sec.
     // The release timer is what stops a violently varying push from toggling the
     // dispatched contact direction at ~30 Hz.
-    control::FollowerContactDirectionArming left_follower_contact_dir_{};
-    control::FollowerContactDirectionArming right_follower_contact_dir_{};
+    // The DECLARED press axis: the index of the law's single mode:force translation
+    // row (-1 = none declared), fixed at configure(). The axis itself is that column
+    // of the overlay's tool-frame rotation, re-aimed every tick.
+    int press_axis_index_ = -1;
+    // This tick's declared contact normal per arm, stand frame. Zero = the measured
+    // component along the press axis is inside rest_force_n, i.e. no contact there.
+    std::array<math::Vector3, 2> declared_contact_normal_{math::Vector3::Zero(),
+                                                          math::Vector3::Zero()};
+    // The plan's DEMANDED advance speed per arm [m/s], pre-gate - what the gate's
+    // curve is a function of. Written by whichever stage drives the arm this tick.
+    std::array<double, 2> force_stream_speed_m_s_{0.0, 0.0};
     // The FOLD's running total (force_control.fold_deviation): how far force has
     // moved each arm's plan this run, stand frame. Telemetry only - the overlay's
     // own deviation is ~0 on a fold path, so this is the number that says what the
@@ -1408,6 +1421,10 @@ private:
     // Step the law and compose its deviation onto `target` (a stand-frame TCP pose),
     // in place. `nominal` is the pose the deviation is measured FROM. Returns true
     // when the composed pose differs from the nominal.
+    // The DECLARED contact normal for this arm, stand frame: the press axis (the law's
+    // force-mode row in the tool triad) signed by the measured component, or zero when
+    // that component is inside rest_force_n. Recomputed in prepareForceOverlayInput.
+    math::Vector3 declaredContactNormal(ArmId arm) const;
     bool applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target);
     // A valid Cartesian target uses the same eligibility for inverse reference
     // conversion and downstream compose. Frozen state alone is not eligibility.

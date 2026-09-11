@@ -165,8 +165,6 @@ target_link_libraries(ik_feasibility_grid PRIVATE rb_servo_core)
 # budget can be characterised without hardware.
 add_executable(follower_replay tools/follower_replay.cpp)
 target_link_libraries(follower_replay PRIVATE rb_servo_core)
-add_executable(umi_stream_gate_replay tools/umi_stream_gate_replay.cpp)
-target_link_libraries(umi_stream_gate_replay PRIVATE rb_servo_core)
 add_executable(delta_follower_replay tools/delta_follower_replay.cpp)
 target_link_libraries(delta_follower_replay PRIVATE rb_servo_core)
 if(RB_SERVO_ENABLE_PREVIEW_EXECUTION)
