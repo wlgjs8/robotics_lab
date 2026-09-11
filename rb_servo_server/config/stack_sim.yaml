@@ -1296,7 +1296,7 @@ force_control:
     rest_force_n:   10.0
     peak_vel_mm_s:   4.0
     close_tau_s: 0.10
-    open_tau_s:  1.0
+    open_tau_s:  0.40
 
   # A DEAD BACKSTOP, not an operating limit. On a fold path the deviation is booked
   # into the plan every tick and never accumulates here; on a declined path (an

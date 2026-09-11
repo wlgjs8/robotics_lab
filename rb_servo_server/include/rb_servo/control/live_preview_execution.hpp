@@ -89,7 +89,6 @@ class LivePreviewExecution {
   bool failed() const { return faulted_; }
   bool hasPlan() const { return active_.accepted() || brake_trajectory_.valid; }
   bool braking() const { return brake_trajectory_.valid; }
-  bool contactClampActive() const { return contact_clamp_active_; }
   const PreviewMotionSample& sample() const { return sample_; }
   const PreviewMotionSample& acceptedSample() const { return accepted_sample_; }
   const Pose6D& acceptedPose() const { return accepted_epoch_?accepted_sample_.pose:cold_.pose; }
@@ -108,9 +107,12 @@ class LivePreviewExecution {
   bool beginAngularBrake();
   bool calculateBrake(const PreviewMotionState& initial, PreviewBrakeTrajectory& output);
   bool sampleBrake();
-  // ceiling_m_s: closing velocity the contact slew still dispatches (0 = strict authority).
+  // Does `proposed` close into the contact faster than the follower's own gated
+  // closing velocity? Used ONLY to keep a still-closing successor from replacing a
+  // finite brake in progress - the dispatched path itself is never clamped (see the
+  // deletion note at the top of the .cpp).
   bool contactAllows(const PreviewMotionSample& proposed, const FollowerOutputKinematics& raw,
-                     double gate, const Eigen::Vector3d& normal, double ceiling_m_s) const;
+                     double gate, const Eigen::Vector3d& normal) const;
   void shiftSample(PreviewMotionSample& sample, const Eigen::Vector3d& dp,
                    const Eigen::Quaterniond& dR);
   bool stagedCurrent(const CartesianChunkFollower& raw) const;
@@ -131,29 +133,7 @@ class LivePreviewExecution {
   LivePreviewAdmissionDiagnostics admission_diagnostics_{};
   std::uint64_t epoch_{1}, gate_revision_{1}, request_id_{0}, gauge_revision_{0};
   double initialized_at_{0}, last_time_{0}, next_request_at_{0};
-  // Refused displacement of the active plan (stand frame) not yet absorbed by an
-  // admitted plan: the contact slew's held-back closing travel AND the plan leash's
-  // held-back lead, which share one lifecycle. Every request carries it as the
-  // predicted dispatch offset; admission keeps only what was refused after that.
-  Eigen::Vector3d contact_clamp_shift_{Eigen::Vector3d::Zero()};
-  bool contact_clamp_active_{false};
-  // THE CONTACT SLEW (2026-09-10 pm). Cutting the dispatched closing velocity to the
-  // authority in one tick was measured to command 11.6k deg/s^2 at the joints when a
-  // 3.5 N deadzone-edge wrench flipped the contact direction under a 200 mm/s move;
-  // the joint decel limiter then led the IK solution by 0.64 mm and dispatch
-  // acceptance faulted (servo_log_20260910_141150 @-24.25 s). The closing velocity
-  // is instead capped by a ceiling that falls from what was LAST DISPATCHED (along
-  // whatever the current normal is) at a deceleration ramping, within the tracker's
-  // jerk limit and its planning-grid parametrisation, up to the tracker's
-  // acceleration limit: never faster than a plan itself could brake.
-  struct ContactSlew { double ceiling{0}, decel{0}; bool active{false}; };
-  double contact_clamp_ceiling_m_s_{0}, contact_clamp_decel_m_s2_{0};
-  double advanceContactSlew(ContactSlew& slew, double dt_sec, double plan_closing_v,
-                            double plan_closing_a, double previous_dispatched_v,
-                            double allowed) const;
   double servo_period_sec_{0};
-  void clampContact(double dt_sec, const FollowerOutputKinematics& raw,
-                    const Eigen::Vector3d& normal);
   double planning_starved_since_sec_{0};
   double brake_origin_sec_{0}, accepted_sample_time_sec_{0};
   std::uint64_t brake_plan_id_{0}, accepted_plan_id_{0};

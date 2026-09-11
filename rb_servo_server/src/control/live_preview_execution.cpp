@@ -56,8 +56,6 @@ void LivePreviewExecution::reset(const char* reason) {
   stop_fault_reason_=nullptr;accepted_sample_time_sec_=0;accepted_plan_id_=0;
   recovery_cause_=PreviewRecoveryCause::None;recovery_seed_valid_=false;
   planning_starved_since_sec_=0;
-  contact_clamp_shift_.setZero();contact_clamp_active_=false;
-  contact_clamp_ceiling_m_s_=0;contact_clamp_decel_m_s2_=0;
   fold_translation_.setZero();fold_rotation_.setIdentity();gauge_revision_=0;
   cursor_.clear();history_count_=history_begin_=0;
   telemetry_.active=false;telemetry_.status=reason;telemetry_.epoch=epoch_;telemetry_.plan_id=0;
@@ -187,9 +185,7 @@ bool LivePreviewExecution::beginBrake(const char* reason,bool contact_only) {
   if(!initialized_||faulted_){fail("brake_no_epoch");return false;}
   // A brake starts from the accepted (dispatched, already held-back) sample:
   // nothing is held back against it.
-  contact_clamp_shift_.setZero();contact_clamp_active_=false;telemetry_.contact_clamp_shift_m=0;
   telemetry_.plan_lead_m=0;
-  contact_clamp_ceiling_m_s_=0;contact_clamp_decel_m_s2_=0;
   PreviewMotionState initial;
   if(accepted_epoch_) {
     initial=accepted_sample_;brake_origin_sec_=accepted_sample_time_sec_;
@@ -229,76 +225,37 @@ bool LivePreviewExecution::beginBrake(const char* reason,bool contact_only) {
   telemetry_.plan_id=brake_plan_id_;telemetry_.active=false;telemetry_.status=reason;
   return true;
 }
-// Maximum refused closing displacement before the executor gives up on the
-// constrained replan and falls back to the finite contact brake. At a 100 mm/s
-// excess that is 100 ms, ten replan periods; a compliant plan normally takes over
-// within one or two.
-double LivePreviewExecution::advanceContactSlew(ContactSlew& slew,double dt_sec,double plan_closing_v,
-    double plan_closing_a,double previous_dispatched_v,double allowed) const {
-  const auto& tracker=config_.preview_execution.tracker;
-  if(plan_closing_v<=allowed+tracker.feasibility_tolerance) {
-    slew.active=false;slew.ceiling=allowed;slew.decel=0;
-    return plan_closing_v;
-  }
-  // Continue the plan's own deceleration, if any, rather than restarting from 0.
-  if(!slew.active) {slew.active=true;slew.decel=std::max(0.0,-plan_closing_a);}
-  if(dt_sec>0) {
-    // Jerk bounded by what a plan can apply inside one planning interval (its
-    // jerk is constant there and its acceleration box holds at the interval end).
-    const double jerk=std::min(tracker.max_linear_jerk_m_s3,
-        (tracker.max_linear_acceleration_m_s2-slew.decel)/tracker.planning_dt_sec);
-    slew.decel=std::min(tracker.max_linear_acceleration_m_s2,slew.decel+std::max(0.0,jerk)*dt_sec);
-  }
-  slew.ceiling=std::max(allowed,previous_dispatched_v-slew.decel*dt_sec);
-  return std::min(plan_closing_v,slew.ceiling);
-}
-
-void LivePreviewExecution::clampContact(double dt_sec,const FollowerOutputKinematics& raw,
-    const Eigen::Vector3d& normal) {
-  // CONTINUOUS CONTACT AUTHORITY (2026-09-10). The active plan was solved before
-  // the follower's force gate lowered its closing authority; the old behaviour
-  // braked (contactGuardStopped), then resumed on a constrained replan, and the
-  // measured result was a stop -> yield -> re-descent bounce at ~3 Hz with 8-19 N
-  // impacts (servo_log_20260910_111949 @109-113 s). Instead: SLEW the dispatched
-  // closing velocity down to the authority (see ContactSlew), hold back the
-  // refused displacement, keep the tangential motion, and let the
-  // contact-constrained replan (requested every replan period from this
-  // dispatched state) take over at its splice. There is no separate bound on the
-  // held-back displacement: a plan that keeps violating its authority is simply
-  // never replaced by a compliant one and expires (braking_expired) inside
-  // max_result_age_sec, the same backstop every other unreplaced plan has.
-  const Eigen::Vector3d raw_velocity(raw.velocity.x,raw.velocity.y,raw.velocity.z);
-  const double allowed=std::max(0.0,normal.dot(raw_velocity));
-  const double plan_v=normal.dot(sample_.linear_velocity);
-  const double plan_a=normal.dot(sample_.linear_acceleration);
-  const Eigen::Vector3d& last=accepted_epoch_?accepted_sample_.linear_velocity:sample_.linear_velocity;
-  ContactSlew slew{contact_clamp_ceiling_m_s_,contact_clamp_decel_m_s2_,contact_clamp_active_};
-  const double dispatched=advanceContactSlew(slew,dt_sec,plan_v,plan_a,normal.dot(last),allowed);
-  contact_clamp_ceiling_m_s_=slew.ceiling;contact_clamp_decel_m_s2_=slew.decel;contact_clamp_active_=slew.active;
-  const double excess=plan_v-dispatched;
-  if(excess>0) {
-    sample_.linear_velocity-=excess*normal;
-    // Only a closing acceleration is removed from the dispatched sample. Reporting
-    // the ceiling's fall (-decel) here seeded the next splice with retreat
-    // acceleration (see PreviewExecutionRequest): never again.
-    if(plan_a>0)sample_.linear_acceleration-=plan_a*normal;
-    const double j_n=normal.dot(sample_.linear_jerk);
-    if(j_n>0)sample_.linear_jerk-=j_n*normal;
-    if(dt_sec>0)contact_clamp_shift_+=excess*dt_sec*normal;
-  }
-  ++telemetry_.contact_clamp_count;
-  telemetry_.contact_clamp_shift_m=contact_clamp_shift_.norm();
-}
-
+// THE CONTACT CLAMP IS GONE (2026-09-11). It cut the dispatched closing velocity to
+// the follower's own gated authority and BOOKED the refused displacement, echoing it to
+// the worker as the dispatched state and retiring it on admission. Measured on the day's
+// policy runs, that book-and-retire owned the vibration: 91-100 % of every |command
+// acceleration| > 10 m/s2 (up to 78 m/s2) fell within 16 ms of a clamp firing, on both
+// arms of three runs, and the clamp fired on 28-45 % of active ticks with the held-back
+// shift sawtoothing 0 -> 1.8-7.3 mm at the 100 Hz replan rate (servo_log_20260911_154638
+// / _145403 / _141234). The force ripple that accompanied it was the CONSEQUENCE, not
+// the cause: b * dv = 500 * 0.1 = 50 N against the measured 0.6-42 N swing.
+//
+// WHY IT FIRED SO MUCH: its allowance is the follower's gated closing velocity, and
+// since the force gate became a crossing curve it holds a small-but-nonzero authority
+// (p50 0.02-0.46) for as long as a contact stands - exactly the regime where a plan that
+// anticipates the reference exceeds the allowance on every tick. The old fade-to-zero
+// gate was either open or shut with its direction withdrawn, so the same clamp fired on
+// 0.8 % of ticks (2026-09-10) and owned "only" 59 % of the spikes.
+//
+// WHAT CARRIES THE CONTACT NOW: the QP's per-knot closing-velocity constraint
+// (PreviewContactConstraint), which was already active on 78-93 % of these ticks - the
+// clamp was covering the 10 ms splice window on top of it. The cost of dropping it is
+// that window: at 200 mm/s an authority change can be followed for 2 mm before the next
+// plan arrives, which is smaller than the 0.3-3.8 mm steps the clamp was injecting, and
+// it is continuous rather than a step.
 bool LivePreviewExecution::contactAllows(const PreviewMotionSample& proposed,const FollowerOutputKinematics& raw,
-    double gate,const Eigen::Vector3d& normal,double ceiling_m_s) const {
+    double gate,const Eigen::Vector3d& normal) const {
   if(gate>=1 || normal.isZero(0))return true;
-  // The canonical follower has already applied the force gate. Match the
-  // worker's closing-velocity authority without applying that gate twice.
-  // A retreating reference permits a stationary output. A closing velocity the
-  // contact slew is still dispatching anyway (ceiling) is not a violation.
+  // The canonical follower has already applied the force gate. Match the worker's
+  // closing-velocity authority without applying that gate twice. A retreating
+  // reference permits a stationary output.
   const Eigen::Vector3d raw_velocity(raw.velocity.x,raw.velocity.y,raw.velocity.z);
-  const double allowed_velocity=std::max(std::max(0.0,normal.dot(raw_velocity)),ceiling_m_s);
+  const double allowed_velocity=std::max(0.0,normal.dot(raw_velocity));
   return normal.dot(proposed.linear_velocity)<=allowed_velocity+
       config_.preview_execution.tracker.feasibility_tolerance;
 }
@@ -425,8 +382,7 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     // expiry-brake cycle (39 rejections / 5 s while the allowed velocity swung
     // 0 <-> 125 mm/s tick to tick under a hand push).
     const bool contact_ok=sampled && (!brake_trajectory_.valid ||
-        contactAllows(candidate,raw_sample,contact_gate,contact_normal,
-                      contact_clamp_active_?contact_clamp_ceiling_m_s_:0.0));
+        contactAllows(candidate,raw_sample,contact_gate,contact_normal));
     if(!contact_ok) {
       cancelStaged(expired?Expiry:!sampled?Sample:Contact,now);
       if(expired)++admission_diagnostics_.staged_expired;
@@ -449,13 +405,8 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
       telemetry_.last_admitted_parent_plan_id=active_.identity.parent_plan_id;
       brake_trajectory_.valid=false;brake_plan_id_=0;angular_continuation_.clear();
       telemetry_.plan_id=active_.identity.request_id;
-      // The admitted plan was solved from the dispatched state its request
-      // predicted (dispatch_offset_m = -predicted held-back displacement); only
-      // the displacement refused after that prediction stays held back, and the
-      // next request carries it. Sub-tolerance bookkeeping residue is dropped.
-      contact_clamp_shift_+=active_.dispatch_offset_m;
-      if(contact_clamp_shift_.norm()<=config_.preview_execution.tracker.feasibility_tolerance)contact_clamp_shift_.setZero();
-      telemetry_.contact_clamp_shift_m=contact_clamp_shift_.norm();
+      // Nothing is held back any more, so admission has no displacement to retire:
+      // the plan is spliced from the predecessor's own sample and dispatched as solved.
     }
   }
   if(active_.accepted()) {
@@ -466,11 +417,6 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
       if(!beginBrake("braking_expired")){out.fault=true;out.reason=telemetry_.status;return out;}
     } else {
       if(!brake_trajectory_.valid) {
-        if(contactAllows(sample_,raw_sample,contact_gate,contact_normal,0.0)) {
-          contact_clamp_active_=false;contact_clamp_ceiling_m_s_=0;contact_clamp_decel_m_s2_=0;
-        } else clampContact(step_dt,raw_sample,contact_normal);
-        if(!contact_clamp_shift_.isZero(0))
-          shiftPose(sample_.pose,-contact_clamp_shift_,Eigen::Quaterniond::Identity());
         // HOW FAR THE PLAN LEADS ITS SOURCE - MEASURED HERE, BOUNDED ELSEWHERE
         // (2026-09-10 pm, third revision). This executor does NOT clamp the lead. A
         // position clamp was tried twice and removed: it has no velocity continuity,
@@ -602,39 +548,9 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     request_.brake_predecessor=brake_trajectory_;
     request_.angular_predecessor=angular_continuation_;
     request_.predecessor_origin_sec=brake_trajectory_.valid?brake_origin_sec_:active_.splice_at_sec;
-    // The dispatched state the worker must splice from (see PreviewExecutionRequest).
-    request_.dispatch_offset_m.setZero();request_.contact_clamped_dispatch=false;
-    request_.contact_dispatch_ceiling_m_s=0;
-    if(!request_.cold_start && !brake_trajectory_.valid && active_.accepted()) {
-      Eigen::Vector3d shift=contact_clamp_shift_;
-      if(contact_clamp_active_ && contact_gate<1 && !contact_normal.isZero(0)) {
-        // The slew holds back the refused advance tick after tick until the splice
-        // tick admits the replan: run the same slew over the active plan under the
-        // current authority up to and including the splice tick, so the worker
-        // splices from the ceiling the executor will actually dispatch there. A
-        // changed authority leaves a residual, carried into the next request.
-        const double allowed=std::max(0.0,contact_normal.dot(Eigen::Vector3d(
-            raw_sample.velocity.x,raw_sample.velocity.y,raw_sample.velocity.z)));
-        ContactSlew slew{contact_clamp_ceiling_m_s_,contact_clamp_decel_m_s2_,true};
-        double previous=contact_normal.dot(sample_.linear_velocity);
-        double ceiling=std::max(allowed,previous);
-        for(double t=now+servo_period_sec_;t<request_.splice_at_sec+1e-9;t+=servo_period_sec_) {
-          PreviewMotionSample predicted;
-          if(t>=active_.valid_until_sec || !active_.trajectory.sample(t-active_.splice_at_sec,predicted))break;
-          const double plan_v=contact_normal.dot(predicted.linear_velocity);
-          const double plan_a=contact_normal.dot(predicted.linear_acceleration);
-          const double dispatched=advanceContactSlew(slew,servo_period_sec_,plan_v,plan_a,previous,allowed);
-          ceiling=slew.active?slew.ceiling:allowed;
-          if(t<request_.splice_at_sec-1e-9) {
-            shift+=(plan_v-dispatched)*servo_period_sec_*contact_normal;
-            previous=dispatched;
-          }
-        }
-        request_.contact_clamped_dispatch=true;
-        request_.contact_dispatch_ceiling_m_s=ceiling;
-      }
-      request_.dispatch_offset_m=-shift;
-    }
+    // NOTHING IS HELD BACK, so there is no dispatched-state offset to predict: the
+    // worker splices from the predecessor's own sample at splice_at_sec (2026-09-11,
+    // with the contact clamp's deletion).
     if(worker_.trySubmit(raw,request_)) {++telemetry_.submitted;next_request_at_=now+config_.preview_execution.replan_period_sec;}
   }
   out.reason=telemetry_.status;return out;
@@ -730,7 +646,6 @@ void LivePreviewExecution::recordResult(PreviewExecutionAcceptance check,double 
 const PreviewExecutionTelemetry& LivePreviewExecution::telemetry() const {
   auto& t=telemetry_;const auto& d=admission_diagnostics_;const auto w=worker_.diagnostics();
   t.gate_revision=gate_revision_;t.gauge_revision=gauge_revision_;t.request_id=request_id_;
-  t.contact_clamp_active=contact_clamp_active_;t.contact_clamp_shift_m=contact_clamp_shift_.norm();
   for(std::size_t i=0;i<3;++i)t.gauge_translation_m[i]=fold_translation_[i];
   for(std::size_t i=0;i<4;++i)t.gauge_quaternion_xyzw[i]=fold_rotation_.coeffs()[i];
   t.parent_plan_id=brake_trajectory_.valid?brake_plan_id_:(active_.accepted()?active_.identity.request_id:0);

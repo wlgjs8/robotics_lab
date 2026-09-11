@@ -316,7 +316,6 @@ struct PreviewExecutionWorker::Impl {
     PreviewExecutionResult out;
     out.identity = r.identity;
     out.gauge = r.gauge;
-    out.dispatch_offset_m = r.dispatch_offset_m;
     out.generated_at_sec = r.generated_at_sec;
     out.splice_at_sec = r.splice_at_sec;
     out.valid_until_sec = r.valid_until_sec;
@@ -354,12 +353,6 @@ struct PreviewExecutionWorker::Impl {
       return finish(PreviewExecutionWorkerStatus::InvalidRequest);
     const bool contact_active=r.contact_gate<1.0 && !r.contact_normal_stand.isZero(0.0);
     if(contact_active && std::abs(r.contact_normal_stand.norm()-1.0)>tracker.config().feasibility_tolerance)
-      return finish(PreviewExecutionWorkerStatus::InvalidRequest);
-    // A dispatched-state offset/clamp describes a held-back ACTIVE plan only.
-    if(!r.dispatch_offset_m.allFinite() ||
-       ((r.contact_clamped_dispatch || !r.dispatch_offset_m.isZero(0.0)) && (r.cold_start || r.has_brake_predecessor)) ||
-       (r.contact_clamped_dispatch && !contact_active) ||
-       !std::isfinite(r.contact_dispatch_ceiling_m_s) || r.contact_dispatch_ceiling_m_s<0.0)
       return finish(PreviewExecutionWorkerStatus::InvalidRequest);
     if (r.cold_start) {
       if (r.predecessor.valid || r.has_brake_predecessor ||
@@ -454,38 +447,16 @@ struct PreviewExecutionWorker::Impl {
         if(relative==tracker.durationSec())break;
       }
     }
-    // Splice from the DISPATCHED state: the predecessor sample shifted by the
-    // held-back displacement, its closing velocity cut to the knot-0 authority
-    // (and a closing acceleration removed) exactly as the executor clamps its
-    // output tick after tick. The old design refused such a splice (Infeasible)
-    // and the executor had to brake and resume; now the constrained replan is
-    // continuous with what the arm is actually being sent.
-    if(!r.dispatch_offset_m.isZero(0.0)) {
-      auto T=math::se3FromPose(out.initial.pose);T.translation()+=r.dispatch_offset_m;
-      out.initial.pose=math::poseFromSe3(T);
-    }
+    // SPLICE FROM THE PREDECESSOR'S OWN SAMPLE. Since the contact clamp's deletion
+    // (2026-09-11) that sample IS what the arm was sent, so nothing is shifted or cut
+    // here; the plan is continuous with the dispatched path by construction.
     if(contact_active && !r.cold_start) {
       const Eigen::Vector3d& normal=r.contact_normal_stand;
       const double tol=tracker.config().feasibility_tolerance;
       const double bound0=contact.knots[0].upper_velocity_m_s;
-      double closing_velocity=normal.dot(out.initial.linear_velocity);
-      double closing_acceleration=normal.dot(out.initial.linear_acceleration);
-      if(r.contact_clamped_dispatch) {
-        // The executor's contact slew: the dispatched closing velocity at the splice
-        // is capped by a ceiling still falling toward the authority, not cut to it.
-        const double ceiling=std::max(bound0,r.contact_dispatch_ceiling_m_s);
-        if(closing_velocity>ceiling) {
-          out.initial.linear_velocity-=(closing_velocity-ceiling)*normal;
-          closing_velocity=ceiling;
-        }
-        // Only a closing acceleration is removed. The slew keeps dispatching the
-        // ceiling's own fall; the plan must not start with retreat acceleration.
-        if(closing_acceleration>0) {
-          out.initial.linear_acceleration-=closing_acceleration*normal;
-          closing_acceleration=0;
-        }
-      }
-      // A splice that still closes faster than the knot-0 authority (mid-slew, or an
+      const double closing_velocity=normal.dot(out.initial.linear_velocity);
+      const double closing_acceleration=normal.dot(out.initial.linear_acceleration);
+      // A splice that closes faster than the knot-0 authority (an
       // authority that fell between request and splice while the executor was not
       // yet holding anything back) is never refused as Infeasible: the plan gets the
       // fastest brake it can realise from that state, and nothing looser (2026-09-10

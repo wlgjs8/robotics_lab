@@ -75,28 +75,15 @@ struct PreviewExecutionRequest {
   // Nonzero cold derivatives are rejected, never clipped to zero.
   bool cold_start{false};
   PreviewMotionState cold_initial{};
-  // THE DISPATCHED STATE (2026-09-10). When the executor holds the active plan
-  // back (closing velocity clamped to the contact authority, replacing the old
-  // brake-resume), the predecessor's own sample is no longer what the arm was
-  // sent. dispatch_offset_m is the held-back displacement predicted at the splice
-  // (dispatched pose minus predecessor pose); contact_clamped_dispatch cuts the
-  // spliced closing velocity/acceleration to the knot-0 authority exactly as the
-  // executor clamps its output. Neither applies to a cold start or to a brake
-  // predecessor (a brake already starts from the dispatched state).
-  Eigen::Vector3d dispatch_offset_m{Eigen::Vector3d::Zero()};
-  bool contact_clamped_dispatch{false};
-  // THE CONTACT SLEW (2026-09-10 pm). The executor does not cut the dispatched
-  // closing velocity to the authority in one tick; it caps it by a ceiling that
-  // falls from what was last dispatched along the tracker's own acceleration/jerk
-  // limits. At the splice that ceiling may still sit above the knot-0 authority:
-  // the worker splices from min(predecessor closing velocity, ceiling), removes only
-  // a closing acceleration, and widens the authority along the fastest
-  // plan-realisable brake of that residual (see widenContactAuthorityWithRamp).
-  // NEVER the ceiling's own deceleration as the plan's initial acceleration: that
-  // injected up to 12 m/s^2 of retreat along the force at every 10 ms replan and
-  // the plan ran 44 mm down the push before snapping back at 350 mm/s
-  // (servo_log_20260910_160035 @54.0-54.7 s, and @111-115 s of the 15:28 run).
-  double contact_dispatch_ceiling_m_s{0.0};
+  // NO DISPATCHED-STATE OFFSET (2026-09-11). The executor used to hold the active
+  // plan back at a contact and carry the refused displacement here so a replan could
+  // splice from what the arm was actually sent. That hold-back is deleted - its
+  // book-and-retire owned 91-100 % of the violent command accelerations in the day's
+  // policy runs - so the predecessor's own sample IS the dispatched state, and the
+  // splice needs nothing extra. What remains is the authority WIDENING below: the
+  // spliced state may still close faster than the new knot-0 bound whenever the
+  // follower's gated authority fell between request and splice, and refusing that as
+  // Infeasible fed the expiry-brake cycle (27 refusals in 5 s, 2026-09-10 pm).
 };
 
 enum class PreviewExecutionWorkerStatus {
@@ -129,9 +116,6 @@ struct PreviewExecutionResult {
   bool solve_attempted{false};
   PreviewSolveDiagnostics diagnostics{};
   PreviewMotionState initial{};
-  // Echo of the request's dispatch_offset_m that `initial` includes; the executor
-  // keeps only the displacement refused after this prediction.
-  Eigen::Vector3d dispatch_offset_m{Eigen::Vector3d::Zero()};
   PreviewPolynomialTrajectory trajectory{};
   // Canonical forecast data only, never executable motion authority. Even a
   // rejected QP may expose this snapshot, under its original source/epoch/expiry.

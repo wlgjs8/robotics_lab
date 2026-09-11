@@ -438,12 +438,10 @@ struct PreviewExecutionTelemetry {
     uint64_t rejected = 0;
     uint64_t expired = 0;
     uint64_t contact_guard_count = 0;
-    // Continuous contact authority (2026-09-10): the executed plan is clamped to the
-    // follower's closing-velocity authority instead of braked; the refused advance is
-    // held back until the constrained replan takes over.
-    uint64_t contact_clamp_count = 0;
-    bool contact_clamp_active = false;
-    double contact_clamp_shift_m = 0.0;
+    // The contact clamp is DELETED (2026-09-11): its book-and-retire owned 91-100 % of
+    // the violent command accelerations in the day's policy runs. Contact is carried by
+    // the QP's per-knot closing-velocity constraint alone; `solve_contact_constrained`
+    // says when that bound was active.
     // How far the dispatched pose leads the source's own output this tick (0 when no
     // plan is being dispatched). NOT a bound: the executor never clamps it. The servo
     // loop leashes the PLAN CLOCK with it; see live_preview_execution.cpp.

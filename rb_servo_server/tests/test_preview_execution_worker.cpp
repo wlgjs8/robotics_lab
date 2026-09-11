@@ -313,56 +313,36 @@ bool testClampedDispatchSplice() {
       if(.002*k>=t_brake)CHECK(s.linear_velocity.x()<=tol);
     }
   }
-  contact.contact_clamped_dispatch=true;contact.dispatch_offset_m={-.0005,0,0};
-  CHECK(worker.trySubmit(follower,contact));CHECK(waitResult(worker,out));
-  if(!out.accepted())std::cerr<<"clamped dispatch worker status="<<static_cast<int>(out.status)
-      <<" solve="<<static_cast<int>(out.diagnostics.status)<<" slack="<<out.diagnostics.max_position_tracking_slack_m
-      <<" nwsr="<<out.diagnostics.working_set_recalculations<<" rows="<<out.diagnostics.contact_constraint_rows
-      <<" decomposed="<<out.diagnostics.contact_decomposed<<" fallback="<<out.diagnostics.contact_coupled_fallback
-      <<" cviol="<<out.diagnostics.max_contact_velocity_violation_m_s<<" time="<<out.diagnostics.solve_time_sec<<'\n';
-  CHECK(out.accepted());CHECK(out.diagnostics.contact_constrained);
-  const double tol=trackerConfig().feasibility_tolerance;
-  CHECK(std::abs(out.initial.pose.x-(at_splice.pose.x-.0005))<1e-12);
-  CHECK(std::abs(out.initial.pose.y-at_splice.pose.y)<1e-12);
-  CHECK(out.initial.linear_velocity.x()<=tol);
-  CHECK(out.initial.linear_acceleration.x()<=tol);
-  CHECK((out.initial.linear_velocity-at_splice.linear_velocity).tail<2>().norm()==0);
-  CHECK((out.dispatch_offset_m-Eigen::Vector3d(-.0005,0,0)).norm()==0);
-  PreviewMotionSample started;CHECK(out.trajectory.sample(0.,started));
-  CHECK(std::abs(started.pose.x-out.initial.pose.x)<1e-12);
-  // Mid-slew splice (2026-09-10 pm): the executor still dispatches part of the
-  // closing velocity under its ceiling; the worker splices from that with the
-  // ramp's deceleration and widens the authority along the fastest realisable
-  // brake instead of refusing. The plan never closes faster than dispatched and
-  // is inside the authority once that brake is over.
-  const double v_ceiling=std::min(at_splice.linear_velocity.x(),.5*at_splice.linear_velocity.x()+.005);
-  auto slewed=contact;slewed.contact_dispatch_ceiling_m_s=v_ceiling;
-  CHECK(worker.trySubmit(follower,slewed));CHECK(waitResult(worker,out));
-  if(!out.accepted())std::cerr<<"mid-slew worker status="<<static_cast<int>(out.status)
-      <<" solve="<<static_cast<int>(out.diagnostics.status)<<" violation="<<out.diagnostics.max_contact_velocity_violation_m_s<<'\n';
-  CHECK(out.accepted());CHECK(out.diagnostics.contact_constrained);
-  CHECK(std::abs(out.initial.linear_velocity.x()-v_ceiling)<1e-12);
-  CHECK(out.initial.linear_acceleration.x()<=tol);   // closing acceleration removed, no retreat injected
+  // A SPLICE THAT STILL CLOSES FASTER THAN THE NEW KNOT-0 BOUND IS WIDENED, NEVER
+  // REFUSED (2026-09-10 pm; the dispatched-state offset and the contact clamp that
+  // produced it are gone since 2026-09-11). The authority can fall between request and
+  // splice, so the initial state legitimately exceeds it; refusing that as Infeasible
+  // fed the expiry-brake cycle (27 refusals in 5 s under a hand push). The plan gets
+  // the fastest brake it can realise from that state and nothing looser.
   {
-    const auto& tr=trackerConfig();
-    // fastest realisable brake from (v_ceiling, 2 m/s^2): bounded by the constant-jerk
-    // planning-grid ramp; certainly finished within this many seconds
-    const double t_brake=v_ceiling/tr.max_linear_acceleration_m_s2+tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+2*tr.planning_dt_sec;
+    auto tighter=contact;
+    tighter.contact_gate=0.0;                // authority 0 at every knot
+    CHECK(worker.trySubmit(follower,tighter));CHECK(waitResult(worker,out));
+    if(!out.accepted())std::cerr<<"widened splice worker status="<<static_cast<int>(out.status)
+        <<" solve="<<static_cast<int>(out.diagnostics.status)
+        <<" violation="<<out.diagnostics.max_contact_velocity_violation_m_s<<'\n';
+    CHECK(out.accepted());CHECK(out.diagnostics.contact_constrained);
+    // NOT clipped: the initial state is the predecessor's own sample, because that is
+    // what the arm was sent.
+    CHECK((out.initial.linear_velocity-at_splice.linear_velocity).norm()<1e-12);
+    CHECK((out.initial.linear_acceleration-at_splice.linear_acceleration).norm()<1e-12);
+    PreviewMotionSample started;CHECK(out.trajectory.sample(0.,started));
+    CHECK(std::abs(started.pose.x-out.initial.pose.x)<1e-12);
+    const auto& tr=trackerConfig();const double tol=tr.feasibility_tolerance;
+    const double v0=at_splice.linear_velocity.x();
+    const double t_brake=v0/tr.max_linear_acceleration_m_s2+
+        2*tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+3*tr.planning_dt_sec;
     for(int k=0;k<=120;++k) {
-      PreviewMotionSample s;CHECK(out.trajectory.sample(.002*k,s));
-      CHECK(s.linear_velocity.x()<=v_ceiling+2e-3+tol);   // Bernstein/chord margin j h^2/4 at most
-      if(.002*k>=t_brake)CHECK(s.linear_velocity.x()<=tol);
+      PreviewMotionSample sm;CHECK(out.trajectory.sample(.002*k,sm));
+      CHECK(sm.linear_velocity.x()<=v0+2e-3+tol);          // never faster than dispatched
+      if(.002*k>=t_brake)CHECK(sm.linear_velocity.x()<=tol);
     }
   }
-  auto bad_ceiling=slewed;bad_ceiling.contact_dispatch_ceiling_m_s=-1.;
-  CHECK(worker.trySubmit(follower,bad_ceiling));CHECK(waitResult(worker,out));CHECK(out.status==PreviewExecutionWorkerStatus::InvalidRequest);
-  // The offset/clamp describe a held-back ACTIVE plan: no cold start, no brake
-  // predecessor, and a clamp needs a contact.
-  auto bad=contact;bad.cold_start=true;bad.identity.parent_plan_id=0;bad.predecessor=PreviewPolynomialTrajectory{};
-  bad.predecessor_origin_sec=std::numeric_limits<double>::quiet_NaN();
-  CHECK(worker.trySubmit(follower,bad));CHECK(waitResult(worker,out));CHECK(out.status==PreviewExecutionWorkerStatus::InvalidRequest);
-  auto no_contact=contact;no_contact.contact_gate=1.;no_contact.contact_normal_stand.setZero();
-  CHECK(worker.trySubmit(follower,no_contact));CHECK(waitResult(worker,out));CHECK(out.status==PreviewExecutionWorkerStatus::InvalidRequest);
   return true;
 }
 

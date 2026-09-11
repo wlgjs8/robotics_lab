@@ -53,7 +53,11 @@ ChunkFrame frame(std::uint64_t wire=17,std::uint64_t recv=8,double delta=.001,do
     f.pose.push_back(p);f.grip.push_back(.5);f.delta.push_back(Vec6{delta,0,0,0,0,angular_delta});}
   return f;
 }
-void letWorkerRun() {std::this_thread::sleep_for(std::chrono::milliseconds(3));}
+// "Give the worker a chance to finish a solve." 3 ms was enough on an idle machine and
+// flaked under an 8-way parallel ctest, where a qpOASES solve does not always land
+// inside it (the failure is a starved worker, not a contract violation). Tests that
+// deliberately starve the worker simply do not call this.
+void letWorkerRun() {std::this_thread::sleep_for(std::chrono::milliseconds(10));}
 struct Fixture {
   CartesianChunkFollower raw{rawConfig()};
   double leash_start_m{.025};
@@ -282,59 +286,50 @@ bool currentVelocityAuthority() {
   const auto before_clamp=f.exec.sample();
   const auto stopped=f.step(true,.01,Eigen::Vector3d::UnitX());
   CHECK(f.raw.outputKinematics().velocity.x==0);
-  // 2026-09-10: the active plan losing closing authority is CLAMPED, not braked.
-  // Its closing velocity is cut to the authority (0 here), the refused advance is
-  // held back, and the plan keeps executing until the constrained replan splices.
+  // 2026-09-11: an active plan that loses closing authority is DISPATCHED AS SOLVED.
+  // It is neither braked (the 3 Hz bounce of 2026-09-10 morning) nor clamped (the
+  // book-and-retire that owned 91-100 % of the violent command accelerations in the
+  // day's policy runs). The contact lives in the QP's per-knot bound, so the
+  // constrained replan is what brings the closing velocity inside the authority -
+  // within one replan period, continuously, with no step in what is dispatched.
   CHECK(stopped.active&&!stopped.fault&&!f.exec.braking());
   CHECK(f.exec.telemetry().contact_guard_count==0);
-  CHECK(f.exec.telemetry().contact_clamp_count==1&&f.exec.contactClampActive());
   const double tol=config().preview_execution.tracker.feasibility_tolerance;
-  // 2026-09-10 pm: SLEWED, not cut. The dispatched closing velocity only falls from
-  // what was last dispatched, along the tracker's own jerk/acceleration limits.
-  const auto& tr=config().preview_execution.tracker;
-  const double v_prev=before_clamp.linear_velocity.x();
-  CHECK(f.exec.sample().linear_velocity.x()<=v_prev+tol);
-  CHECK(f.exec.sample().linear_velocity.x()>=v_prev-tr.max_linear_acceleration_m_s2*kDt-tol);
-  CHECK(f.exec.sample().linear_velocity.x()<v_prev-tol);
-  CHECK(f.exec.sample().linear_acceleration.x()<=tol);
-  // held back: no advance into the contact beyond the refused displacement's
-  // second-order residual of one tick
-  CHECK(f.exec.sample().pose.x<=before_clamp.pose.x+v_prev*kDt+1e-6);
-  CHECK(f.exec.telemetry().contact_clamp_shift_m>0);
+  // NOT cut: the sample is exactly what the plan carried into this tick.
+  CHECK(std::abs(f.exec.sample().linear_velocity.x()-before_clamp.linear_velocity.x())
+        <=config().preview_execution.tracker.max_linear_acceleration_m_s2*kDt+tol);
   CHECK(f.accept(stopped));
-  // The constrained replan (contact knots at authority 0) takes over without a
-  // brake; the clamp retires with it and closing stays inside authority.
-  bool replanned=false;double last_closing=f.exec.sample().linear_velocity.x();
-  for(int i=0;i<60&&!replanned;++i) {
+  // The constrained replan takes over without a brake and without a position step.
+  bool inside=false;double previous_x=f.exec.sample().pose.x;
+  for(int i=0;i<60&&!inside;++i) {
     letWorkerRun();const auto out=f.step(true,.01,Eigen::Vector3d::UnitX());
     if(!(out.active&&!out.fault&&!f.exec.braking())) {
       const auto& tl=f.exec.telemetry();
-      std::cerr<<"clamp loop i="<<i<<" status="<<tl.status<<" brake="<<tl.last_brake_reason
-               <<" clamp_shift="<<tl.contact_clamp_shift_m<<" clamps="<<tl.contact_clamp_count
+      std::cerr<<"contact loop i="<<i<<" status="<<tl.status<<" brake="<<tl.last_brake_reason
                <<" accepted="<<tl.accepted<<" rejected="<<tl.rejected<<" expired="<<tl.expired
                <<" last_cancel="<<tl.last_staged_cancel_reason<<" worker="<<tl.last_worker_status
                <<" solve="<<tl.last_solve_status<<" raw_v="<<f.raw.outputKinematics().velocity.x<<'\n';
     }
     CHECK(out.active&&!out.fault&&!f.exec.braking());
-    // monotone: never above what was last dispatched (or the authority), and
-    // once the slew retires the plan itself is inside the authority
-    const double closing=f.exec.sample().linear_velocity.x();
-    CHECK(closing<=std::max(last_closing,std::max(0.,f.raw.outputKinematics().velocity.x))+tol);
-    last_closing=closing;
+    // CONTINUITY IS THE POINT: 2 ms of travel at the tracker's own velocity ceiling,
+    // never a booked-and-retired jump (measured 0.3-3.8 mm per admission before).
+    CHECK(std::abs(f.exec.sample().pose.x-previous_x)
+          <=config().preview_execution.tracker.max_linear_velocity_m_s*kDt+1e-9);
+    previous_x=f.exec.sample().pose.x;
     CHECK(f.accept(out));
-    replanned=!f.exec.contactClampActive();
+    inside=f.exec.sample().linear_velocity.x()<=
+        std::max(0.,f.raw.outputKinematics().velocity.x)+tol;
   }
-  CHECK(replanned);CHECK(f.exec.sample().linear_velocity.x()<=std::max(0.,f.raw.outputKinematics().velocity.x)+tol);
+  CHECK(inside);
   CHECK(f.exec.telemetry().contact_guard_count==0);
-  CHECK(f.exec.telemetry().contact_clamp_shift_m==0);
   return true;
 }
 
-bool contactClampFallsBackToBrakeOnlyWhenNoReplanArrives() {
-  // Starve the worker: the clamp holds back the refused advance tick after tick
-  // and never executes a closing velocity; with no compliant replan admitted the
-  // violating plan expires inside max_result_age_sec and the finite brake remains
-  // the last resort. There is no separate displacement bound.
+// AN UNREPLACED CLOSING PLAN STILL ENDS IN A FINITE BRAKE. With no clamp the plan
+// keeps dispatching its own closing velocity while the authority says zero - that is
+// the deliberate 10 ms-per-replan exposure - and the backstop every unreplaced plan
+// has is expiry inside max_result_age_sec, not a special contact rule.
+bool unreplacedClosingPlanExpiresIntoABrake() {
   setExternalSteadyNs(kStartNs);Fixture f(.01);CHECK(f.engage());
   bool moving=false;
   for(int i=0;i<90&&!moving;++i) {
@@ -343,26 +338,16 @@ bool contactClampFallsBackToBrakeOnlyWhenNoReplanArrives() {
   }
   CHECK(moving);
   f.raw.setPlanRateGate(0);
-  bool braked=false;std::uint64_t clamps=0;
-  const double tol=config().preview_execution.tracker.feasibility_tolerance;
-  double last_closing=f.exec.sample().linear_velocity.x();bool reached=false;
+  bool braked=false,kept_closing=false;
   for(int i=0;i<200&&!braked;++i) {
-    const auto out=f.step(true,0,Eigen::Vector3d::UnitX());  // no letWorkerRun: no replan can land
+    const auto out=f.step(true,0,Eigen::Vector3d::UnitX());  // no letWorkerRun: no replan lands
     CHECK(!out.fault);CHECK(f.accept(out));
-    clamps=f.exec.telemetry().contact_clamp_count;
     braked=f.exec.braking();
-    if(!braked) {
-      // slewed down monotonically to the authority (0), then held there
-      const double closing=f.exec.sample().linear_velocity.x();
-      CHECK(closing<=last_closing+tol);last_closing=closing;
-      reached=reached||closing<=tol;
-      if(reached)CHECK(closing<=tol);
-    }
+    if(!braked&&f.exec.sample().linear_velocity.x()>0.01)kept_closing=true;
   }
-  CHECK(reached);
-  CHECK(clamps>1);
-  // the plan expired (braking_expired): a brake, not a fault, and no clamp ever
-  // executed a closing velocity
+  // It kept executing what it had planned (the old clamp forced this to zero), and
+  // the expiry brake is what ended it.
+  CHECK(kept_closing);
   CHECK(braked);CHECK(std::string(f.exec.telemetry().last_brake_reason)=="braking_expired");
   return true;
 }
@@ -972,7 +957,6 @@ bool executorDoesNotClampTheLead() {
   for(int i=0;i<200;++i) {
     letWorkerRun();const auto out=f.step();
     CHECK(!out.fault);CHECK(f.leadPublished());CHECK(f.accept(out));
-    CHECK(f.exec.telemetry().contact_clamp_shift_m==0.);
     max_lead=std::max(max_lead,f.exec.telemetry().plan_lead_m);
   }
   CHECK(max_lead>3*f.leash_start_m);
@@ -991,7 +975,7 @@ int main() {
       recoveryOutputRejectsNanosecondOverflowBoundary()&&recoverySeedSurvivesWaitingForStationaryDispatch()&&
       explicitResetCancelsPendingRecoverySeed()&&pendingRecoverySeedSharesGeometricFold()&&
       recordedAngularExpiryStateHasFiniteBrake()&&stationarySeedRefusalNamesThePredicate()&&
-      sentJointStationarityUsesTolerance()&&contactClampFallsBackToBrakeOnlyWhenNoReplanArrives()&&
+      sentJointStationarityUsesTolerance()&&unreplacedClosingPlanExpiresIntoABrake()&&
       executorDoesNotClampTheLead();
   setExternalSteadyNs(0);
   if(!ok)return 1;

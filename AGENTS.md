@@ -196,7 +196,24 @@ Two invariants the hardware taught, both enforced by the loader:
   and the complete hold-back with it: an axis cannot rotate, and the leak a proportional
   fade used to be blamed for IS the equilibrium now. What this does NOT fix is the impact
   peak (`v·sqrt(k_env·m)`, 39.5 N at a 115 mm/s approach): 10 N is the steady state, not
-  the transient. THE GATE IS JUDGED ON THE PRESS-AXIS COMPONENT, NOT |F|. The crossing is an identity
+  the transient. THE CONTACT CLAMP IS DELETED (2026-09-11 evening). The executor used to cut the
+  dispatched closing velocity to the follower's gated authority and book the refusal,
+  echoing it as the dispatched state and retiring it on admission. Measured on the day's
+  policy runs, that book-and-retire owned the vibration: 91-100 % of every |command
+  acceleration| > 10 m/s² (up to 78 m/s²) fell within 16 ms of a clamp firing, on both
+  arms of three runs, with the clamp firing on 28-45 % of active ticks and its shift
+  sawtoothing 0 → 1.8-7.3 mm at the 100 Hz replan rate. Contact is carried by the QP's
+  per-knot closing-velocity bound alone (already active on 78-93 % of those ticks); the
+  cost is the 10 ms splice window, ≤2 mm at 200 mm/s, continuous instead of a step.
+  Measured after: 50-250 Hz command content 13.3 → 3.6 mm/s RMS, dispatch acceptance
+  error 1.85 → 0.003 mm, max command acceleration 67 → 12.6 m/s² (the tracker's own
+  limit), backlog 85 → 0 ms, recovery entries 83 → 0, no fault. THE GATE'S RE-OPEN IS
+  NOT A FREE PARAMETER: dropping `open_tau_s` to 0.15 s in the same change doubled the
+  gate's median authority and the commanded speed through a standing contact (68.6 →
+  127.1 mm/s) and grew the 5-15 Hz ripple 50 % — the operator felt MORE vibration. CM's
+  measurement already said below 200 ms the contact loop sustains a limit cycle; the
+  crossing gives the loop an equilibrium but not a margin. Back at CM's shipped 0.40 s.
+  THE GATE IS JUDGED ON THE PRESS-AXIS COMPONENT, NOT |F|. The crossing is an identity
   between the gate's speed at the declared force and the LAW's yield there, and the law
   only yields past `rest_force_n` on ONE axis: judged on |F| an off-axis contact shuts
   the gate for a force nothing yields, and the only equilibrium left is "gate shut, law
