@@ -409,29 +409,7 @@ double ForceGate::snapOpen(double g) {
     return g > 1.0 - 1e-6 ? 1.0 : g;
 }
 
-math::Vector3 ForceGate::applyTranslation(const math::Vector3& advance_stand,
-                                          double* removed) const {
-    if (removed != nullptr) *removed = 0.0;
-    if (gate_t_ >= 1.0 || force_n_ <= 1e-9) return advance_stand;
-    // ONLY THE COMPONENT PUSHING INTO THE MEASURED WRENCH. `proj < 0` means the
-    // advance drives against the force the sensor reports, i.e. deeper into the
-    // contact; the tangential and retreating components pass at full authority.
-    const double proj = advance_stand.dot(force_dir_);
-    if (proj >= 0.0) return advance_stand;
-    const math::Vector3 cut = (1.0 - gate_t_) * proj * force_dir_;
-    if (removed != nullptr) *removed = cut.norm();
-    return advance_stand - cut;
-}
 
-math::Vector3 ForceGate::applyRotation(const math::Vector3& advance_stand, double* removed) const {
-    if (removed != nullptr) *removed = 0.0;
-    if (gate_r_ >= 1.0 || torque_nm_ <= 1e-9) return advance_stand;
-    const double proj = advance_stand.dot(torque_dir_);
-    if (proj >= 0.0) return advance_stand;
-    const math::Vector3 cut = (1.0 - gate_r_) * proj * torque_dir_;
-    if (removed != nullptr) *removed = cut.norm();
-    return advance_stand - cut;
-}
 
 }  // namespace control
 }  // namespace rb_servo

@@ -246,7 +246,10 @@ private:
     // declared contact normal are judged on, so `rest_force_n` means the force a
     // sensor reads rather than that force plus the deadzone.
     std::array<Vec6,2> prepared_force_physical_{};
+    // The PRESS-AXIS component the gate is judged on, and |F| beside it so the pair
+    // stays auditable in one log (they diverge exactly when a contact is off-axis).
     std::array<double,2> prepared_force_magnitude_{};
+    std::array<double,2> prepared_force_norm_{};
     ServoTarget computeServoTarget(
         const RobotState& left_state,
         const RobotState& right_state,
@@ -1112,6 +1115,12 @@ private:
     // row (-1 = none declared), fixed at configure(). The axis itself is that column
     // of the overlay's tool-frame rotation, re-aimed every tick.
     int press_axis_index_ = -1;
+    // The SIGN band on the press-axis component [N]. A noise floor, deliberately far
+    // below the F/T deadzone (3 N) and below rest_force_n: the sign is only undefined
+    // near ZERO, and there the gate is ~1 so the choice cannot matter. Putting this band
+    // at rest_force_n instead switched the advance authority between 1 % and 100 % at
+    // the wrench's ripple rate (52 Hz on both arms, servo_log_20260911_134703).
+    static constexpr double kContactNormalSignDeadbandN = 0.5;
     // This tick's declared contact normal per arm, stand frame. Zero = the measured
     // component along the press axis is inside rest_force_n, i.e. no contact there.
     std::array<math::Vector3, 2> declared_contact_normal_{math::Vector3::Zero(),

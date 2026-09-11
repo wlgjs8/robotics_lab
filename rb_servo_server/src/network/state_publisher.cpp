@@ -236,6 +236,7 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& t) {
         {"gate_stream_speed_m_s", t.gate_stream_speed_m_s},
         {"gate_rest_force_n", t.gate_rest_force_n},
         {"gate_peak_force_n", t.gate_peak_force_n},
+        {"gate_wrench_norm_n", t.gate_wrench_norm_n},
 
         {"folded", t.folded},
         {"fold_sink", t.fold_sink},

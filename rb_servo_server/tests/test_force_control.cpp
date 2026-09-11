@@ -217,6 +217,22 @@ bool testDeadzoneIsContinuous() {
 // ---------------------------------------------------------------------------
 
 // The shipped STREAM law (controller-manager's follow 10 N row).
+// THE FOLLOWER'S CUT, as a test helper: remove (1-g) of the advance's projection onto
+// the DECLARED normal, and only when that projection is INTO the contact. This is the
+// one rule the live path uses (CartesianChunkFollower::setAdvanceGate); the gate itself
+// no longer carries an apply, so a test that wants the rule states it.
+rb_servo::math::Vector3 cutAlong(const rb_servo::math::Vector3& advance,
+                                 const rb_servo::math::Vector3& normal, double gate,
+                                 double* removed) {
+    if (removed != nullptr) *removed = 0.0;
+    if (normal.isZero(0.0) || gate >= 1.0) return advance;
+    const double proj = advance.dot(normal);
+    if (proj >= 0.0) return advance;
+    const rb_servo::math::Vector3 cut = (1.0 - gate) * proj * normal;
+    if (removed != nullptr) *removed = cut.norm();
+    return advance - cut;
+}
+
 rb_servo::ForceControlConfig shippedLaw() {
     rb_servo::ForceControlConfig c;
     c.enable = true;
@@ -313,15 +329,19 @@ bool testGateAttenuatesOnlyIntoTheContact() {
 
     double removed = 0.0;
     // INTO the contact (advance opposes the reaction) -> attenuated.
-    const auto into = gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
+    const rb_servo::math::Vector3 normal(0.0, 0.0, 1.0);   // declared axis, reaction +z
+    const auto into = cutAlong(rb_servo::math::Vector3(0.0, 0.0, -0.001), normal,
+                               gate.translation(), &removed);
     CHECK(std::abs(into.z()) < 1e-4);
     CHECK(removed > 0.0);
     // TANGENTIAL -> untouched.
-    const auto tang = gate.applyTranslation(rb_servo::math::Vector3(0.001, 0.0, 0.0), &removed);
+    const auto tang = cutAlong(rb_servo::math::Vector3(0.001, 0.0, 0.0), normal,
+                               gate.translation(), &removed);
     CHECK(near(tang.x(), 0.001, 1e-12));
     CHECK(near(removed, 0.0));
     // RETREATING -> untouched, at full authority.
-    const auto out = gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, 0.001), &removed);
+    const auto out = cutAlong(rb_servo::math::Vector3(0.0, 0.0, 0.001), normal,
+                              gate.translation(), &removed);
     CHECK(near(out.z(), 0.001, 1e-12));
     CHECK(near(removed, 0.0));
     return true;
@@ -370,7 +390,8 @@ bool testGateIsOpenInFreeSpace() {
     for (int i = 0; i < 1000; ++i) gate.update(zero, zero, -1.0, -1.0, 0.200);
     CHECK(near(gate.translation(), 1.0, 1e-12));
     double removed = 1.0;
-    const auto adv = gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
+    const auto adv = cutAlong(rb_servo::math::Vector3(0.0, 0.0, -0.001),
+                              rb_servo::math::Vector3(0.0, 0.0, 1.0), gate.translation(), &removed);
     CHECK(near(adv.z(), -0.001, 1e-12));
     CHECK(near(removed, 0.0));
     return true;
@@ -392,7 +413,8 @@ bool testGateReopensToExactlyOneAfterRelease() {
     for (int i = 0; i < 7500; ++i) gate.update(zero, zero, 0.0, -1.0, 0.200);
     CHECK(gate.translation() == 1.0);
     double removed = 1.0;
-    gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
+    cutAlong(rb_servo::math::Vector3(0.0, 0.0, -0.001), rb_servo::math::Vector3(0.0, 0.0, 1.0),
+             gate.translation(), &removed);
     CHECK(removed == 0.0);
     return true;
 }
@@ -867,7 +889,11 @@ struct WallLoop {
     double v_cmd = 0.050;
     double lpf_hz = 25.0;
     double deadzone_n = 0.0;        // soft per-axis deadzone on what the LAW sees
-    bool gate_on_physical = false;  // judge the gate on |F| before the deadzone
+    bool gate_on_physical = false;  // judge the gate on the physical, pre-deadzone force
+    // A LATERAL contact the press axis cannot yield against. The live loop judges the
+    // gate on the PRESS-AXIS COMPONENT, so this must not move the crossing; judged on
+    // |F| it destroys it (the gate shuts for a force nothing yields).
+    double lateral_n = 0.0;
     std::vector<double> delay;
     std::size_t head = 0;
     double f_filt = 0.0;
@@ -910,17 +936,29 @@ struct WallLoop {
             f_phys_signed = f_raw;
         }
         force_seen = f_raw;   // the TRUE contact force (what the wall feels)
-        const rb_servo::math::Vector3 f(0.0, 0.0, f_filt);
+        const rb_servo::math::Vector3 f(lateral_n, 0.0, f_filt);
         const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
-        const rb_servo::math::Vector3 f_phys(0.0, 0.0, f_phys_signed);
+        const rb_servo::math::Vector3 f_phys(lateral_n, 0.0, f_phys_signed);
         // THE DEMAND, not the achieved advance: `v_cmd` is what the plan asks for and
         // the gate never touches it, which is the property the crossing rests on.
-        gate.update(f, m, gate_on_physical ? f_phys_filt : -1.0, -1.0, v_cmd);
-        // The plan advance into the wall, projectively gated (the chunk follower's
-        // setAdvanceGate does this per segment; per tick is the same law).
-        double removed = 0.0;
-        const rb_servo::math::Vector3 adv =
-            gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, v_cmd * dt), &removed);
+        // THE PRESS-AXIS COMPONENT is what the live loop hands the gate (z here), never
+        // the norm - see prepareForceOverlayInput. `f_phys_filt` keeps the norm so a
+        // test can still ask for the old judgement explicitly.
+        gate.update(f, m, gate_on_physical ? std::abs(f_phys_signed) : -1.0, -1.0, v_cmd);
+        // The plan advance into the wall, cut along the DECLARED normal - which is what
+        // setAdvanceGate does with the axis the law declared, not along the measured
+        // wrench. The difference is load-bearing: with a lateral component the measured
+        // direction tilts, so `applyTranslation` would leave part of the into-contact
+        // advance uncut and the crossing would move (27.4 N instead of 12.0 in this
+        // harness). The live loop has no such tilt - the axis is declared.
+        const rb_servo::math::Vector3 normal = rb_servo::control::declaredContactNormal(
+            rb_servo::math::Matrix3::Identity(), 2,
+            rb_servo::math::Vector3(lateral_n, 0.0, f_phys_signed), 0.5);
+        rb_servo::math::Vector3 adv(0.0, 0.0, v_cmd * dt);
+        if (!normal.isZero(0.0) && gate.translation() < 1.0) {
+            const double proj = adv.dot(normal);
+            if (proj < 0.0) adv -= (1.0 - gate.translation()) * proj * normal;
+        }
         plan_z += adv.z();
         overlay.step(f, m, f_phys, m);
         emitted_z = plan_z + overlay.deviation().z();
@@ -971,8 +1009,10 @@ bool testFoldIsInvisibleToTheContact() {
 // converged to 0 N because the law kept yielding where the gate had stopped the plan.
 bool testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed() {
     rb_servo::ForceControlConfig cfg = pressLaw();
+    double lateral = 0.0;
     const auto converged = [&](double v_mm_s) {
         WallLoop w(cfg, true, 9);           // 18 ms of transport delay
+        w.lateral_n = lateral;
         // THE MEASURED CONTACT STIFFNESS, not a rigid jig: 39.5 N at 8.9 mm of
         // penetration on the floor (servo_log_20260911_100038, right arm 197.8 s) is
         // 4.4 N/mm, arm compliance included. At a rigid 30.7 kN/m this law rings by its
@@ -996,6 +1036,18 @@ bool testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed() {
     std::printf("  the crossing, swept 5x in stream speed (declared %.1f N):\n",
                 cfg.gate_peak_force_n);
     const double f30 = converged(30.0), f60 = converged(60.0), f150 = converged(150.0);
+    // AND WITH A LATERAL CONTACT THE PRESS AXIS CANNOT YIELD AGAINST. Judged on |F| a
+    // 20 N side load shuts the gate for a force nothing yields, and the only equilibrium
+    // left is "gate shut, law at rest": the contact sits at rest_force_n with ZERO
+    // advance authority, the follower's reference freezes and the executor runs away
+    // (the 14:12 run: |F| 26-35 N against a press component of 0.3-29 N, lead 25-30 mm,
+    // backlog to 86 ms, then accepted_deviation). Judged on the component it changes
+    // nothing at all.
+    lateral = 20.0;
+    const double f100_side = converged(100.0);
+    std::printf("    with a %.0f N lateral load -> %.2f N\n", lateral, f100_side);
+    CHECK(std::abs(f100_side - cfg.gate_peak_force_n) < 1.0);
+    lateral = 0.0;
     const double lo = std::min({f30, f60, f150}), hi = std::max({f30, f60, f150});
     // AT the declaration, not merely bounded by it.
     CHECK(std::abs(f30 - cfg.gate_peak_force_n) < 1.0);
@@ -1061,6 +1113,51 @@ bool testExternalContactRestsAtTheRestForceAndFreeSpaceIsNeverSought() {
                 "overlay deviation %.4f mm, fence never pinned\n", plan_z * 1e3,
                 overlay.deviation().norm() * 1e3);
     CHECK(plan_z < -0.030 && plan_z > -0.045);
+    return true;
+}
+
+// THE DECLARED NORMAL MUST NOT SWITCH AT AN OPERATING FORCE (2026-09-11). Everything
+// the gate does is continuous in |F|; the direction is the one place a DISCONTINUITY can
+// hide, and the first version hid one exactly at rest_force_n. Because a normal with
+// g = 1 removes nothing, the direction never has to be withdrawn - only its sign, near
+// zero, is undefined.
+bool testDeclaredNormalIsContinuousThroughTheOperatingForce() {
+    using rb_servo::math::Vector3;
+    const rb_servo::ForceControlConfig cfg = pressLaw();
+    // A tool rotated 30 deg about x, so the press axis is not a stand axis: the normal
+    // must come out as that column, not as world z.
+    const rb_servo::math::Matrix3 tool =
+        Eigen::AngleAxisd(30.0 * M_PI / 180.0, Eigen::Vector3d::UnitX()).toRotationMatrix();
+    const Vector3 axis = tool.col(2);
+    const double band = 0.5;
+    // Sweep the press-axis force from a light touch through rest_force_n and past
+    // peak_force_n: the normal is the SAME unit vector at every step. One switch
+    // anywhere in here is a 1 % <-> 100 % step in the plan's advance authority.
+    Vector3 previous = Vector3::Zero();
+    int switches = 0;
+    for (double f = 1.0; f <= 3.0 * cfg.gate_peak_force_n; f += 0.25) {
+        const Vector3 n = rb_servo::control::declaredContactNormal(tool, 2, axis * -f, band);
+        CHECK(std::abs(n.norm() - 1.0) < 1e-12);
+        CHECK((n + axis).norm() < 1e-12);          // reaction along -axis -> normal -axis
+        if (!previous.isZero(0.0) && (n - previous).norm() > 1e-9) ++switches;
+        previous = n;
+    }
+    CHECK(switches == 0);
+    // The sign flips ONLY through zero, and inside the noise band there is no normal at
+    // all - where the gate is 1.0 anyway, so nothing is attenuated either way.
+    CHECK((rb_servo::control::declaredContactNormal(tool, 2, axis * 20.0, band) - axis).norm() < 1e-12);
+    CHECK(rb_servo::control::declaredContactNormal(tool, 2, axis * 0.4, band).isZero(0.0));
+    CHECK(rb_servo::control::declaredContactNormal(tool, 2, axis * -0.4, band).isZero(0.0));
+    // A lateral force on a press axis is not a press: it projects to nothing.
+    CHECK(rb_servo::control::declaredContactNormal(tool, 2, tool.col(0) * 40.0, band).isZero(0.0));
+    // No declared press axis -> no normal, whatever the wrench says.
+    CHECK(rb_servo::control::declaredContactNormal(tool, -1, axis * 40.0, band).isZero(0.0));
+    // And it FOLLOWS THE TOOL: the same wrench under a re-aimed frame gives the frame's
+    // own axis, which is what "press along the tool's z" has to mean round a curve.
+    const rb_servo::math::Matrix3 turned =
+        Eigen::AngleAxisd(-70.0 * M_PI / 180.0, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    const Vector3 n2 = rb_servo::control::declaredContactNormal(turned, 2, turned.col(2) * 20.0, band);
+    CHECK((n2 - turned.col(2)).norm() < 1e-12);
     return true;
 }
 
@@ -1171,7 +1268,7 @@ bool testGateMagnitudeOverride() {
     CHECK(gate.translation() < 0.03);
     const rb_servo::math::Vector3 adv(0.0, 0.0, -0.001);  // into the +z force
     double removed = 0.0;
-    gate.applyTranslation(adv, &removed);
+    cutAlong(adv, rb_servo::math::Vector3(0.0, 0.0, 1.0), gate.translation(), &removed);
     CHECK(removed > 0.0009);                            // and it cuts along the vector's direction
     gate.update(small, rb_servo::math::Vector3::Zero(), -1.0, -1.0, 0.200);  // no override
     CHECK(near(gate.forceN(), 1.0));
@@ -1275,6 +1372,7 @@ int main() {
     testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed();
     testExternalContactRestsAtTheRestForceAndFreeSpaceIsNeverSought();
     testCurveFixedPointsAndMonotonicity();
+    testDeclaredNormalIsContinuousThroughTheOperatingForce();
     testWrenchFilterFlattensShockAndKeepsSteadyForce();
     testOscillationGuardTripsFreezesAndReleases();
     testAxisMapIsTheMeasuredLeftHandedBasis();

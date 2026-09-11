@@ -258,10 +258,12 @@ public:
                 double force_magnitude_n, double torque_magnitude_nm,
                 double stream_speed_m_s);
 
-    // Attenuate one plan advance. Returns the surviving advance; `removed` reports
-    // the magnitude taken out, so a log can say how much the gate actually did.
-    math::Vector3 applyTranslation(const math::Vector3& advance_stand, double* removed) const;
-    math::Vector3 applyRotation(const math::Vector3& advance_stand, double* removed) const;
+    // THE GATE NO LONGER CARRIES AN APPLY (2026-09-11). It used to project the advance
+    // onto the MEASURED wrench direction; the live path cuts along the DECLARED normal
+    // instead (CartesianChunkFollower::setAdvanceGate and the pose-track stage), and
+    // keeping a second direction rule around is how the two drift apart. Measured cost
+    // of the old rule with a lateral load present: the tilted direction left 36 % of the
+    // into-contact advance uncut and moved the crossing from 12.0 N to 27.4 N.
 
     double translation() const { return gate_t_; }
     double rotation() const { return gate_r_; }

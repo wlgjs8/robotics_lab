@@ -11117,15 +11117,37 @@ void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
         }
     }
 
-    // ---- the PHYSICAL magnitudes (compensated, BEFORE the deadzone) --------
-    // The gate is judged on these, low-passed with the wrench filter's corner. Judged
-    // on the deadzoned wrench it closed 3 N late: with force_gate.max_force_n 10 the
-    // closed-loop model settled a contact at 13 N (2026-09-04). The LAW still consumes
-    // the deadzoned, filtered vector - the deadzone is what keeps noise out of the
-    // integrator - so the direction comes from f_stand and only the fade's magnitude
-    // is physical.
+    // ---- the PHYSICAL magnitude THE CROSSING IS ABOUT ----------------------
+    // Compensated, BEFORE the deadzone, low-passed at the wrench filter's corner:
+    // judged on the deadzoned wrench the gate arrives 3 N late (2026-09-04). The LAW
+    // still consumes the deadzoned vector on its compliance axes - the deadzone is what
+    // keeps noise out of a bare integrator.
+    //
+    // AND IT IS THE PRESS-AXIS COMPONENT, NOT |F| (2026-09-11, second revision). The
+    // curve's crossing is an algebraic identity between the gate's speed at the declared
+    // force and the LAW's yield at that force - and the law only yields past
+    // rest_force_n on ONE axis. Judged on |F|, an off-axis contact closes the gate for a
+    // force nothing yields against: the crossing is gone and the only equilibrium left
+    // is "gate shut, law at rest", i.e. the contact sits at rest_force_n with ZERO
+    // advance authority. Then the follower's reference freezes, the executor's plan runs
+    // on (lead 25-30 mm), the cursor backlog fills, the plan expires into a brake and
+    // the joint accel clamp finally trips accepted_deviation - the whole chain of the
+    // 14:12 run, where |F| stood at 26-35 N while the press component was 0.3-29 N
+    // (servo_log_20260911_141234, fault at 12.53 s). Modelled with a 20 N lateral
+    // component present: judged on |F| the contact converges at 10.0 N with the gate at
+    // 0.0000; judged on the component, 12.00 N at every stream speed.
+    // Without a declared press axis there is nothing to project onto and |F| is right -
+    // that is CM's isotropic case, where every axis yields.
     const Wrench6D& nodz = pipe.compSensorNoDeadzone();
-    const double f_phys_raw = std::sqrt(nodz.fx * nodz.fx + nodz.fy * nodz.fy + nodz.fz * nodz.fz);
+    const Wrench6D& nodz_stand_for_gate = pipe.compStandNoDeadzone();
+    const double f_phys_norm = std::sqrt(nodz.fx * nodz.fx + nodz.fy * nodz.fy + nodz.fz * nodz.fz);
+    double f_phys_raw = f_phys_norm;
+    if (press_axis_index_ >= 0) {
+        const math::Vector3 axis = overlay.workspaceFrame().col(press_axis_index_);
+        f_phys_raw = std::abs(axis.dot(math::Vector3(nodz_stand_for_gate.fx,
+                                                     nodz_stand_for_gate.fy,
+                                                     nodz_stand_for_gate.fz)));
+    }
     const double m_phys_raw = std::sqrt(nodz.tx * nodz.tx + nodz.ty * nodz.ty + nodz.tz * nodz.tz);
     double& f_phys_filt = left ? left_gate_force_filt_n_ : right_gate_force_filt_n_;
     double& m_phys_filt = left ? left_gate_torque_filt_nm_ : right_gate_torque_filt_nm_;
@@ -11160,30 +11182,22 @@ void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
     prepared_force_physical_[i]={nodz_stand.fx,nodz_stand.fy,nodz_stand.fz,
                                  nodz_stand.tx,nodz_stand.ty,nodz_stand.tz};
     prepared_force_wrench_[i]={f_stand.x(),f_stand.y(),f_stand.z(),m_stand.x(),m_stand.y(),m_stand.z()};
-    prepared_force_magnitude_[i]=f_phys_raw;
+    prepared_force_magnitude_[i]=f_phys_raw;      // the press-axis component the gate judged
+    prepared_force_norm_[i]=f_phys_norm;          // |F|, for the pair to stay auditable
     declared_contact_normal_[i]=declaredContactNormal(arm);
 }
 
 math::Vector3 DualArmServoLoop::declaredContactNormal(ArmId arm) const {
-    // THE AXIS IS DECLARED, ONLY ITS SIGN IS MEASURED (2026-09-11). The press axis is
-    // the law's single mode:force translation row, and the frame is the TOOL's, re-aimed
-    // every tick by the overlay - so the axis follows the tool around a curve without
-    // ever being inferred from the wrench. The sign comes from the measured component
-    // because only the sensor knows which side the surface is on; a sign can flip but it
-    // cannot rotate, and flipping needs the component to cross zero, which is exactly
-    // what "no contact on this axis" means. Inside rest_force_n the normal is ZERO:
-    // there is no advance to attenuate (the law is not yielding there either), which is
-    // what keeps free space free.
-    if (press_axis_index_ < 0) return math::Vector3::Zero();
+    // The axis, the frame and the sign rule all live in control::declaredContactNormal;
+    // this only supplies the tool frame the overlay re-aimed this tick and the physical
+    // (pre-deadzone) wrench. The sign band is a NOISE floor, not a force level - putting
+    // it at rest_force_n switched the whole advance authority on and off at 52 Hz.
     const bool left = arm == ArmId::Left;
     const control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
     const Vec6& phys = prepared_force_physical_[left ? 0 : 1];
-    const math::Vector3 axis = overlay.workspaceFrame().col(press_axis_index_);
-    const double component = axis.dot(math::Vector3(phys.x, phys.y, phys.z));
-    if (!std::isfinite(component) ||
-        std::abs(component) <= config_.force_control.gate_rest_force_n)
-        return math::Vector3::Zero();
-    return component > 0.0 ? axis : math::Vector3(-axis);
+    return control::declaredContactNormal(overlay.workspaceFrame(), press_axis_index_,
+                                          math::Vector3(phys.x, phys.y, phys.z),
+                                          kContactNormalSignDeadbandN);
 }
 
 bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target) {
@@ -11284,6 +11298,7 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     tel.gate_stream_speed_m_s = gate.streamSpeedMs();
     tel.gate_rest_force_n = config_.force_control.gate_rest_force_n;
     tel.gate_peak_force_n = config_.force_control.gate_peak_force_n;
+    tel.gate_wrench_norm_n = prepared_force_norm_[i];
     tel.gate_torque_nm = gate.torqueNm();
     tel.gate_closed = gate.closed();
 

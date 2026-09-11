@@ -941,6 +941,10 @@ struct ForceControlTelemetry {
     double gate_stream_speed_m_s = 0.0;
     double gate_rest_force_n = 0.0;
     double gate_peak_force_n = 0.0;
+    // |F| beside the press-axis component the gate judged (gate_force_n). They diverge
+    // exactly when a contact is off the declared axis, which is the one case the
+    // crossing cannot answer for.
+    double gate_wrench_norm_n = 0.0;
     // CSV-only: exact gate snapshot consumed by pose-track SMD, BEFORE this
     // tick's force update. The legacy fields above describe the updated gate.
     bool smd_gate_sample_valid = false;

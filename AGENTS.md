@@ -196,7 +196,31 @@ Two invariants the hardware taught, both enforced by the loader:
   and the complete hold-back with it: an axis cannot rotate, and the leak a proportional
   fade used to be blamed for IS the equilibrium now. What this does NOT fix is the impact
   peak (`v·sqrt(k_env·m)`, 39.5 N at a 115 mm/s approach): 10 N is the steady state, not
-  the transient. ONE-SIDED FORCE AXES ARE FOLDABLE, and they must be: the first hardware
+  the transient. THE GATE IS JUDGED ON THE PRESS-AXIS COMPONENT, NOT |F|. The crossing is an identity
+  between the gate's speed at the declared force and the LAW's yield there, and the law
+  only yields past `rest_force_n` on ONE axis: judged on |F| an off-axis contact shuts
+  the gate for a force nothing yields, and the only equilibrium left is "gate shut, law
+  at rest" — the contact sits at `rest_force_n` with ZERO advance authority, the
+  follower's reference freezes and the executor runs away. Measured
+  (`servo_log_20260911_141234`, fault at 12.53 s): |F| 26-35 N against a press component
+  of 0.3-29 N, lead 25-30 mm, backlog to 86 ms, `braking_expired`, then
+  `accepted_deviation`. Modelled with a 20 N lateral load: judged on |F| the contact
+  converges at 10.0 N with the gate at 0.0000; judged on the component, 12.00 N at every
+  stream speed. `ForceGate::applyTranslation/applyRotation` are gone with the same
+  argument — they projected onto the MEASURED wrench, whose tilt under a lateral load
+  left 36 % of the into-contact advance uncut and moved the crossing to 27.4 N; the live
+  path cuts along the declared normal only.
+  THE DIRECTION MAY NEVER SWITCH AT AN OPERATING FORCE. Withdrawing the declared normal
+  below `rest_force_n` put a hard switch exactly where the design operates: with the
+  normal present the ratio removes 99 % of the advance, with it absent the follower
+  removes NOTHING whatever the ratio says, so a contact sitting at the rest force
+  alternated between 1 % and 100 % authority at the wrench's ripple rate — 52 Hz on both
+  arms for 5.3 s (`servo_log_20260911_134703` 520-525 s: 276/273 transitions, normal
+  present 37 % of ticks, |F| 4-50 N, q_sent 3,216 deg/s², then `accepted_deviation`).
+  Both arms shook because both sat at the threshold, not because they are coupled. The
+  sign band belongs at ZERO (0.5 N of noise floor): the gate is already exactly 1.0 in
+  free space, so a normal with g = 1 removes nothing and never needed withdrawing.
+  ONE-SIDED FORCE AXES ARE FOLDABLE, and they must be: the first hardware
   run declined the fold on the declared press row (`pureDamperTriad` excluded FORCE mode,
   an argument written for the two-sided setpoint's free-space walk), so a hand push
   accumulated its whole yield in the overlay and pinned the 40 mm fence — the arm went

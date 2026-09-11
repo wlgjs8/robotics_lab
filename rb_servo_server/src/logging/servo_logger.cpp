@@ -461,6 +461,7 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_gate_stream_speed_m_s"
        << ',' << side << "_fc_gate_rest_force_n"
        << ',' << side << "_fc_gate_peak_force_n"
+       << ',' << side << "_fc_gate_wrench_norm_n"
        << ',' << side << "_smd_gate_sample_valid"
        << ',' << side << "_smd_gate_armed"
        << ',' << side << "_smd_gate_releasing"
@@ -962,6 +963,7 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.gate_stream_speed_m_s
        << ',' << fc.gate_rest_force_n
        << ',' << fc.gate_peak_force_n
+       << ',' << fc.gate_wrench_norm_n
        << ',' << fc.smd_gate_sample_valid
        << ',' << fc.smd_gate_armed
        << ',' << fc.smd_gate_releasing
