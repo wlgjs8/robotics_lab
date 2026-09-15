@@ -45,7 +45,33 @@ LivePreviewExecution::LivePreviewExecution(const RuckigFollowerConfig& c,
   telemetry_.enabled=true;telemetry_.epoch=epoch_;telemetry_.status="inactive";
 }
 
+namespace {
+// <= 0.05 per tick: the full 1.0 <-> 0.25 swing takes 30 ms, which at 300 mm/s is
+// 7.5 m/s^2 of pseudo-acceleration - under the tracker's own 12 m/s^2 limit.
+constexpr double kPlanClockGateMaxStepPerTick=0.05;
+}  // namespace
+
+void LivePreviewExecution::setPlanClockGate(double gate) {
+  plan_clock_gate_target_=std::isfinite(gate)?std::clamp(gate,0.0,1.0):1.0;
+  plan_clock_gate_+=std::clamp(plan_clock_gate_target_-plan_clock_gate_,
+                               -kPlanClockGateMaxStepPerTick,kPlanClockGateMaxStepPerTick);
+}
+
+double LivePreviewExecution::predictedPlanTime(double ahead_sec) const {
+  // The servo loop sets the gate (one slew step toward its target) BEFORE each step
+  // advances plan time by dt*gate; replay exactly that for the ticks until the splice.
+  double g=plan_clock_gate_,t=plan_time_;
+  const double dt=servo_period_sec_>0?servo_period_sec_:0.002;
+  const int ticks=static_cast<int>(std::lround(ahead_sec/dt));
+  for(int k=0;k<ticks;++k) {
+    g+=std::clamp(plan_clock_gate_target_-g,-kPlanClockGateMaxStepPerTick,kPlanClockGateMaxStepPerTick);
+    t+=dt*g;
+  }
+  return t;
+}
+
 void LivePreviewExecution::reset(const char* reason) {
+  plan_time_=0.0;plan_clock_gate_=1.0;plan_clock_gate_target_=1.0;
   if(initialized_ || staged_valid_ || hasPlan() || faulted_) {++epoch_;++gate_revision_;}
   cancelStaged(Reset,last_time_);
   initialized_=false;faulted_=false;accepted_epoch_=false;
@@ -324,6 +350,11 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
   }
   const double step_dt=last_time_>0&&now>last_time_?now-last_time_:0.0;
   last_time_=now;
+  // THE ACTIVE PLAN ADVANCES ON THE DILATED CLOCK (2026-09-15 night): plan time moves at
+  // plan_clock_gate_ x wall time. Everything else (admission, expiry, request
+  // scheduling, brakes) stays in wall time.
+  if(active_.accepted())plan_time_+=step_dt*plan_clock_gate_;
+  telemetry_.plan_clock_gate=plan_clock_gate_;
   // Continuously changing force magnitude/direction and plan-rate forecasts
   // do not change the coordinate/lifecycle identity. They are re-read in every
   // request AND checked against the current sample below. Authority folds and
@@ -368,7 +399,16 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
       ++telemetry_.staged_gauge_transported;
     else {++telemetry_.gauge_transport_failed;cancelStaged(Other,now);}
   }
-  if(staged_valid_ && now>=staged_.splice_at_sec) {
+  // THE DILATED SPLICE WAITS FOR THE PREDECESSOR (2026-09-15 night). The worker sampled
+  // the predecessor at the plan time predicted for the splice instant; if the clock
+  // gate fell faster than predicted, the predecessor has not reached that point yet,
+  // and admitting now would step the command FORWARD by the deficit. Hold the
+  // predecessor a tick or two until it arrives, unless it is about to expire.
+  const bool dilated_wait=staged_valid_ && now>=staged_.splice_at_sec && active_.accepted() &&
+      !brake_trajectory_.valid && std::isfinite(staged_.spliced_predecessor_time_sec) &&
+      plan_time_+1e-9<staged_.spliced_predecessor_time_sec &&
+      now+servo_period_sec_<active_.valid_until_sec && now<staged_.valid_until_sec;
+  if(staged_valid_ && now>=staged_.splice_at_sec && !dilated_wait) {
     PreviewMotionSample candidate;
     // Recheck current authority before retiring the predecessor. In particular,
     // an obsolete contact forecast must not replace a finite brake and then
@@ -397,6 +437,15 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
       }
     }
     else {
+      // THE NEW PLAN'S CLOCK STARTS WHERE THE WORKER SPLICED IT (2026-09-15 night): at the
+      // predecessor's PLAN time it was asked to sample, which on this dilated clock is
+      // where the predecessor stands now up to the gate's drift over one replan period
+      // (<= 0.5 ms at 0.05/tick, i.e. <= 0.15 mm at 300 mm/s). A brake or cold splice
+      // is in wall time: the new plan starts at the wall lag since its splice instant,
+      // scaled by the gate.
+      const double spliced=staged_.spliced_predecessor_time_sec;
+      if(active_.accepted() && std::isfinite(spliced)) plan_time_=std::max(0.0,plan_time_-spliced);
+      else plan_time_=std::max(0.0,(now-staged_.splice_at_sec)*plan_clock_gate_);
       active_=staged_;staged_valid_=false;++telemetry_.accepted;
       planning_starved_since_sec_=0;
       telemetry_.last_admission_gap_sec=telemetry_.last_admission_time_sec>0?now-telemetry_.last_admission_time_sec:0;
@@ -411,7 +460,7 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
   }
   if(active_.accepted()) {
     if(now>=active_.valid_until_sec ||
-       !active_.trajectory.sample(now-active_.splice_at_sec,sample_)) {
+       !active_.trajectory.sample(plan_time_,sample_)) {
       ++telemetry_.expired;
       if(planning_starved_since_sec_==0)planning_starved_since_sec_=now;
       if(!beginBrake("braking_expired")){out.fault=true;out.reason=telemetry_.status;return out;}
@@ -443,6 +492,9 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     out.pose=sample_.pose;out.active=true;
     telemetry_.active=false;telemetry_.status=brake_reason_;
     telemetry_.plan_age_sec=now-brake_origin_sec_;
+    // The lead is measured through a brake too (2026-09-15 night): the leash used to go
+    // blind exactly while the source was frozen by executor_waits.
+    telemetry_.plan_lead_m=(xyz(sample_.pose)-xyz(raw_sample.pose)).norm();
     // The terminal hold must actually pass dispatch before the fault policy
     // suppresses further sends. Reaching its timestamp in the planner alone
     // would abandon the final stop sample one tick early.
@@ -548,6 +600,11 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     request_.brake_predecessor=brake_trajectory_;
     request_.angular_predecessor=angular_continuation_;
     request_.predecessor_origin_sec=brake_trajectory_.valid?brake_origin_sec_:active_.splice_at_sec;
+    // The predecessor's PLAN time at the splice instant, on this executor's dilated
+    // clock (2026-09-15 night). NaN for a brake predecessor, which is sampled in wall time.
+    request_.predecessor_sample_time_sec=(!brake_trajectory_.valid && active_.accepted())
+        ? predictedPlanTime(config_.preview_execution.splice_lead_sec)
+        : std::numeric_limits<double>::quiet_NaN();
     // NOTHING IS HELD BACK, so there is no dispatched-state offset to predict: the
     // worker splices from the predecessor's own sample at splice_at_sec (2026-09-11,
     // with the contact clamp's deletion).

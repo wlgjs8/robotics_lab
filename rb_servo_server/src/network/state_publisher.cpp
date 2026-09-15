@@ -1746,7 +1746,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             {"solve_time_sec",p.solve_time_sec},{"submitted",p.submitted},
             {"accepted",p.accepted},{"rejected",p.rejected},{"expired",p.expired},
             {"contact_guard_count",p.contact_guard_count},
-            {"plan_lead_m",p.plan_lead_m}};
+            {"plan_lead_m",p.plan_lead_m},{"plan_clock_gate",p.plan_clock_gate}};
         // This fixed wire summary retains execution/freshness authority and
         // current diagnostic reasons. Full result identities, reason arrays,
         // fold transforms and certificate details remain in the servo CSV.

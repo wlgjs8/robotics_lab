@@ -104,6 +104,44 @@ bool sameMotion(const PreviewMotionState& a,const PreviewMotionState& b) {
       (a.angular_acceleration_body-b.angular_acceleration_body).norm()<1e-8;
 }
 
+// THE PLAN CLOCK GATE DILATES THE COMMAND AND KEEPS SPLICES C2 (2026-09-15 night).
+// With the gate at g the active plan is sampled g x wall time, so each tick's sample
+// is the predecessor polynomial advanced by g*dt - across a splice too, because the
+// worker samples the predecessor at the plan time the executor predicted. The gate is
+// slewed (<= 0.05/tick), so the command velocity, which scales with it, never steps.
+bool planClockGateDilatesTheCommandAndKeepsSplicesC2() {
+  setExternalSteadyNs(kStartNs);Fixture f;
+  CHECK(!f.step(false).fault);CHECK(!f.step().fault);letWorkerRun();CHECK(f.engage());
+  CHECK(std::abs(f.exec.planClockGate()-1.0)<1e-12);
+  int splices=0,ticks=0;double min_gate=1.0;
+  for(int i=0;i<60;++i) {
+    f.exec.setPlanClockGate(0.5);
+    const double g=f.exec.planClockGate();
+    CHECK(g<=1.0+1e-12 && g>=0.5-1e-12);
+    min_gate=std::min(min_gate,g);
+    const auto before=f.exec.sample();const auto previous_id=f.exec.telemetry().plan_id;
+    letWorkerRun();auto out=f.step();CHECK(!out.fault);CHECK(out.active);
+    CHECK(std::abs(f.exec.telemetry().plan_clock_gate-g)<1e-12);
+    const auto after=f.exec.sample();
+    const double h=kDt*g;
+    const Eigen::Vector3d expected_p=Eigen::Vector3d(before.pose.x,before.pose.y,before.pose.z)+
+        h*before.linear_velocity+.5*h*h*before.linear_acceleration+(h*h*h/6)*before.linear_jerk;
+    const Eigen::Vector3d expected_v=before.linear_velocity+h*before.linear_acceleration+
+        .5*h*h*before.linear_jerk;
+    // A dilated step may straddle a 10 ms jerk-grid interval of the polynomial, so the
+    // jerk term is only approximate: 2000 m/s^3 * (1 ms)^3 / 6 is 0.3 um.
+    CHECK((Eigen::Vector3d(after.pose.x,after.pose.y,after.pose.z)-expected_p).norm()<2e-6);
+    CHECK((after.linear_velocity-expected_v).norm()<2e-3);
+    if(f.exec.telemetry().plan_id!=previous_id)++splices;
+    ++ticks;CHECK(f.accept(out));
+  }
+  CHECK(splices>=2);CHECK(std::abs(min_gate-0.5)<1e-12);
+  // The slew reached 0.5 in 10 calls and stayed; a gate request above 1 or non-finite is 1.
+  f.exec.setPlanClockGate(std::numeric_limits<double>::quiet_NaN());
+  CHECK(f.exec.planClockGate()<=0.55+1e-12);
+  return true;
+}
+
 bool coldAndC2Splice() {
   setExternalSteadyNs(kStartNs);Fixture f;
   auto first=f.step(false);CHECK(!first.active&&!first.fault);CHECK(!f.exec.initialized());
@@ -975,6 +1013,7 @@ int main() {
       recoveryOutputRejectsNanosecondOverflowBoundary()&&recoverySeedSurvivesWaitingForStationaryDispatch()&&
       explicitResetCancelsPendingRecoverySeed()&&pendingRecoverySeedSharesGeometricFold()&&
       recordedAngularExpiryStateHasFiniteBrake()&&stationarySeedRefusalNamesThePredicate()&&
+      planClockGateDilatesTheCommandAndKeepsSplicesC2()&&
       sentJointStationarityUsesTolerance()&&unreplacedClosingPlanExpiresIntoABrake()&&
       executorDoesNotClampTheLead();
   setExternalSteadyNs(0);

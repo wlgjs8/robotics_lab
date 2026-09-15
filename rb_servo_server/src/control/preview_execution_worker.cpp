@@ -363,19 +363,30 @@ struct PreviewExecutionWorker::Impl {
       PreviewMotionSample initial;
       const double predecessor_duration=r.has_brake_predecessor?r.brake_predecessor.durationSec():r.predecessor.durationSec();
       const bool predecessor_valid=r.has_brake_predecessor?r.brake_predecessor.valid:r.predecessor.valid;
+      // THE PREDECESSOR IS SAMPLED ON THE EXECUTOR'S CLOCK (2026-09-15 night): the
+      // plan-lead leash dilates how fast the active plan is sampled, so the plan time
+      // it will have reached at the splice instant is what the executor predicts in
+      // `predecessor_sample_time_sec`, not the wall lag since its origin. A brake is
+      // sampled in wall time (it is not dilated). NaN = the wall formula.
+      const bool dilated = !r.has_brake_predecessor && std::isfinite(r.predecessor_sample_time_sec);
       if (!std::isfinite(r.predecessor_origin_sec) || !predecessor_valid ||
           r.identity.parent_plan_id == 0 || r.splice_at_sec < r.predecessor_origin_sec ||
-          (!r.has_brake_predecessor && r.splice_at_sec > r.predecessor_origin_sec + predecessor_duration))
+          (!r.has_brake_predecessor && !dilated &&
+           r.splice_at_sec > r.predecessor_origin_sec + predecessor_duration) ||
+          (dilated && (r.predecessor_sample_time_sec < 0.0 ||
+                       r.predecessor_sample_time_sec > predecessor_duration + 1e-9)))
         return finish(PreviewExecutionWorkerStatus::SpliceUnavailable);
       // Absolute endpoint comparison above permits only cancellation roundoff,
       // not a late or expired predecessor, to be clamped at its own endpoint.
       const double t = r.has_brake_predecessor?r.splice_at_sec-r.predecessor_origin_sec:
+          dilated?std::clamp(r.predecessor_sample_time_sec,0.0,predecessor_duration):
           std::clamp(r.splice_at_sec-r.predecessor_origin_sec,0.0,predecessor_duration);
       if (!(r.has_brake_predecessor?r.brake_predecessor.sample(t, initial):r.predecessor.sample(t, initial)))
         return finish(PreviewExecutionWorkerStatus::SpliceUnavailable);
       if(r.has_brake_predecessor && !r.angular_predecessor.sample(r.splice_at_sec,initial))
         return finish(PreviewExecutionWorkerStatus::SpliceUnavailable);
       out.initial = initial;
+      if(!r.has_brake_predecessor) out.spliced_predecessor_time_sec = t;
     }
 
     FollowerPreviewReferenceRequest preview_request;

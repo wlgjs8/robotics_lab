@@ -68,6 +68,15 @@ class LivePreviewExecution {
   bool requestRecovery(PreviewRecoveryCause cause);
   bool seedStationaryRecovery(double now_sec, const Pose6D& nominal,
                               bool stationary, PreviewRecoveryCause cause);
+  // THE PLAN-LEAD LEASH ACTS ON THIS CLOCK (2026-09-15 night). `gate` in [0, 1] scales
+  // how fast the ACTIVE plan is sampled (1 = wall time); the follower keeps its own
+  // clock, so its reference catches the command up and the lead closes - the opposite
+  // sign of leashing the follower, which froze the pose the lead is measured from and
+  // grew it. Slewed inside (<= 0.05 per call) because the command velocity scales with
+  // the gate and must never step. Splices stay exact: the worker samples the
+  // predecessor at the plan time this clock predicts for the splice instant.
+  void setPlanClockGate(double gate);
+  double planClockGate() const { return plan_clock_gate_; }
   // Which seed precondition refuses (nullptr = the seed would be accepted). The
   // coordinator puts this in the fault reason so a refused restart names its cause
   // instead of the bare "cannot certify a stop".
@@ -136,6 +145,11 @@ class LivePreviewExecution {
   double servo_period_sec_{0};
   double planning_starved_since_sec_{0};
   double brake_origin_sec_{0}, accepted_sample_time_sec_{0};
+  // The active plan's sampled PLAN time and the rate it advances at (see setPlanClockGate).
+  double plan_clock_gate_{1.0}, plan_clock_gate_target_{1.0}, plan_time_{0.0};
+  // Plan time the active plan will have reached `ahead_sec` of wall time from now,
+  // with the gate slewing toward its target exactly as setPlanClockGate will do.
+  double predictedPlanTime(double ahead_sec) const;
   std::uint64_t brake_plan_id_{0}, accepted_plan_id_{0};
   Eigen::Vector3d fold_translation_{Eigen::Vector3d::Zero()};
   Eigen::Quaterniond fold_rotation_{Eigen::Quaterniond::Identity()};

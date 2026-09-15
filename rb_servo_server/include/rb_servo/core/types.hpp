@@ -446,6 +446,12 @@ struct PreviewExecutionTelemetry {
     // plan is being dispatched). NOT a bound: the executor never clamps it. The servo
     // loop leashes the PLAN CLOCK with it; see live_preview_execution.cpp.
     double plan_lead_m = 0.0;
+    // THE EXECUTOR'S OWN CLOCK GATE (2026-09-15 night): the rate at which the active
+    // plan is being sampled, 1 = wall time. The plan-lead leash acts HERE now, not on
+    // the follower's knot clock: slowing the source froze the very pose the lead is
+    // measured from while the command ran on, and the lead grew (0.6 -> 47.7 mm in
+    // 0.25 s with the reference standing still, servo_log_20260915_161234).
+    double plan_clock_gate = 1.0;
 
     // Latest observed result and cumulative counts survive lifecycle resets.
     // All status/reason pointers must be static literals. Result timing is in

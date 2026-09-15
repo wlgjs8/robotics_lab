@@ -322,6 +322,31 @@ the sensor, so the floor's reaction cancels it there (measured 9.5-13 N net whil
 pressed to the floor). Push the arm above the sensor to see the floor. The executor
 lead runaway and the geometry-wall bounce are not force control and stay open.
 
+**2026-09-15 (night) — THE PLAN-LEAD LEASH MOVED ONTO THE EXECUTOR'S CLOCK.** The
+preview executor's target is never the follower's current pose: each replan clones the
+live follower and rolls it 250 ms forward (`follower_preview_reference.hpp`), and the
+`reference_trust` continuation is anchored on that rollout at +130 ms, so with a chunk
+whose travel sits in its later rows the command legitimately runs ahead of the source.
+The 2026-09-10 leash bounded that lead by slowing the FOLLOWER's knot clock — which is
+the pose the lead is measured FROM, while the command clock stayed wall time: the
+lead grew by exactly the plan time the gate removed (0.6 → 47.7 mm in 0.25 s with the
+reference standing still, `servo_log_20260915_161234`), and `executor_waits` froze the
+source to 0.0 outright during a brake while the lead measurement went blind. Now
+`planLeashGate(plan_lead_m)` drives `LivePreviewExecution::setPlanClockGate` and the
+follower's `setPlanRateGate` carries only the geometry gate: the active plan is sampled
+at `gate × wall time` (`plan_time_`), the source keeps its clock, so the reference
+catches the command up and the lead closes. The gate is slewed ≤ 0.05/tick (a 1.0 ↔
+0.25 swing in 30 ms = 7.5 m/s² pseudo-acceleration, under the tracker's 12), the worker
+splices the predecessor at the plan time the executor predicts for the splice instant
+through that same slew (`PreviewExecutionRequest::predecessor_sample_time_sec`,
+echoed as `spliced_predecessor_time_sec`), admission waits a tick or two if the
+predecessor has not reached that point (never a forward step), and the lead is measured
+through brakes too. Published as `*_preview_execution_plan_clock_gate`. Regression:
+`planClockGateDilatesTheCommandAndKeepsSplicesC2` (test_live_preview_execution).
+Still open, next: re-anchor the rollout/trust continuation on the follower's CURRENT
+pose (`preview_execution_worker.cpp` knot fill, `preview_trajectory_tracker.cpp`
+trust anchor). Unverified on hardware at the time of writing.
+
 ### The zero (tare)
 
 Force control REFUSES to cover an arm with no bias (`forceControlCovered`), so the

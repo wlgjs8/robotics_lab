@@ -6461,8 +6461,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // stepped. The position clamp that did step it was removed the same evening
     // (live_preview_execution.cpp). The ramp starts above the tracker's designed
     // anticipation, so ordinary motion never touches it.
+    double lead_gate = 1.0;
     if (rf.plan_leash_enable && rf.preview_execution.enable) {
-        if (const auto* executor = preview_executor_[arm_id == ArmId::Left ? 0 : 1]) {
+        if (auto* executor = preview_executor_[arm_id == ArmId::Left ? 0 : 1]) {
             control::PlanLeashParams leash;
             leash.start_m = rf.preview_execution.plan_lead_leash_start_m;
             leash.full_m = rf.preview_execution.plan_lead_leash_full_m;
@@ -6470,12 +6471,19 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             // which planLeashGate evaluates to 1.0 for the 0 passed here: the plan's
             // rotation rides the same clock, so slowing on the position lead slows it.
             leash.min_gate = rf.preview_execution.plan_lead_leash_min_gate;
-            leash_gate = std::min(leash_gate,
-                control::planLeashGate(executor->telemetry().plan_lead_m, 0.0, leash));
+            // THE LEASH ACTS ON THE EXECUTOR'S CLOCK, NOT THE FOLLOWER'S (2026-09-15 night).
+            // Slowing the follower's knot clock slowed the pose the lead is MEASURED from
+            // while the command clock (wall time) ran on: the lead grew by exactly the
+            // plan time the gate removed, a positive feedback - measured 0.6 -> 47.7 mm in
+            // 0.25 s with the reference standing still (servo_log_20260915_161234). The
+            // executor now samples its active plan at this rate; the follower keeps its
+            // clock, so the reference catches the command up and the lead closes.
+            lead_gate = control::planLeashGate(executor->telemetry().plan_lead_m, 0.0, leash);
+            executor->setPlanClockGate(lead_gate);
         }
     }
 #endif
-    abc.follower_leash_gate = leash_gate;
+    abc.follower_leash_gate = std::min(leash_gate, lead_gate);
     // THE PLAN CLOCK WAITS FOR THE EXECUTOR (2026-09-10 pm, operator decision).
     // While the preview executor is braking (an expired plan, a contact stop) or
     // recovering, the chunk follower's plan clock stops too: otherwise the reference
