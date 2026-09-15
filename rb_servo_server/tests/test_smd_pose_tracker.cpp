@@ -836,7 +836,37 @@ bool testCurrentTwistStandRoundTripsThroughTheBodyFrame() {
     return true;
 }
 
+bool testContactLimitsAccelerationAndRetiresLongHoldDemand() {
+    auto cfg=defaultConfig();cfg.natural_frequency_linear_hz=4.;
+    cfg.velocity_feedforward=true;cfg.max_linear_velocity_m_s=.2;cfg.max_linear_accel_m_s2=.5;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({},rb_servo::Vec6{-.03,.02,0.,0.,0.,0.});
+    rb_servo::Pose6D cmd{};tracker.updateGoalFromCommand(cmd);
+    double last_x=-.03,last_y=.02,max_lead=0.,retired=0.;
+    for(int k=0;k<5000;++k) {
+        cmd.x-=.02*kDt;cmd.y+=.01*kDt;tracker.updateGoalFromCommand(cmd);
+        const auto p=tracker.step(kDt,0.,Eigen::Vector3d::UnitX());
+        const auto v=tracker.currentTwistStand();
+        RB_CHECK(std::hypot(v.x-last_x,v.y-last_y)<=cfg.max_linear_accel_m_s2*kDt+1e-12);
+        if(k>500) {
+            RB_CHECK(std::abs(v.x)<1e-10);
+            max_lead=std::max(max_lead,std::abs(tracker.goalPose().x-p.x));
+        }
+        last_x=v.x;last_y=v.y;retired+=tracker.lastStepInfo().force_removed_m;
+    }
+    RB_CHECK(retired>.19);RB_CHECK(max_lead<.0001);
+    RB_CHECK(tracker.currentPose().y>.09); // tangential task survives contact
+    const auto held=tracker.currentPose();
+    for(int k=0;k<1000;++k) {tracker.updateGoalFromCommand(cmd);tracker.step(kDt);}
+    RB_CHECK(std::abs(tracker.currentPose().x-held.x)<.0001); // no stored catch-up
+    // The first actual retreat command is allowed while contact stays closed.
+    for(int k=0;k<500;++k) {cmd.x+=.02*kDt;tracker.updateGoalFromCommand(cmd);tracker.step(kDt,0.,Eigen::Vector3d::UnitX());}
+    RB_CHECK(tracker.currentPose().x-held.x>.015);
+    return true;
+}
+
 int main() {
+    if (!testContactLimitsAccelerationAndRetiresLongHoldDemand()) return 1;
     if (!testReconfigureKeepsStateAndClampsVelocity()) return 1;
     if (!testShiftMovesStateGoalAndReferenceTogether()) return 1;
     if (!testCurrentTwistStandRoundTripsThroughTheBodyFrame()) return 1;

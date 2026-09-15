@@ -442,16 +442,17 @@ struct PreviewExecutionTelemetry {
     // the violent command accelerations in the day's policy runs. Contact is carried by
     // the QP's per-knot closing-velocity constraint alone; `solve_contact_constrained`
     // says when that bound was active.
-    // How far the dispatched pose leads the source's own output this tick (0 when no
-    // plan is being dispatched). NOT a bound: the executor never clamps it. The servo
-    // loop leashes the PLAN CLOCK with it; see live_preview_execution.cpp.
+    // Command lead over the raw source; leashes future QP reference progression.
     double plan_lead_m = 0.0;
-    // THE EXECUTOR'S OWN CLOCK GATE (2026-09-15 night): the rate at which the active
-    // plan is being sampled, 1 = wall time. The plan-lead leash acts HERE now, not on
-    // the follower's knot clock: slowing the source froze the very pose the lead is
-    // measured from while the command ran on, and the lead grew (0.6 -> 47.7 mm in
-    // 0.25 s with the reference standing still, servo_log_20260915_161234).
+    // Compatibility field: accepted execution now always uses wall seconds.
     double plan_clock_gate = 1.0;
+    double reference_rate_gate{1.0};
+    double nominal_closing_m_s{0.0}, allowed_closing_m_s{0.0}, retired_source_advance_m{0.0};
+    double executed_closing_m_s{0.0};
+    bool contact_bound_active{false};
+    std::array<double,3> contact_bound_normal_stand{};
+    double nominal_solve_time_sec{0.0}, trusted_prefix_sec{0.0};
+    uint64_t source_stop_count{0}, source_stop_completed{0};
 
     // Latest observed result and cumulative counts survive lifecycle resets.
     // All status/reason pointers must be static literals. Result timing is in
@@ -860,6 +861,10 @@ struct FtTelemetry {
     std::string tare_state;            // "none" | "settling" | "accepted" | "rejected"
     std::string tare_reason;
     int tare_samples = 0;
+    int tare_committed_samples = 0;
+    bool tare_noise_valid = false;
+    std::array<double,3> tare_force_std_n{};
+    double tare_force_noise_rms_n = 0.0;
     // Automatic-tare-on-InitMotion stage (force_torque.auto_tare_after_init_motion).
     //   "off"           - not configured for this arm
     //   "idle"          - configured, nothing pending
@@ -958,6 +963,9 @@ struct ForceControlTelemetry {
     double gate_b_eff = 0.0;
     double gate_m_eff = 0.0;
     double gate_cross_speed_m_s = 0.0;
+    double target_force_n = 0.0;
+    double contact_confidence = 0.0;
+    double physical_gate = 1.0;
     double gate_rest_force_n = 0.0;
     double gate_peak_force_n = 0.0;
     // The wrench that drove the law, STAND frame @TCP — the same numbers as

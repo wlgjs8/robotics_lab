@@ -215,6 +215,11 @@ int main() {
         sample.right_force_control.source_demand_m_s = .04;
         sample.right_force_control.contact_normal_stand = {.6, 0, -.8};
         sample.right_force_control.fold_sink = "chunk_follower";
+        sample.right_force_control.target_force_n=20.;
+        sample.right_force_control.contact_confidence=.35;
+        sample.right_force_control.physical_gate=.65;
+        sample.right_ft.tare_committed_samples=250;sample.right_ft.tare_noise_valid=true;
+        sample.right_ft.tare_force_std_n={.1,.2,.3};sample.right_ft.tare_force_noise_rms_n=std::sqrt(.14);
         // Retained reference displacement must remain visible when coverage is
         // off; it is distinct from the current tick's applied deviation.
         sample.left_force_control.covered = false;
@@ -243,6 +248,10 @@ int main() {
         p.solve_time_sec = .0004; p.submitted = 23; p.accepted = 19;
         p.rejected = 3; p.expired = 2; p.contact_guard_count = 5;
         p.plan_lead_m = .0035;
+        p.reference_rate_gate=.7;p.source_stop_count=4;p.source_stop_completed=3;
+        p.nominal_closing_m_s=.12;p.allowed_closing_m_s=.07;p.executed_closing_m_s=.06;
+        p.contact_bound_active=true;p.contact_bound_normal_stand={.6,0.,.8};
+        p.retired_source_advance_m=.00012;p.nominal_solve_time_sec=.0004;p.trusted_prefix_sec=.025;
         populateDetailedPreviewFixture(p);
         // Push REPEATEDLY, not once. ServoLogger::push() takes the ring mutex with
         // try_to_lock and DROPS the sample if the writer thread holds it -- deliberate,
@@ -410,6 +419,20 @@ int main() {
         }
         return true;
     };
+    if (!checkDetailedColumn("source_stop_count", "4")) return 1;
+    if (!checkDetailedColumn("source_stop_completed", "3")) return 1;
+    if (!checkDetailedColumn("contact_bound_active", "1")) return 1;
+    for(const auto& [name,value]:std::vector<std::pair<std::string,double>>{
+        {"left_preview_execution_reference_rate_gate",.7},{"left_preview_execution_nominal_closing_m_s",.12},
+        {"left_preview_execution_allowed_closing_m_s",.07},{"left_preview_execution_executed_closing_m_s",.06},
+        {"left_preview_execution_contact_bound_nz",.8},{"left_preview_execution_retired_source_advance_m",.00012},
+        {"left_preview_execution_nominal_solve_time_sec",.0004},{"left_preview_execution_trusted_prefix_sec",.025},
+        {"right_fc_target_force_n",20.},{"right_fc_contact_confidence",.35},{"right_fc_physical_gate",.65},
+        {"right_ft_tare_committed_samples",250.},{"right_ft_tare_noise_valid",1.},
+        {"right_ft_tare_force_std_x_n",.1},{"right_ft_tare_force_std_z_n",.3},
+        {"right_ft_tare_force_noise_rms_n",std::sqrt(.14)}}) {
+        if(std::abs(std::stod(column(name))-value)>1e-6){std::cerr<<"wrong force/preview diagnostic "<<name<<'\n';return 1;}
+    }
     if (!checkDetailedColumn("gate_revision", "9007199254740993")) return 1;
     if (!checkDetailedColumn("gauge_revision", "9007199254740995")) return 1;
     if (!checkDetailedColumn("parent_plan_id", "9007199254740997")) return 1;

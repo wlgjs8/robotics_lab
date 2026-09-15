@@ -109,21 +109,21 @@ bool sameMotion(const PreviewMotionState& a,const PreviewMotionState& b) {
 // is the predecessor polynomial advanced by g*dt - across a splice too, because the
 // worker samples the predecessor at the plan time the executor predicted. The gate is
 // slewed (<= 0.05/tick), so the command velocity, which scales with it, never steps.
-bool planClockGateDilatesTheCommandAndKeepsSplicesC2() {
+bool referenceLeashPreservesPhysicalDerivativesAndSplices() {
   setExternalSteadyNs(kStartNs);Fixture f;
   CHECK(!f.step(false).fault);CHECK(!f.step().fault);letWorkerRun();CHECK(f.engage());
-  CHECK(std::abs(f.exec.planClockGate()-1.0)<1e-12);
+  CHECK(std::abs(f.exec.referenceRateGate()-1.0)<1e-12);
   int splices=0,ticks=0;double min_gate=1.0;
   for(int i=0;i<60;++i) {
-    f.exec.setPlanClockGate(0.5);
-    const double g=f.exec.planClockGate();
+    f.exec.setReferenceRateGate(0.5);
+    const double g=f.exec.referenceRateGate();
     CHECK(g<=1.0+1e-12 && g>=0.5-1e-12);
     min_gate=std::min(min_gate,g);
     const auto before=f.exec.sample();const auto previous_id=f.exec.telemetry().plan_id;
     letWorkerRun();auto out=f.step();CHECK(!out.fault);CHECK(out.active);
-    CHECK(std::abs(f.exec.telemetry().plan_clock_gate-g)<1e-12);
+    CHECK(std::abs(f.exec.telemetry().plan_clock_gate-1.0)<1e-12);
     const auto after=f.exec.sample();
-    const double h=kDt*g;
+    const double h=kDt;
     const Eigen::Vector3d expected_p=Eigen::Vector3d(before.pose.x,before.pose.y,before.pose.z)+
         h*before.linear_velocity+.5*h*h*before.linear_acceleration+(h*h*h/6)*before.linear_jerk;
     const Eigen::Vector3d expected_v=before.linear_velocity+h*before.linear_acceleration+
@@ -137,8 +137,43 @@ bool planClockGateDilatesTheCommandAndKeepsSplicesC2() {
   }
   CHECK(splices>=2);CHECK(std::abs(min_gate-0.5)<1e-12);
   // The slew reached 0.5 in 10 calls and stayed; a gate request above 1 or non-finite is 1.
-  f.exec.setPlanClockGate(std::numeric_limits<double>::quiet_NaN());
-  CHECK(f.exec.planClockGate()<=0.55+1e-12);
+  f.exec.setReferenceRateGate(std::numeric_limits<double>::quiet_NaN());
+  CHECK(f.exec.referenceRateGate()==0.0);
+  return true;
+}
+
+bool sourceStopUsesAcceptedPhysicalStateAndDispatchesTerminal() {
+  setExternalSteadyNs(kStartNs);Fixture f;
+  CHECK(!f.step().fault);letWorkerRun();CHECK(f.engage());
+  for(int k=0;k<20;++k) {letWorkerRun();auto out=f.step();CHECK(!out.fault);CHECK(f.accept(out));}
+  const auto seed=f.exec.acceptedSample();
+  CHECK(seed.linear_velocity.norm()>1e-5);
+  CHECK(f.exec.requestStop("test_source_timeout"));
+  const auto origin=f.exec.telemetry().last_brake_origin_sec;
+  const auto submitted=f.exec.telemetry().submitted;
+  f.raw.deactivate();
+  bool terminal_seen=false;
+  for(int k=0;k<300;++k) {
+    CHECK(f.exec.requestStop("test_source_timeout"));
+    CHECK(f.exec.telemetry().last_brake_origin_sec==origin);
+    setExternalSteadyNs(kStartNs+f.tick*kDtNs);
+    auto out=f.exec.stopOutput(f.now());++f.tick;
+    CHECK(out.active && !out.fault);
+    const auto& sample=f.exec.sample();const auto caps=config().preview_execution.tracker;
+    CHECK(sample.linear_velocity.cwiseAbs().maxCoeff()<=caps.max_linear_velocity_m_s+1e-7);
+    CHECK(sample.linear_acceleration.cwiseAbs().maxCoeff()<=caps.max_linear_acceleration_m_s2+1e-7);
+    CHECK(sample.linear_jerk.cwiseAbs().maxCoeff()<=caps.max_linear_jerk_m_s3+1e-7);
+    const bool terminal=sample.linear_velocity.norm()<1e-12 && sample.linear_acceleration.norm()<1e-12;
+    if(terminal && !terminal_seen) {
+      // Merely sampling rest does not complete a source stop.
+      CHECK(!f.exec.stopComplete());terminal_seen=true;
+    }
+    CHECK(f.accept(out));
+    if(f.exec.stopComplete())break;
+  }
+  CHECK(terminal_seen && f.exec.stopComplete());
+  CHECK(f.exec.telemetry().submitted==submitted);
+  CHECK(math::positionDistance(seed.pose,f.exec.acceptedPose())>0.0);
   return true;
 }
 
@@ -1013,7 +1048,7 @@ int main() {
       recoveryOutputRejectsNanosecondOverflowBoundary()&&recoverySeedSurvivesWaitingForStationaryDispatch()&&
       explicitResetCancelsPendingRecoverySeed()&&pendingRecoverySeedSharesGeometricFold()&&
       recordedAngularExpiryStateHasFiniteBrake()&&stationarySeedRefusalNamesThePredicate()&&
-      planClockGateDilatesTheCommandAndKeepsSplicesC2()&&
+      referenceLeashPreservesPhysicalDerivativesAndSplices()&&sourceStopUsesAcceptedPhysicalStateAndDispatchesTerminal()&&
       sentJointStationarityUsesTolerance()&&unreplacedClosingPlanExpiresIntoABrake()&&
       executorDoesNotClampTheLead();
   setExternalSteadyNs(0);

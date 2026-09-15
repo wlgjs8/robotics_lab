@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
-"""Offline PASS/FAIL audit of the ONE-LAW force stage (2026-09-15) on a servo_log CSV.
+"""Read-only force-stage audit. No robot or backend is constructed.
 
-Read-only: no robot, network or backend is constructed. The checks are the hardware
-acceptance protocol in AGENTS.md § Force Control turned into numbers, against the law
-
-    m*v' + b*v = (|F| - rest_force_n)+ * F_hat        (k = 0, rotation rigid)
-
-and CM 0049's gate  g = (v_cross/v_s)^((|F|/peak_force_n)^2)  (g = 1 for v_s <= v_cross).
-
-Every check is judged on COVERED ticks (`<arm>_fc_covered == 1`) unless it says
-otherwise. |F| is the PRE-deadzone physical force (`<arm>_ft_comp_sensor_nodz_f*`, or
-`<arm>_fc_gate_force_n`); its DIRECTION is taken in the stand frame from the wrench the
-law consumed (`<arm>_fc_wrench_filt_f*`, else `<arm>_ft_comp_stand_f*`). A missing
-column makes the check SKIPPED, never a crash, so a pre-2026-09-15 log (no
-`*_fc_source`, `*_fc_source_demand_m_s`, `*_fc_contact_normal_*`) still yields the
-rest / yield / deadlock / chatter / global verdicts.
-
-Requires numpy; CSV parsing does not require pandas or the robot runtime.
+New logs use one target, a dynamic excess-force law and a confidence-weighted
+force gate. Law checks use its own filtered stand vector, never raw sensor norm.
+Legacy pair logs remain readable with explicit legacy parameters. PASS describes
+logged invariants, not proof of contact stability or physical safety. A net F/T
+measurement cannot label a floor or separate simultaneous hand/floor forces.
+Requires numpy only.
 """
 import argparse
 import csv
@@ -28,7 +18,7 @@ import numpy as np
 
 
 ARMS = ("left", "right")
-SCHEMA = "robotics_lab.analyze_force_stage.v1"
+SCHEMA = "robotics_lab.analyze_force_stage.v2"
 PASS, FAIL, SKIPPED = "PASS", "FAIL", "SKIPPED"
 
 # Columns whose values are words, not numbers.
@@ -54,6 +44,12 @@ def column_map(arm):
         "normal": [f"{arm}_fc_contact_normal_{ax}" for ax in "xyz"],
         "bounded": f"{arm}_fc_bounded",
         "accel": [f"{arm}_q_sent_accel_deg_s2_{j}" for j in range(6)],
+        "target": f"{arm}_fc_target_force_n",
+        "mass": f"{arm}_fc_gate_m_eff",
+        "damping": f"{arm}_fc_gate_b_eff",
+        "confidence": f"{arm}_fc_contact_confidence",
+        "physical_gate": f"{arm}_fc_physical_gate",
+        "osc_frozen": f"{arm}_fc_osc_frozen",
         "law": f"{arm}_fc_law",           # pre-2026-09-15 logs only
     }
 
@@ -211,15 +207,20 @@ class ArmAudit:
         self.dt = float(np.median(positive)) * 1e-9 if len(positive) else 0.002
         self.max_gap = 2.5 * self.dt
         self.covered = self.c.get("covered") >= 0.5 if self.c.has("covered") else None
+        self.new_law = self.c.has("target") or params.target_n is not None
+        self.target_n = params.target_n if params.target_n is not None else params.rest_n
+        self.mass, self.damping = params.mass, params.b
+        for role, attr in (("target", "target_n"), ("mass", "mass"), ("damping", "damping")):
+            if self.c.has(role):
+                values = self.c.get(role)
+                values = values[np.isfinite(values) & (values > 0)]
+                if len(values):
+                    setattr(self, attr, float(np.median(values)))
         self.force_n, self.force_source = self._force_magnitude()
         self.force_dir, self.dir_source = self._force_direction()
 
     # ---- inputs ---------------------------------------------------------------
     def _force_magnitude(self):
-        if self.c.has("force_nodz"):
-            return np.linalg.norm(self.c.get("force_nodz"), axis=1), "ft_comp_sensor_nodz"
-        if self.c.has("gate_force"):
-            return np.asarray(self.c.get("gate_force"), dtype=float), "fc_gate_force_n"
         if self.c.has("force_filt"):
             return np.linalg.norm(self.c.get("force_filt"), axis=1), "fc_wrench_filt"
         return None, None
@@ -254,12 +255,21 @@ class ArmAudit:
         covered = self.need_covered()
         force = self.need_force()
         vel = np.linalg.norm(self.c.get("vel"), axis=1)
-        rest = covered & (force <= self.p.rest_n)
+        target = self.target_n if self.new_law else self.p.rest_n
+        rest = covered & (force <= target)
+        # The integrator coasts after release; zero drive does not mean zero
+        # velocity on that same tick. Judge after six m/b time constants.
+        if self.new_law:
+            settled = np.zeros_like(rest)
+            delay = self.ticks(6 * self.mass / self.damping)
+            for start, stop in runs_of(rest, self.time_s, self.max_gap):
+                settled[min(start + delay, stop):stop] = True
+            rest = settled
         if not rest.any():
             return verdict("rest_equilibrium", SKIPPED, "no covered tick with |F| <= rest")
         still = vel[rest] < 0.5e-3
         still_frac = float(still.mean())
-        detail = (f"|F| <= {self.p.rest_n:g} N on {int(rest.sum())} ticks: |fc_vel| < 0.5 mm/s "
+        detail = (f"settled |F| <= {target:g} N on {int(rest.sum())} ticks: |fc_vel| < 0.5 mm/s "
                   f"on {100 * still_frac:.2f} % (need >= 99 %)")
         ok = still_frac >= 0.99
         numbers = {"rest_ticks": int(rest.sum()), "still_fraction": still_frac}
@@ -291,6 +301,8 @@ class ArmAudit:
         return verdict("rest_equilibrium", PASS if ok else FAIL, detail, **numbers)
 
     def check_yield_law(self):
+        if self.new_law:
+            return self.check_dynamic_yield_law()
         covered = self.need_covered()
         force = self.need_force()
         vel = self.c.get("vel")
@@ -321,6 +333,35 @@ class ArmAudit:
             detail += "; direction not judged (no stand-frame force vector column)"
         return verdict("yield_law", PASS if ok else FAIL, detail, **numbers)
 
+    def check_dynamic_yield_law(self):
+        covered = self.need_covered()
+        force = self.c.get("force_filt")
+        vel = self.c.get("vel")
+        mag = np.linalg.norm(force, axis=1)
+        drive = force * (np.maximum(0., mag - self.target_n) / np.maximum(mag, 1e-30))[:, None]
+        accel = (drive[1:] - self.damping * vel[:-1]) / self.mass
+        norm = np.linalg.norm(accel, axis=1)
+        accel *= np.minimum(1., self.p.accel_cap / np.maximum(norm, 1e-30))[:, None]
+        predicted = vel[:-1] + self.p.control_dt * accel
+        speed = np.linalg.norm(predicted, axis=1)
+        predicted *= np.minimum(1., self.p.velocity_cap / np.maximum(speed, 1e-30))[:, None]
+        # A log gap, force freeze or fence changes the state outside this law.
+        valid = covered.copy()
+        for role in ("bounded", "osc_frozen"):
+            if self.c.has(role):
+                valid &= self.c.get(role) < .5
+        pair = valid[1:] & valid[:-1] & np.isclose(np.diff(self.time_s), self.p.control_dt, atol=1e-4)
+        pair &= np.isfinite(force[1:]).all(axis=1) & np.isfinite(vel[1:]).all(axis=1)
+        err = np.linalg.norm(vel[1:] - predicted, axis=1)[pair]
+        if not len(err):
+            return verdict("yield_law", SKIPPED, "no contiguous unfrozen law samples")
+        p99, peak = float(np.percentile(err, 99)), float(np.max(err))
+        return verdict("yield_law", PASS if peak < 2e-6 else FAIL,
+                       f"one-step m*v_dot+b*v=max(|F|-{self.target_n:g},0)*F_hat residual: "
+                       f"p99 {p99:.3g}, max {peak:.3g} m/s; need max < 2e-6 (CSV precision)",
+                       dynamic_ticks=len(err), p99_residual_m_s=p99, max_residual_m_s=peak,
+                       target_n=self.target_n, mass_kg=self.mass, damping_n_s_m=self.damping)
+
     def check_hold_source(self):
         covered = self.need_covered()
         source = self.c.get("source")
@@ -336,10 +377,10 @@ class ArmAudit:
                    "gate_open_fraction": float(open_gate.mean()),
                    "demand_max_m_s": float(np.nanmax(np.abs(demand[hold]))),
                    "gate_min": float(np.nanmin(gate[hold]))}
-        ok = bool(zero_demand.all() and open_gate.all())
+        ok = bool(zero_demand.all())
         detail = (f"source == hold on {int(hold.sum())} ticks: demand == 0 on "
                   f"{100 * numbers['zero_demand_fraction']:.2f} % (max {1e3 * numbers['demand_max_m_s']:.3f} mm/s), "
-                  f"gate == 1 on {100 * numbers['gate_open_fraction']:.2f} % (min {numbers['gate_min']:.3f}); need 100 %")
+                  f"gate open on {100 * numbers['gate_open_fraction']:.2f} % (min {numbers['gate_min']:.3f}); gate may close at zero demand")
         if self.c.has("fold_sink") and self.force_n is not None:
             pushed = hold & (self.force_n > self.p.rest_n)
             if pushed.any():
@@ -353,6 +394,13 @@ class ArmAudit:
         return verdict("hold_source", PASS if ok else FAIL, detail, **numbers)
 
     def check_floor_episodes(self):
+        if self.new_law:
+            force = self.need_force()
+            covered = self.need_covered()
+            return verdict("floor_episodes", SKIPPED,
+                           "net force alone cannot identify floor contact; operator-labelled contact interval required",
+                           max_covered_net_force_n=float(np.max(force[covered])) if covered.any() else 0,
+                           above_target_ticks=int((covered & (force > self.target_n)).sum()))
         covered = self.need_covered()
         force = self.need_force()
         contact = covered & (force > self.p.rest_n)
@@ -386,6 +434,8 @@ class ArmAudit:
         return verdict("floor_episodes", PASS if ok else FAIL, detail, episodes=rows)
 
     def check_gate_model(self):
+        if self.new_law:
+            return self.check_confidence_gate()
         covered = self.need_covered()
         gate = self.c.get("gate")
         demand = self.c.get("demand")
@@ -406,12 +456,34 @@ class ArmAudit:
         return verdict("gate_model", PASS if med < 0.05 else FAIL, detail,
                        median_abs_error=med, max_abs_error=float(err.max()), engaged_ticks=int(len(err)))
 
+    def check_confidence_gate(self):
+        covered = self.need_covered()
+        force, gate = self.c.get("gate_force"), self.c.get("gate")
+        physical, confidence = self.c.get("physical_gate"), self.c.get("confidence")
+        smooth = lambda x: np.clip(x, 0., 1.)**2 * (3. - 2.*np.clip(x, 0., 1.))
+        c = smooth((force - self.p.noise_low) / (self.p.noise_full - self.p.noise_low))
+        desired = 1. - smooth(force / self.target_n)
+        tau = np.where(desired[1:] < physical[:-1], self.p.close_tau, self.p.open_tau)
+        expected_physical = physical[:-1] + np.minimum(self.p.control_dt / tau, 1.)*(desired[1:] - physical[:-1])
+        pair = covered[1:] & covered[:-1] & np.isclose(np.diff(self.time_s), self.p.control_dt, atol=1e-4)
+        errors = [np.abs(gate[covered] - (1. - c[covered]*(1. - physical[covered]))),
+                  np.abs(confidence[covered] - c[covered]),
+                  np.abs(physical[1:][pair] - expected_physical[pair])]
+        err = np.concatenate(errors)
+        if not len(err):
+            return verdict("gate_model", SKIPPED, "no covered gate samples")
+        peak = float(np.max(err))
+        return verdict("gate_model", PASS if np.isfinite(peak) and peak < 2e-5 else FAIL,
+                       f"confidence + physical-gate recurrence max residual {peak:.3g}; need < 2e-5",
+                       max_abs_error=peak, noise_low_n=self.p.noise_low, noise_full_n=self.p.noise_full)
+
     def check_deadlock(self):
         covered = self.need_covered()
         force = self.need_force()
         gate = self.c.get("gate")
         speed = np.linalg.norm(self.c.get("vel"), axis=1)
-        stuck = covered & (gate < 0.05) & (speed < 0.5e-3) & (force > self.p.peak_n)
+        threshold = (self.target_n + self.damping * .5e-3) if self.new_law else self.p.peak_n
+        stuck = covered & (gate < 0.05) & (speed < 0.5e-3) & (force > threshold)
         longest = 0.0
         for a, b in runs_of(stuck, self.time_s, self.max_gap):
             longest = max(longest, float(self.time_s[b - 1] - self.time_s[a]) + self.dt)
@@ -507,6 +579,10 @@ class ArmAudit:
         covered_ticks = int(self.covered.sum()) if self.covered is not None else 0
         return {
             "arm": self.arm,
+            "law_schema": "single_target" if self.new_law else "legacy_pair",
+            "effective_target_n": self.target_n,
+            "effective_mass_kg": self.mass,
+            "effective_damping_n_s_m": self.damping,
             "ticks": int(len(self.time_s)),
             "covered_ticks": covered_ticks,
             "duration_s": float(self.time_s[-1]) if len(self.time_s) else 0.0,
@@ -518,8 +594,20 @@ class ArmAudit:
 
 
 class Params:
-    def __init__(self, rest_n, peak_n, b, v_cross_mm_s):
+    def __init__(self, rest_n=20., peak_n=24., b=500., v_cross_mm_s=8., *,
+                 target_n=None, mass=20., noise_low=2., noise_full=3., close_tau=.1, open_tau=.4,
+                 control_dt=.002, accel_cap=5., velocity_cap=.5):
         self.rest_n, self.peak_n, self.b, self.v_cross_mm_s = rest_n, peak_n, b, v_cross_mm_s
+        self.target_n, self.mass = target_n, mass
+        self.noise_low, self.noise_full = noise_low, noise_full
+        self.close_tau, self.open_tau, self.control_dt = close_tau, open_tau, control_dt
+        self.accel_cap, self.velocity_cap = accel_cap, velocity_cap
+        values = (rest_n, peak_n, b, v_cross_mm_s, mass, noise_low, noise_full,
+                  close_tau, open_tau, control_dt, accel_cap, velocity_cap)
+        if not all(math.isfinite(x) and x > 0 for x in values) or noise_low >= noise_full:
+            raise ValueError("finite positive law/gate parameters and noise_low < noise_full required")
+        if target_n is not None and (not math.isfinite(target_n) or target_n <= noise_full):
+            raise ValueError("target_n must exceed noise_full")
 
 
 def analyze(path, arms, params):
@@ -527,17 +615,15 @@ def analyze(path, arms, params):
     if "loop_start_time_ns" not in arrays or len(arrays["loop_start_time_ns"]) == 0:
         raise SystemExit("no loop_start_time_ns column or no rows in " + str(path))
     report = {"schema": SCHEMA, "log": str(path), "malformed_rows": malformed,
-              "params": {"rest_n": params.rest_n, "peak_n": params.peak_n, "b": params.b,
-                         "v_cross_mm_s": params.v_cross_mm_s},
+              "params": vars(params).copy(),
               "arms": [ArmAudit(arrays, arm, params).run() for arm in arms]}
     return report
 
 
 def format_report(report):
-    lines = [f"{report['log']}  (malformed rows {report['malformed_rows']}; rest {report['params']['rest_n']:g} N, "
-             f"peak {report['params']['peak_n']:g} N, b {report['params']['b']:g} N*s/m, v_cross {report['params']['v_cross_mm_s']:g} mm/s)"]
+    lines = [f"{report['log']} (malformed rows {report['malformed_rows']}; log invariant audit, physical acceptance not implied)"]
     for arm in report["arms"]:
-        lines.append(f"== {arm['arm']}: {arm['covered_ticks']} covered of {arm['ticks']} ticks, "
+        lines.append(f"== {arm['arm']} [{arm['law_schema']}, target {arm['effective_target_n']:g} N]: {arm['covered_ticks']} covered of {arm['ticks']} ticks, "
                      f"{arm['duration_s']:.1f} s, dt {1e3 * arm['dt_s']:.2f} ms, |F| from {arm['force_magnitude_source']}, "
                      f"F_hat from {arm['force_direction_source']} ==")
         for check in arm["checks"]:
@@ -553,12 +639,21 @@ def main(argv=None):
     parser.add_argument("--arm", choices=("left", "right", "both"), default="both")
     parser.add_argument("--rest-n", type=float, default=20.0, help="force_gate.rest_force_n (stack_real.yaml since 2026-09-15 pm; 10.0 before)")
     parser.add_argument("--peak-n", type=float, default=24.0, help="force_gate.peak_force_n (24.0 since 2026-09-15 pm; 12.0 before)")
-    parser.add_argument("--b", type=float, default=500.0, help="derived damping (peak-rest)/peak_vel [N*s/m]")
+    parser.add_argument("--b", type=float, default=500.0, help="explicit damping N*s/m; new telemetry overrides")
     parser.add_argument("--v-cross-mm-s", type=float, default=8.0, help="force_gate.peak_vel_mm_s (8.0 since 2026-09-15 pm; 4.0 before)")
+    parser.add_argument("--target-n", type=float, help="single-target law (new logs auto-detect target telemetry)")
+    parser.add_argument("--mass", type=float, default=20., help="law mass kg; new telemetry overrides")
+    parser.add_argument("--noise-low", type=float, default=2.)
+    parser.add_argument("--noise-full", type=float, default=3.)
+    parser.add_argument("--control-dt", type=float, default=.002)
+    parser.add_argument("--close-tau", type=float, default=.1)
+    parser.add_argument("--open-tau", type=float, default=.4)
+    parser.add_argument("--accel-cap", type=float, default=5.)
+    parser.add_argument("--velocity-cap", type=float, default=.5)
     parser.add_argument("--json", type=Path, help="write the full report here")
     args = parser.parse_args(argv)
     arms = ARMS if args.arm == "both" else (args.arm,)
-    report = analyze(args.log, arms, Params(args.rest_n, args.peak_n, args.b, args.v_cross_mm_s))
+    report = analyze(args.log, arms, Params(args.rest_n, args.peak_n, args.b, args.v_cross_mm_s, target_n=args.target_n, mass=args.mass, noise_low=args.noise_low, noise_full=args.noise_full, control_dt=args.control_dt, close_tau=args.close_tau, open_tau=args.open_tau, accel_cap=args.accel_cap, velocity_cap=args.velocity_cap))
     print(format_report(report))
     if args.json:
         args.json.write_text(json.dumps(report, indent=2))

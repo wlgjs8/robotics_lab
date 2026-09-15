@@ -56,6 +56,9 @@ struct PreviewExecutionRequest {
   double valid_until_sec{std::numeric_limits<double>::quiet_NaN()};
   double cursor_time_sec{std::numeric_limits<double>::quiet_NaN()};
   double cursor_rate{0.0};
+  // Leash the forecast inside the constrained planner. Execution and splice
+  // derivatives always use physical seconds; no output time dilation.
+  double reference_rate{1.0};
   // Physical force authority, independent of whether the RAW current velocity
   // happens to point into the contact. Normal points INTO contact (opposite F).
   double contact_gate{1.0};
@@ -71,11 +74,6 @@ struct PreviewExecutionRequest {
   PreviewAngularContinuation angular_predecessor{};
   bool has_brake_predecessor{false};
   double predecessor_origin_sec{std::numeric_limits<double>::quiet_NaN()};
-  // THE PREDECESSOR'S PLAN TIME AT THE SPLICE INSTANT (2026-09-15 night). The executor
-  // samples its active plan on a dilated clock (the plan-lead leash), so the plan time
-  // it will have reached at splice_at_sec is what it predicts here, not the wall lag
-  // since predecessor_origin_sec. NaN = wall formula (a brake predecessor, older callers).
-  double predecessor_sample_time_sec{std::numeric_limits<double>::quiet_NaN()};
   // Only an explicitly stationary, accepted held pose permits a cold start.
   // Nonzero cold derivatives are rejected, never clipped to zero.
   bool cold_start{false};
@@ -124,6 +122,10 @@ struct PreviewExecutionResult {
   PreviewSolveDiagnostics diagnostics{};
   PreviewMotionState initial{};
   PreviewPolynomialTrajectory trajectory{};
+  PreviewPolynomialTrajectory nominal_trajectory{};
+  PreviewContactConstraint contact_authority{};
+  double nominal_solve_time_sec{0.0};
+  double trusted_prefix_sec{0.0};
   // Canonical forecast data only, never executable motion authority. Even a
   // rejected QP may expose this snapshot, under its original source/epoch/expiry.
   PreviewExecutionPhaseReference phase_reference{};

@@ -150,7 +150,9 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
             "source_wire_seq","source_recv_seq","backlog_sec","rate","plan_age_sec",
             "accepted_position_error_m","accepted_rotation_error_rad","solve_time_sec",
             "submitted","accepted","rejected","expired","contact_guard_count",
-            "plan_lead_m","plan_clock_gate"})
+            "plan_lead_m","plan_clock_gate","reference_rate_gate","nominal_closing_m_s","allowed_closing_m_s","retired_source_advance_m",
+            "nominal_solve_time_sec","trusted_prefix_sec","source_stop_count","source_stop_completed",
+            "executed_closing_m_s","contact_bound_active","contact_bound_nx","contact_bound_ny","contact_bound_nz"})
         os << ',' << side << "_preview_execution_" << field;
     writePreviewDiagnosticsHeader(os, side);
     os << ',' << side << "_tcp_target_profile"
@@ -418,6 +420,12 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_ft_bias_source"
        << ',' << side << "_ft_bias_generation"
        << ',' << side << "_ft_tare_state"
+       << ',' << side << "_ft_tare_committed_samples"
+       << ',' << side << "_ft_tare_noise_valid"
+       << ',' << side << "_ft_tare_force_std_x_n"
+       << ',' << side << "_ft_tare_force_std_y_n"
+       << ',' << side << "_ft_tare_force_std_z_n"
+       << ',' << side << "_ft_tare_force_noise_rms_n"
        << ',' << side << "_ft_tare_samples"
        << ',' << side << "_ft_auto_tare_stage"
        << ',' << side << "_ft_load_force_n"
@@ -468,6 +476,9 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_gate_b_eff"
        << ',' << side << "_fc_gate_m_eff"
        << ',' << side << "_fc_gate_cross_speed_m_s"
+       << ',' << side << "_fc_target_force_n"
+       << ',' << side << "_fc_contact_confidence"
+       << ',' << side << "_fc_physical_gate"
        << ',' << side << "_fc_gate_rest_force_n"
        << ',' << side << "_fc_gate_peak_force_n"
        // The wrench the LAW consumed, after the contact-shock low-pass, beside
@@ -927,6 +938,9 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << csvEscape(ft.bias_source)
        << ',' << ft.bias_generation
        << ',' << csvEscape(ft.tare_state)
+       << ',' << ft.tare_committed_samples << ',' << ft.tare_noise_valid
+       << ',' << ft.tare_force_std_n[0] << ',' << ft.tare_force_std_n[1] << ',' << ft.tare_force_std_n[2]
+       << ',' << ft.tare_force_noise_rms_n
        << ',' << ft.tare_samples
        << ',' << csvEscape(ft.auto_tare_stage)
        << ',' << ft.load_force_n
@@ -976,6 +990,7 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.gate_b_eff
        << ',' << fc.gate_m_eff
        << ',' << fc.gate_cross_speed_m_s
+       << ',' << fc.target_force_n << ',' << fc.contact_confidence << ',' << fc.physical_gate
        << ',' << fc.gate_rest_force_n
        << ',' << fc.gate_peak_force_n
        << ',' << fc.wrench_filter_hz
@@ -1210,7 +1225,12 @@ void writeArmProfilingColumns(
        << ',' << p.accepted_position_error_m << ',' << p.accepted_rotation_error_rad
        << ',' << p.solve_time_sec << ',' << p.submitted << ',' << p.accepted
        << ',' << p.rejected << ',' << p.expired << ',' << p.contact_guard_count
-       << ',' << p.plan_lead_m << ',' << p.plan_clock_gate;
+       << ',' << p.plan_lead_m << ',' << p.plan_clock_gate << ',' << p.reference_rate_gate << ',' << p.nominal_closing_m_s
+       << ',' << p.allowed_closing_m_s << ',' << p.retired_source_advance_m
+       << ',' << p.nominal_solve_time_sec << ',' << p.trusted_prefix_sec
+       << ',' << p.source_stop_count << ',' << p.source_stop_completed
+       << ',' << p.executed_closing_m_s << ',' << p.contact_bound_active;
+    for(double n:p.contact_bound_normal_stand)os << ',' << n;
     writePreviewDiagnosticsColumns(os, p);
     os << ',' << csvEscape(telemetry.tcp_target_profile)
        << ',' << (telemetry.tcp_target_profile_found ? 1 : 0)

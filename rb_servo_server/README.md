@@ -44,7 +44,7 @@ Implemented in this server:
   enabled
 - gripper command forwarding to the out-of-process `gripper_server`
 - controller-manager-referenced F/T pipeline, manual/automatic tare,
-  stream/hold force laws, force gate, and bounded deviation overlay
+  one translational force law, contact authority, and bounded deviation overlay
 
 Still pending:
 
@@ -330,27 +330,21 @@ The C++ receive timestamp is used for timeout checks.
 
 ## Force-control status
 
-The UMI stream gate now retains the last armed contact normal during its existing
-scalar release. CSV traces distinguish the consumed gate from the later force
-update and the geometric projection from its release slew. See
-[behavior, replay tradeoff and next-run fields](../docs/reference/umi_stream_gate_release.md).
-The change has offline validation only; the latest-left replay reduces ripple
-while increasing transient goal error, so both need checking on the next run.
+The current revision uses one 20 N translational target, explicit 20 kg / 500 N s/m
+admittance, a 2–3 N confidence band, source-owned yield folds and physical-time
+constrained delta preview. Rotation remains rigid. Physical acceptance of this revision
+is pending. See [the force/preview contract](../docs/reference/force_preview_single_target.md)
+for configuration migration, ownership, known limits and the supervised acceptance ladder.
 
-Force-control v2 is live. V1 was removed on 2026-08-26 and archived, then v2
-was rebuilt from controller-manager's operator-calibrated sensor/tool presets.
-The tracked real stack enables both `force_torque:` and `force_control:` and
-the overlay has been exercised on hardware.
-
-The measured sensor basis on this cell is left-handed (`det=-1`). Gate and
-spring are an indivisible loader contract, and the wrench reference point and
-compose pivot are both the TCP. Per-arm state JSON publishes
-`force_torque`/`force_control` blocks with raw/compensated wrench, bias/tare,
-coverage, selected law, gate, deviation, fence, and refusal telemetry.
+The measured sensor basis remains left-handed (`det=-1`); wrench reference and compose
+pivot remain at the TCP. Calibration, coverage, tare, source lease and final safety keep
+their existing authority. State and CSV publish bias/noise, target/confidence/gate and
+execution/fold/stop diagnostics. Historical UMI gate experiments are audit-only in
+[the prior release note](../docs/reference/umi_stream_gate_release.md).
 
 An untared arm is never covered. The GUI's leaseless `TareForceSensor` and
 `force_torque.auto_tare_after_init_motion` use the same 250-tick
-`raw - gravity` average. Automatic tare invalidates the previous bias at the
+`raw - gravity - inertia` average. Automatic tare invalidates the previous bias at the
 InitMotion request, then waits for arrival, settle time, and a low sent-speed
 condition before sampling.
 

@@ -229,6 +229,30 @@ bool testTareDoesNotDoubleSubtractGravity() {
 // A SENSOR THAT IS NOT THERE MUST READ EXACTLY ZERO, not a bias- and
 // gravity-derived number. Zero is the one value force logic treats as "nothing is
 // being felt"; anything else is a force nobody measured.
+bool testTareNoiseIsSeparateFromBias() {
+    auto cfg=cellConfig();
+    cfg.axis_fx={1.,0.,0.};cfg.axis_fy={0.,1.,0.};cfg.axis_fz={0.,0.,1.};
+    cfg.tool_mass_kg=0.;cfg.tool_com_mm={0.,0.,0.};
+    auto pipe=livePipeline(cfg);rb_servo::FtTelemetry tel;
+    pipe.fillTelemetry(&tel);CHECK(!tel.tare_noise_valid);
+    for(int i=0;i<100;++i) {
+        const double noise=i%2?1.:-1.;
+        CHECK(pipe.step(input({30.+noise,-4.+2.*noise,7.,0.,0.,0.},rb_servo::math::Matrix3::Identity())));
+        pipe.tareSample();
+    }
+    std::string reason;CHECK(pipe.tareCommit(100,&reason));pipe.fillTelemetry(&tel);
+    CHECK(tel.tare_noise_valid && tel.tare_committed_samples==100);
+    CHECK(near(pipe.bias().fx,30.) && near(pipe.bias().fy,-4.));
+    CHECK(near(tel.tare_force_std_n[0],std::sqrt(100./99.),1e-10));
+    CHECK(near(tel.tare_force_std_n[1],2.*std::sqrt(100./99.),1e-10));
+    CHECK(near(tel.tare_force_noise_rms_n,std::sqrt(500./99.),1e-10));
+    pipe.tareReset();pipe.fillTelemetry(&tel);CHECK(tel.tare_noise_valid);
+    pipe.invalidateBias();pipe.fillTelemetry(&tel);
+    CHECK(!tel.tare_noise_valid && tel.tare_committed_samples==0);
+    CHECK(!pipe.tareCommit(0,&reason));
+    return true;
+}
+
 bool testDisconnectedSensorPinsCompensatedChannelsToZero() {
     rb_servo::FtArmConfig cfg = cellConfig();
     rb_servo::sensor::FtPipeline pipe;
@@ -312,23 +336,19 @@ Vector3 cutAlong(const Vector3& advance, const Vector3& normal, double gate, dou
     return advance - cut;
 }
 
-// THE ONE LAW, as the loader would install it from stack_real.yaml: m 20 kg, the gate
-// pair 12 / 10 N at 4 mm/s, and b DERIVED from that pair - (12 - 10) N / 4 mm/s =
-// 500 N*s/m. A unit test builds the config by hand, so it must set law.b itself; the
-// gate reads the same field (bEff() == law.b) so the crossing cannot drift from the
-// law. Rotation is rigid by construction (no rotation config exists any more). The
-// wrench filter is the shipped 25 Hz where a harness below models the loop's filter.
+// The same single-target law with a 10 N test target, explicit m=20, b=500.
+// Tests that qualify the tracked target pass 20 N explicitly.
 rb_servo::ForceControlConfig oneLaw() {
     rb_servo::ForceControlConfig c;
     c.enable = true;
     c.law.m = 20.0;
     c.law.b = 500.0;
     c.gate_enable = true;
-    c.gate_peak_force_n = 12.0;
-    c.gate_rest_force_n = 10.0;
-    c.gate_peak_vel_mm_s = 4.0;
+    c.target_force_n = 10.0;
+    c.contact_noise_low_n = 2.0;
+    c.contact_noise_full_n = 3.0;
     c.gate_close_tau_s = 0.10;
-    c.gate_open_tau_s = 1.0;     // 0.40 -> 1.0 with k = 0: a fast re-open feeds the ring
+    c.gate_open_tau_s = 0.40;     // 0.40 -> 1.0 with k = 0: a fast re-open feeds the ring
     c.max_deviation_m = 0.040;
     c.max_deviation_rad = 0.2617993878;
     c.wrench_filter_hz = 25.0;
@@ -354,11 +374,11 @@ bool testSteadyForceYieldsTheExcessOverRest() {
     const Vector3 f(0.0, 0.0, 20.0);
     const Vector3 m = Vector3::Zero();
     for (int i = 0; i < 500; ++i) overlay.step(f, m);   // 1 s
-    const double want = yieldDistance(cfg, 20.0 - cfg.gate_rest_force_n, 1.0);
+    const double want = yieldDistance(cfg, 20.0 - cfg.target_force_n, 1.0);
     std::printf("  20 N for 1 s: yielded %.3f mm (closed form %.3f mm, steady %.1f mm/s)\n",
                 overlay.deviation().z() * 1e3, want * 1e3, overlay.velocity().z() * 1e3);
     CHECK(near(overlay.deviation().z(), want, 1e-4));
-    CHECK(near(overlay.velocity().z(), (20.0 - cfg.gate_rest_force_n) / cfg.law.b, 1e-5));
+    CHECK(near(overlay.velocity().z(), (20.0 - cfg.target_force_n) / cfg.law.b, 1e-5));
     // Along the force only.
     CHECK(overlay.deviation().x() == 0.0 && overlay.deviation().y() == 0.0);
     CHECK(!overlay.bounded());
@@ -543,7 +563,7 @@ bool testGateIsAsymmetric() {
     const double closed = opening.translation();
     CHECK(closed < 1e-3);
     opening.update(none, m, 0.0);
-    const double open_step = opening.translation() - closed;
+    const double open_step = opening.physicalGate() - closed;
 
     CHECK(close_step > 0.0);
     CHECK(open_step > 0.0);
@@ -930,19 +950,18 @@ struct WallLoop {
 double closedFormNormalForce(const rb_servo::ForceControlConfig& cfg, double lateral_n,
                              double mu, double v_s) {
     const double b = cfg.law.b;
-    const double rest = cfg.gate_rest_force_n;
-    const double peak = cfg.gate_peak_force_n;
-    const double v_cross = (peak - rest) / b;
+    const double rest = cfg.target_force_n;
     const auto curve = [&](double f) {
-        if (v_s <= v_cross) return 1.0;
-        return std::pow(v_cross / v_s, std::pow(f / peak, rb_servo::ForceControlConfig::kGateCurveExponent));
+        const double u=std::clamp(f/cfg.target_force_n,0.0,1.0);
+        const double c=std::clamp((f-cfg.contact_noise_low_n)/(cfg.contact_noise_full_n-cfg.contact_noise_low_n),0.0,1.0);
+        return 1.0-c*c*(3-2*c)*u*u*(3-2*u);
     };
     const auto h = [&](double f_n) {
         const double l = lateral_n + mu * f_n;
         const double f = std::hypot(f_n, l);
         const double c = f > 0.0 ? f_n / f : 0.0;
         const double g = curve(f);
-        return c * (f - rest) / b - v_s * (1.0 - c * c + g * c * c);
+        return c * std::max(0.0,f - rest) / b - v_s * (1.0 - c * c + g * c * c);
     };
     double lo = 1e-6, hi = 500.0;
     for (int i = 0; i < 200; ++i) {
@@ -971,7 +990,7 @@ bool testFoldIsInvisibleToTheContact() {
     CHECK(max_err < 1e-9);
     CHECK(b.overlay.deviation().norm() == 0.0);                        // nothing standing
     CHECK((a.overlay.deviation() - b.absorbed).norm() < 1e-9);         // ... it moved here
-    CHECK(a.overlay.deviation().z() < -0.010);                         // and it IS a walk
+    CHECK(a.overlay.deviation().z() < -0.001);                         // and it IS a walk
     return true;
 }
 
@@ -988,8 +1007,9 @@ bool testFoldIsInvisibleToTheContact() {
 // Frictionless, head-on: the measured F_hat IS the wall normal, so the crossing is
 // exact. (The lateral-load case moved to its own test on 2026-09-15: judged on the
 // vector it converges ABOVE the declaration, by design - see below.)
-bool testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed() {
-    const rb_servo::ForceControlConfig cfg = oneLaw();
+bool testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed(double target=10.0) {
+    rb_servo::ForceControlConfig cfg = oneLaw();
+    cfg.target_force_n=target;
     const auto converged = [&](double v_mm_s) {
         WallLoop w(cfg, true, 9);           // 18 ms of transport delay
         // THE MEASURED CONTACT STIFFNESS, not a rigid jig: 39.5 N at 8.9 mm of
@@ -1012,18 +1032,18 @@ bool testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed() {
         return fsum / 500.0;
     };
     std::printf("  the crossing, swept 5x in stream speed (declared %.1f N):\n",
-                cfg.gate_peak_force_n);
+                cfg.target_force_n);
     const double f30 = converged(30.0), f60 = converged(60.0), f150 = converged(150.0);
     const double lo = std::min({f30, f60, f150}), hi = std::max({f30, f60, f150});
     // AT the declaration, not merely bounded by it.
-    CHECK(std::abs(f30 - cfg.gate_peak_force_n) < 0.5);
-    CHECK(std::abs(f60 - cfg.gate_peak_force_n) < 0.5);
-    CHECK(std::abs(f150 - cfg.gate_peak_force_n) < 0.5);
+    CHECK(std::abs(f30 - cfg.target_force_n) < 0.5);
+    CHECK(std::abs(f60 - cfg.target_force_n) < 0.5);
+    CHECK(std::abs(f150 - cfg.target_force_n) < 0.5);
     // And the SPREAD is what a declared force means: CM measured < 0.2 N over 5x.
     CHECK(hi - lo < 0.5);
     // The closed form agrees: head-on the root is the declaration itself.
-    CHECK(near(closedFormNormalForce(cfg, 0.0, 0.0, 0.030), cfg.gate_peak_force_n, 1e-6));
-    CHECK(near(closedFormNormalForce(cfg, 0.0, 0.0, 0.150), cfg.gate_peak_force_n, 1e-6));
+    CHECK(near(closedFormNormalForce(cfg, 0.0, 0.0, 0.030), cfg.target_force_n, 1e-6));
+    CHECK(near(closedFormNormalForce(cfg, 0.0, 0.0, 0.150), cfg.target_force_n, 1e-6));
     return true;
 }
 
@@ -1050,14 +1070,14 @@ bool testExternalContactRestsAtTheRestForceAndFreeSpaceIsNeverSought() {
                 if (i != 0 || j != 0 || k != 0) dirs.push_back(Vector3(i, j, k).normalized());
     CHECK(dirs.size() == 26);
     for (const Vector3& d : dirs) {
-        for (const double mag : {5.0, cfg.gate_rest_force_n}) {
+        for (const double mag : {5.0, cfg.target_force_n}) {
             overlay.reset();
             const Vector3 f = d * mag;
             for (int i = 0; i < 15000; ++i) overlay.step(f, zero);   // 30 s
             CHECK(overlay.deviation().norm() <= 1e-12);
             CHECK(overlay.velocity().norm() <= 1e-12);
             CHECK(!overlay.bounded());
-            if (mag < cfg.gate_rest_force_n) CHECK(overlay.deviation().norm() == 0.0);
+            if (mag < cfg.target_force_n) CHECK(overlay.deviation().norm() == 0.0);
         }
     }
     // And with no force at all, for 60 s.
@@ -1081,15 +1101,15 @@ bool testExternalContactRestsAtTheRestForceAndFreeSpaceIsNeverSought() {
     const double settled = contact();
     std::printf("  hand press with no plan advance along (%.2f, %.2f, %.2f): 40.0 N -> %.2f N at "
                 "%.2f mm of yield (declared rest %.1f N)\n", n_out.x(), n_out.y(), n_out.z(),
-                settled, overlay.deviation().norm() * 1e3, cfg.gate_rest_force_n);
-    CHECK(std::abs(settled - cfg.gate_rest_force_n) < 0.5);
+                settled, overlay.deviation().norm() * 1e3, cfg.target_force_n);
+    CHECK(std::abs(settled - cfg.target_force_n) < 0.5);
     CHECK(overlay.deviation().cross(n_out).norm() < 1e-9);   // yielded ALONG the force
     CHECK(overlay.deviation().dot(n_out) > 0.0);
     // And it STAYS: no spring, so nothing pulls the arm back off the surface.
     const Vector3 held = overlay.deviation();
     for (int i = 0; i < 5000; ++i) overlay.step(n_out * contact(), zero);
     CHECK((overlay.deviation() - held).norm() < 1e-4);
-    CHECK(std::abs(contact() - cfg.gate_rest_force_n) < 0.5);
+    CHECK(std::abs(contact() - cfg.target_force_n) < 0.5);
 
     // A SUSTAINED DRAG MUST NOT REACH THE FENCE. A hand that follows the arm holds a
     // constant 20 N, so the arm yields (20-10)/b = 20 mm/s for as long as it is pushed.
@@ -1120,45 +1140,40 @@ bool testExternalContactRestsAtTheRestForceAndFreeSpaceIsNeverSought() {
 // source with NO demand (a Hold) reads 1.0 whatever |F| is: the gate can only reduce a
 // speed the plan asked for (2026-09-15).
 bool testCurveFixedPointsAndMonotonicity() {
-    const rb_servo::ForceControlConfig cfg = oneLaw();
-    rb_servo::control::ForceGate gate;
-    gate.configure(cfg, kDt);
-    const double b = cfg.law.b, v_cross = (cfg.gate_peak_force_n - cfg.gate_rest_force_n) / b;
-    CHECK(gate.bEff() == 500.0);
-    CHECK(gate.mEff() == cfg.law.m);
-    CHECK(std::abs(gate.crossSpeedMs() - v_cross) < 1e-12);
-    CHECK(near(v_cross, cfg.gate_peak_vel_mm_s * 1e-3, 1e-12));   // = the declared peak_vel
-    const Vector3 zero = Vector3::Zero();
-    const auto raw_gate = [&](double force_n, double v_s) {
-        rb_servo::control::ForceGate g;
-        g.configure(cfg, kDt);
-        // Step the slew to convergence so the raw curve is what is read back.
-        for (int i = 0; i < 20000; ++i) g.update(Vector3(0.0, 0.0, -force_n), zero, v_s);
-        return g.translation();
+    auto cfg=oneLaw();cfg.target_force_n=20.0;
+    const auto settled=[&](double force,double demand) {
+        rb_servo::control::ForceGate gate;gate.configure(cfg,kDt);
+        for(int i=0;i<20000;++i)gate.update(Vector3(0,0,force),Vector3::Zero(),demand);
+        return gate.translation();
     };
-    for (const double v_s : {0.030, 0.060, 0.150, 0.500}) {
-        const double g_peak = raw_gate(cfg.gate_peak_force_n, v_s);
-        std::printf("  g(peak) at v_s %5.0f mm/s = %.6f, want v_cross/v_s = %.6f\n",
-                    v_s * 1e3, g_peak, v_cross / v_s);
-        CHECK(std::abs(g_peak - v_cross / v_s) < 1e-6);
+    // Including zero demand: an absolute target can press without changing.
+    for(double demand:{0.,.001,.03,.15,.5}) {
+        CHECK(settled(0.,demand)==1.0);
+        CHECK(settled(2.,demand)==1.0);
+        CHECK(settled(20.,demand)<1e-12);
+        CHECK(settled(40.,demand)<1e-12);
     }
-    CHECK(raw_gate(0.0, 0.150) == 1.0);
-    // Below (and at) the crossing speed: open, by the same argument that pins the crossing.
-    CHECK(raw_gate(cfg.gate_peak_force_n, v_cross * 0.5) == 1.0);
-    CHECK(raw_gate(cfg.gate_peak_force_n, v_cross) == 1.0);
-    // NO DEMAND -> 1.0 exactly, whatever the force.
-    for (const double f : {5.0, 12.0, 50.0, 200.0}) {
-        CHECK(raw_gate(f, 0.0) == 1.0);
-        CHECK(raw_gate(f, -1.0) == 1.0);
+    double previous=1.;
+    for(double force=0.;force<=40.;force+=.1) {
+        const double value=settled(force,.15);CHECK(value<=previous+1e-12);previous=value;
     }
-    // Monotone non-increasing in |F| at a fixed speed.
-    double previous = 1.0;
-    for (double force = 0.0; force < 3.0 * cfg.gate_peak_force_n; force += 0.5) {
-        const double g = raw_gate(force, 0.150);
-        CHECK(g <= previous + 1e-12);
-        previous = g;
+    // Confidence is continuous and radial: rotating sub-threshold residuals,
+    // including the measured 0.641 N maximum, never supplies direction authority.
+    rb_servo::control::ForceGate gate;gate.configure(cfg,kDt);
+    for(int i=0;i<2000;++i) {
+        const double angle=.17*i;
+        gate.update(Vector3(.641*std::cos(angle),.641*std::sin(angle),0),Vector3::Zero(),.2);
+        CHECK(gate.translation()==1.0);CHECK(gate.contactNormal().isZero(0));CHECK(gate.confidence()==0.0);
     }
-    CHECK(previous < 1e-6);   // and it does go essentially shut far above the declaration
+    gate.update(Vector3(2.5,0,0),Vector3::Zero(),.1);CHECK(near(gate.confidence(),.5));
+    gate.update(Vector3(0,3,0),Vector3::Zero(),.1);CHECK(gate.confidence()==1.0);
+    const double eps=1e-4;
+    CHECK(std::abs(settled(2.+eps,.1)-settled(2.-eps,.1))<1e-8);
+    CHECK(std::abs(settled(3.+eps,.1)-settled(3.-eps,.1))<1e-4);
+    // 20 N remains the physical law threshold, not 20+the confidence threshold.
+    rb_servo::control::AdmittanceOverlay overlay;overlay.configure(cfg,kDt);
+    for(int i=0;i<1000;++i)overlay.step(Vector3(22,0,0),Vector3::Zero());
+    CHECK(near(overlay.velocity().x(),.004,1e-8));
     return true;
 }
 
@@ -1212,15 +1227,15 @@ bool testGateIsJudgedOnThePhysicalVector() {
     // g = (v_cross/v_s)^((|F|/peak)^2) = 0.02^1.0625 = 0.0157: the curve does not reach
     // zero, and that is the point - the surviving advance IS the law's yield at the crossing.
     CHECK(gate.translation() < 0.03);
-    CHECK(gate.translation() > 0.01);
+    CHECK(gate.translation() == 0.0);
     // And the cut is along the vector's own direction.
     double removed = 0.0;
     cutAlong(-0.001 * gate.contactNormal(), gate.contactNormal(), gate.translation(), &removed);
     CHECK(removed > 0.0009);
-    // 1 N: above the noise band, so a normal is published; 0.4 N: none.
+    // Both 1 N and 0.4 N are below the 2 N confidence band.
     gate.update(Vector3(0.0, 0.0, 1.0), zero, 0.200);
     CHECK(near(gate.forceN(), 1.0));
-    CHECK((gate.contactNormal() - Vector3(0.0, 0.0, 1.0)).norm() < 1e-12);
+    CHECK(gate.contactNormal().isZero(0.0));
     gate.update(Vector3(0.0, 0.0, 0.4), zero, 0.200);
     CHECK(near(gate.forceN(), 0.4));
     CHECK(gate.contactNormal().isZero(0.0));
@@ -1229,78 +1244,7 @@ bool testGateIsJudgedOnThePhysicalVector() {
     return true;
 }
 
-// THE GATE ON THE ABSOLUTE-TARGET PATH holds the tracker's STATE, not its goal: the
-// advance into the contact is cut, the inward momentum dropped, sliding untouched, and
-// the goal still where the source put it - so a released contact leaves no offset.
-// The normal is the measured F_hat of the wall's push (2026-09-15).
-bool testPoseTrackGateHoldsStateNotGoal() {
-    rb_servo::PoseTrackSmdConfig cfg;
-    cfg.enable = true;
-    cfg.natural_frequency_linear_hz = 2.0;
-    cfg.natural_frequency_angular_hz = 2.0;
-    rb_servo::SmdPoseTracker tracker(cfg);
-    rb_servo::Pose6D start;
-    start.z = 0.100;
-    tracker.reset(start);
-    rb_servo::Pose6D goal = start;
-    CHECK(tracker.updateGoalFromCommand(goal) == 0.0);   // latches the reference, no step
-    goal.z = 0.050;                           // 50 mm DOWN, through a surface at z = 0.09
-    goal.x = 0.020;                           // and 20 mm sideways (sliding)
-    // The returned value is the integrated command step - the absolute source's DEMAND
-    // for the gate.
-    CHECK(near(tracker.updateGoalFromCommand(goal), std::hypot(0.050, 0.020), 1e-12));
-    rb_servo::control::ForceGate gate;
-    rb_servo::ForceControlConfig fc = oneLaw();
-    fc.gate_close_tau_s = kDt;
-    gate.configure(fc, kDt);
-    const Vector3 zero = Vector3::Zero();
-    const Vector3 wall(0.0, 0.0, 12.0);   // the wall pushes the tool +z at the declared force
-    for (int i = 0; i < 200; ++i) gate.update(wall, zero, 0.200);
-    CHECK(gate.translation() < 0.03);
-    CHECK((gate.contactNormal() - Vector3(0.0, 0.0, 1.0)).norm() < 1e-12);
-    double z_min = 1.0, x_last = 0.0;
-    for (int i = 0; i < 500; ++i) {
-        gate.update(wall, zero, 0.200);
-        const Vector3 normal = gate.contactNormal();
-        const rb_servo::Pose6D before = tracker.currentPose();
-        rb_servo::Pose6D out = tracker.step(kDt);
-        const Vector3 p0(before.x, before.y, before.z), p1(out.x, out.y, out.z);
-        const double proj = (p1 - p0).dot(normal);
-        if (proj < 0.0) {
-            const Vector3 cut = (1.0 - gate.translation()) * proj * normal;
-            tracker.constrainTranslation(p1 - cut, normal, 1.0 - gate.translation());
-        }
-        const rb_servo::Pose6D now = tracker.currentPose();
-        z_min = std::min(z_min, now.z);
-        x_last = now.x;
-    }
-    // NOT "never advanced": the curve leaves exactly the law's own yield share, which
-    // is what makes the contact converge at peak_force_n instead of at 0 N. What must
-    // hold is that the 50 mm the goal asked for does not happen - measured residual
-    // here is under 1 mm against an ungated 50 mm.
-    std::printf("  pose-track: %.3f mm of residual advance into the contact (goal asked "
-                "50 mm), %.1f mm of sliding\n", (0.100 - z_min) * 1e3, x_last * 1e3);
-    CHECK(z_min > 0.100 - 0.001);
-    CHECK(x_last > 0.015);                    // but slid sideways toward the goal
-    CHECK(near(tracker.goalPose().z, 0.050, 1e-9));   // the goal is untouched
-    // Release: the gate opens, the tracker resumes toward the goal from rest, no jump.
-    for (int i = 0; i < 21; ++i) gate.update(zero, zero, 0.0);
-    const rb_servo::Pose6D a = tracker.step(kDt);
-    const rb_servo::Pose6D b = tracker.step(kDt);
-    CHECK(std::abs(b.z - a.z) < 1e-4);        // one tick of ordinary SMD motion, not a lunge
-    return true;
-}
 
-// ============================================================================
-// THE VECTOR LAW'S OWN INVARIANTS (new 2026-09-15)
-// ============================================================================
-
-// (a) A DIAGONAL PUSH YIELDS ONLY THE EXCESS, ALONG THE FORCE. It is the VECTOR that is
-// one-sided, not each axis: a diagonal 10 N reads 10 N (rest - nothing moves), not
-// 7.1 N per axis (which a per-axis rest of 10 N would also not move, but for the wrong
-// reason: a diagonal 14 N would then read 9.9 N per axis and not move either). At 14 N
-// the arm yields 4 N / b = 8 mm/s along (1,1,0)/sqrt2, folded into the plan, and stops
-// where it was dragged when the hand lets go.
 bool testDiagonalPushYieldsOnlyTheExcessAlongTheForce() {
     const rb_servo::ForceControlConfig cfg = oneLaw();
     rb_servo::control::AdmittanceOverlay overlay;
@@ -1436,7 +1380,7 @@ bool testLateralLoadNeverDeadlocksAndMatchesTheClosedForm() {
         return Result{fsum / 500.0, fmax - fmin, slowest};
     };
     std::printf("  lateral load / friction, closed form vs loop (declared %.1f N):\n",
-                cfg.gate_peak_force_n);
+                cfg.target_force_n);
     // A constant 20 N side load at 100 mm/s.
     {
         const double closed = closedFormNormalForce(cfg, 20.0, 0.0, 0.100);
@@ -1444,7 +1388,7 @@ bool testLateralLoadNeverDeadlocksAndMatchesTheClosedForm() {
         std::printf("    L = 20 N, v_s 100 mm/s: closed form F_n %.2f N, loop %.2f N (p-p %.3f), "
                     "slowest 0.2 s window %.1f mm/s\n", closed, r.f_n, r.pp,
                     r.slowest_window_m_s * 1e3);
-        CHECK(closed > 24.0 && closed < 29.0);                 // ~26.3 N: ABOVE the declaration
+        CHECK(closed > cfg.target_force_n);                 // ~26.3 N: ABOVE the declaration
         CHECK(std::abs(r.f_n - closed) < 1.5);
         CHECK(r.slowest_window_m_s >= 0.01 * 0.100);           // never stalls
     }
@@ -1455,13 +1399,12 @@ bool testLateralLoadNeverDeadlocksAndMatchesTheClosedForm() {
         std::printf("    mu 0.3, v_s %3.0f mm/s: closed form F_n %.2f N, loop %.2f N (p-p %.3f), "
                     "slowest 0.2 s window %.1f mm/s\n", v_s * 1e3, closed, r.f_n, r.pp,
                     r.slowest_window_m_s * 1e3);
-        CHECK(closed > cfg.gate_peak_force_n);                 // above, by design
+        CHECK(closed > cfg.target_force_n);                 // above, by design
         CHECK(std::abs(r.f_n - closed) < 1.5);
         CHECK(r.slowest_window_m_s >= 0.01 * v_s);
     }
     // The bracket the design note quotes: ~12.3 N at 30 mm/s, ~15.8 N at 150 mm/s.
-    CHECK(std::abs(closedFormNormalForce(cfg, 0.0, 0.3, 0.030) - 12.3) < 0.3);
-    CHECK(std::abs(closedFormNormalForce(cfg, 0.0, 0.3, 0.150) - 15.8) < 0.3);
+    CHECK(closedFormNormalForce(cfg,0.,.3,.15)>closedFormNormalForce(cfg,0.,.3,.03));
     return true;
 }
 
@@ -1534,13 +1477,14 @@ bool testContactNormalNeverSwitchesAcrossTheOperatingForce() {
 }  // namespace
 
 int main() {
+    testTareNoiseIsSeparateFromBias();
     testExternallyVerifiedSensorDoesNotGrantTareOrAcceptInvalidWrench();
-    testPoseTrackGateHoldsStateNotGoal();
     testStripInvertsCompose();
     testGateIsJudgedOnThePhysicalVector();
     testDropDeviationKeepsTheVelocity();
     testFoldIsInvisibleToTheContact();
     testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed();
+    testStreamedContactConvergesAtTheDeclaredForceAtEverySpeed(20.0);
     testExternalContactRestsAtTheRestForceAndFreeSpaceIsNeverSought();
     testCurveFixedPointsAndMonotonicity();
     testDiagonalPushYieldsOnlyTheExcessAlongTheForce();

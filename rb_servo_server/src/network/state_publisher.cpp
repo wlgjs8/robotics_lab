@@ -192,6 +192,10 @@ nlohmann::json ftJson(const FtTelemetry& t) {
         {"tare_state", t.tare_state},
         {"tare_reason", t.tare_reason},
         {"tare_samples", t.tare_samples},
+        {"tare_committed_samples",t.tare_committed_samples},
+        {"tare_noise_valid",t.tare_noise_valid},
+        {"tare_force_std_sensor_n",t.tare_force_std_n},
+        {"tare_force_noise_rms_n",t.tare_force_noise_rms_n},
         {"auto_tare_stage", t.auto_tare_stage},
         {"auto_tare_reason", t.auto_tare_reason},
         {"load_force_n", t.load_force_n},
@@ -237,6 +241,9 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& t) {
         {"gate_b_eff", t.gate_b_eff},
         {"gate_m_eff", t.gate_m_eff},
         {"gate_cross_speed_m_s", t.gate_cross_speed_m_s},
+        {"target_force_n",t.target_force_n},
+        {"contact_confidence",t.contact_confidence},
+        {"physical_gate",t.physical_gate},
         {"gate_rest_force_n", t.gate_rest_force_n},
         {"gate_peak_force_n", t.gate_peak_force_n},
 
@@ -1746,7 +1753,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             {"solve_time_sec",p.solve_time_sec},{"submitted",p.submitted},
             {"accepted",p.accepted},{"rejected",p.rejected},{"expired",p.expired},
             {"contact_guard_count",p.contact_guard_count},
-            {"plan_lead_m",p.plan_lead_m},{"plan_clock_gate",p.plan_clock_gate}};
+            {"plan_lead_m",p.plan_lead_m},{"plan_clock_gate",p.plan_clock_gate},{"reference_rate_gate",p.reference_rate_gate}};
         // This fixed wire summary retains execution/freshness authority and
         // current diagnostic reasons. Full result identities, reason arrays,
         // fold transforms and certificate details remain in the servo CSV.

@@ -17,6 +17,9 @@ namespace rb_servo {
 // The production coordinator, accepted-state brake, FK, dispatch, source and
 // fresh-frame handshake all execute unchanged below.
 struct PreviewRecoveryTestAccess {
+  static control::LivePreviewExecution* executor(DualArmServoLoop& loop,int i) {
+    return loop.preview_executor_[i];
+  }
   static void receiveWithinTick(DualArmServoLoop& loop,const DualArmCommand& command) {
     const auto original_start=loop.last_loop_start_ns_;
     loop.last_loop_start_ns_=original_start-1'000'000;
@@ -152,8 +155,9 @@ struct Fixture {
         packet[std::string(side)+"_delta"].push_back({delta.x(),delta.y(),delta.z(),0.,0.,0.,0.});}}
     const auto text=packet.dump();require(receiver.acceptPacket(text.data(),text.size()),"frame rejected");
   }
-  void tick(DualArmCommand cmd,bool expect_fault=false){
-    time+=2'000'000;setExternalSteadyNs(time);cmd.seq=++seq;cmd.host_time_ns=time;buffer.setCommand(cmd);
+  void tick(DualArmCommand cmd,bool expect_fault=false,bool refresh=true){
+    time+=2'000'000;setExternalSteadyNs(time);
+    if(refresh){cmd.seq=++seq;cmd.host_time_ns=time;buffer.setCommand(cmd);}
     require(loop->stepOnce(),"tick failed");snapshot=loop->latestSnapshot();
     recent[recent_count++%recent.size()]=snapshot;
     if(snapshot.fault_latched&&!expect_fault){
@@ -177,6 +181,29 @@ struct Fixture {
   }
   void move(int ticks){auto cmd=command(ControlMode::TcpPoseTarget);for(int k=0;k<ticks;++k){if(k%25==0)frame();tick(cmd);}}
 };
+void sourceTimeoutDispatchesFiniteBrake(bool top) {
+  Fixture f(top);f.move(100);
+  auto* executor=PreviewRecoveryTestAccess::executor(*f.loop,0);
+  require(executor && executor->telemetry().active,"timeout test did not engage preview");
+  auto cmd=f.command(ControlMode::TcpPoseTarget);cmd.left.timeout_sec=cmd.right.timeout_sec=.01;
+  f.tick(cmd);
+  bool saw_stop=false,saw_terminal=false;
+  for(int k=0;k<160;++k) {
+    f.tick(cmd,false,false); // production CommandBuffer timeout, no heartbeat
+    if(executor->stopping()) {
+      saw_stop=true;
+      require(!executor->telemetry().active,"stale source retained tracking authority");
+      saw_terminal=saw_terminal||executor->stopComplete();
+    }
+  }
+  saw_terminal=saw_terminal||executor->telemetry().source_stop_completed>0;
+  require(saw_stop && saw_terminal,"timeout skipped the brake's accepted terminal sample");
+  const auto held=f.snapshot.left_sent_q_deg;
+  for(int k=0;k<10;++k)f.tick(cmd,false,false);
+  require(f.snapshot.left_sent_q_deg==held,"timed-out source did not stay stopped");
+  f.move(70);require(f.snapshot.left_cartesian_solve.preview_execution.active,"fresh source did not resume after timeout");
+}
+
 void exercise(bool top){
   Fixture f(top);f.move(100);
   const auto l=f.snapshot.left_cartesian_solve.preview_execution;
@@ -428,5 +455,5 @@ void boundedRecoveryRetries(bool top) {
 }
 
 }
-int main(){try{exercise(false);exercise(true);oneArmAndRejectedTopDispatch();productionGeometryFoldMetadata(false);productionGeometryFoldMetadata(true);bimanualRecovery(false);bimanualRecovery(true);boundedRecoveryRetries(false);boundedRecoveryRetries(true);std::cout<<"preview servo integration PASS\n";return 0;}
+int main(){try{sourceTimeoutDispatchesFiniteBrake(false);sourceTimeoutDispatchesFiniteBrake(true);exercise(false);exercise(true);oneArmAndRejectedTopDispatch();productionGeometryFoldMetadata(false);productionGeometryFoldMetadata(true);bimanualRecovery(false);bimanualRecovery(true);boundedRecoveryRetries(false);boundedRecoveryRetries(true);std::cout<<"preview servo integration PASS\n";return 0;}
   catch(const std::exception& e){setExternalSteadyNs(0);std::cerr<<e.what()<<'\n';return 1;}}

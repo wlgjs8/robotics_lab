@@ -244,7 +244,7 @@ private:
     std::array<std::uint64_t,2> prepared_force_tick_{};
     // The compensated, PRE-deadzone physical stand wrench after the contact-shock
     // low-pass: the ONE wrench the law, the gate's magnitude and the contact normal
-    // all read, so `rest_force_n` means the force a sensor reads rather than that
+    // all read, so `target_force_n` means the force a sensor reads rather than that
     // force plus the deadzone.
     std::array<Vec6,2> prepared_force_wrench_{};
     // Publish this tick's (gate, free direction) pair to the chunk follower's single
@@ -1016,6 +1016,7 @@ private:
     std::array<control::LivePreviewExecution*, 2> preview_executor_{};
     std::array<control::PreviewDispatchTransaction, 2> preview_dispatch_transaction_{};
     std::array<bool, 2> preview_used_this_tick_{};
+    std::array<bool, 2> preview_force_owner_{};
     void observePreviewDispatch(const std::array<control::PreviewDispatchTransaction, 2>& transactions,
                                 const ServoTarget& sent, const DualSendResult& result,
                                 bool suppressed);

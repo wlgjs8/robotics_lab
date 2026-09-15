@@ -85,11 +85,11 @@ std::filesystem::path servoRoot() {
 // replace these exact lines, so a re-wording of the tracked file fails here first,
 // with a name, instead of silently turning a refusal test into a no-op.
 constexpr const char* kYamlForceControlHead = "force_control:\n  enable: true\n";
-constexpr const char* kYamlLawTranslation  = "    translation: {m: 20.0}\n";
+constexpr const char* kYamlLawTranslation  = "    translation: {m: 20.0, damping_n_s_m: 500.0}\n";
 constexpr const char* kYamlLawRotation     = "    rotation: rigid\n";
-constexpr const char* kYamlGatePeak        = "    peak_force_n:   24.0";
-constexpr const char* kYamlGateRest        = "    rest_force_n:   20.0";
-constexpr const char* kYamlGatePeakVel     = "    peak_vel_mm_s:   8.0";
+constexpr const char* kYamlGatePeak        = "  target_force_n: 20.0";
+constexpr const char* kYamlGateRest        = "    contact_noise_low_n: 2.0";
+constexpr const char* kYamlGatePeakVel     = "    contact_noise_full_n: 3.0";
 // What the tracked pair derives: b = (12 - 10) N / 4 mm/s = 500 N*s/m, tau = 20/500.
 constexpr double kShippedLawM = 20.0;
 constexpr double kShippedLawB = 500.0;
@@ -1730,9 +1730,9 @@ bool testControllerSimProgressSourceIsSimOnly() {
     RB_CHECK(near(sim.force_control.max_deviation_m, real.force_control.max_deviation_m));
     // 2026-09-15: one law - m typed, the gate triple declared, b DERIVED from it.
     RB_CHECK(near(sim.force_control.law.m, real.force_control.law.m));
-    RB_CHECK(near(sim.force_control.gate_peak_force_n, real.force_control.gate_peak_force_n));
-    RB_CHECK(near(sim.force_control.gate_rest_force_n, real.force_control.gate_rest_force_n));
-    RB_CHECK(near(sim.force_control.gate_peak_vel_mm_s, real.force_control.gate_peak_vel_mm_s));
+    RB_CHECK(near(sim.force_control.target_force_n, real.force_control.target_force_n));
+    RB_CHECK(near(sim.force_control.target_force_n, real.force_control.target_force_n));
+    RB_CHECK(near(sim.force_control.contact_noise_full_n, real.force_control.contact_noise_full_n));
     RB_CHECK(near(sim.force_control.law.b, real.force_control.law.b));
     RB_CHECK(near(sim.force_control.law.b, kShippedLawB));
     return true;
@@ -1752,9 +1752,9 @@ bool testOneLawShipsRigidRotationAndTheDerivedDamping() {
         RB_CHECK(near(cfg.force_control.law.b, kShippedLawB));
         // 24 / 20 / 8 since 2026-09-15 pm (12 / 10 / 4 before): the arm's own 15-24 Hz
         // ringing sat at 5-15 N on the 15:57 policy run and the curve read it as contact.
-        RB_CHECK(near(cfg.force_control.gate_peak_force_n, 24.0));
-        RB_CHECK(near(cfg.force_control.gate_rest_force_n, 20.0));
-        RB_CHECK(near(cfg.force_control.gate_peak_vel_mm_s, 8.0));
+        RB_CHECK(near(cfg.force_control.contact_noise_low_n, 2.0));
+        RB_CHECK(near(cfg.force_control.target_force_n, 20.0));
+        RB_CHECK(near(cfg.force_control.contact_noise_full_n, 3.0));
         RB_CHECK(near(cfg.force_control.wrench_filter_hz, 3.0));    // the GATE's corner
         RB_CHECK(near(cfg.force_control.law_filter_hz, 25.0));      // the LAW's corner
         // m >= 2*b*dt is the semi-implicit Euler floor the loader enforces (2 kg here).
@@ -1808,7 +1808,7 @@ bool testDeletedForceControlKeysAreRefusedWithTheDate() {
     // raised silently: a number the operator predicts the robot from may not move.
     {
         std::string body = real;
-        RB_CHECK(replaceOnce(&body, kYamlLawTranslation, "    translation: {m: 1.0}\n"));
+        RB_CHECK(replaceOnce(&body, kYamlLawTranslation, "    translation: {m: 1.0, damping_n_s_m: 500.0}\n"));
         const std::string path = writeTempConfig("fc-m-below-floor", body);
         const bool rejected = loadRejectsContaining(path, "must be >= 2*b*dt");
         ::unlink(path.c_str());
@@ -1821,57 +1821,28 @@ bool testDeletedForceControlKeysAreRefusedWithTheDate() {
 // refusals and one derivation, all of them things that silently break the crossing
 // if they are not enforced.
 bool testForceGateConvergencePairContract() {
-    const std::filesystem::path stack_real_path = servoRoot() / "config" / "stack_real.yaml";
-    const std::string real = readFile(stack_real_path);
-    // 1. THE DELETED KEYS ARE REFUSED, NOT IGNORED. A config that still says
-    //    `max_force_n` asks for a fade to zero, which converges a contact to 0 N.
-    for (const char* dead : {"max_force_n: 10.0", "max_torque_nm: 1.4",
-                             "stream_arm_force_n: 5.0", "stream_judge_lpf_hz: 2.0"}) {
-        std::string body = real;
-        RB_CHECK(replaceOnce(&body, kYamlGatePeak, std::string("    ") + dead));
-        const std::string path = writeTempConfig("gate-dead-key", body);
-        const bool rejected = loadRejectsContaining(path, "was DELETED on 2026-09-11");
-        ::unlink(path.c_str());
-        RB_CHECK(rejected);
-    }
-    // 2. rest_force_n < peak_force_n, or the curve has no speed to return at the
-    //    declared force and the equilibrium is gone.
-    {
-        std::string body = real;
-        RB_CHECK(replaceOnce(&body, kYamlGateRest, "    rest_force_n:   24.0"));   // == peak (24 since 2026-09-15 pm)
-        const std::string path = writeTempConfig("gate-rest-equals-peak", body);
-        const bool rejected = loadRejectsContaining(path, "rest_force_n must be < peak_force_n");
-        ::unlink(path.c_str());
-        RB_CHECK(rejected);
-    }
-    // 3. b MAY NOT BE TYPED (2026-09-15): the law's damping and the gate's crossing
-    //    are one number, derived from the pair.
-    {
-        std::string body = real;
-        RB_CHECK(replaceOnce(&body, kYamlLawTranslation, "    translation: {m: 20.0, b: 200.0}\n"));
-        const std::string path = writeTempConfig("gate-typed-b", body);
-        const bool rejected = loadRejectsContaining(path, "may not be typed (2026-09-15)");
-        ::unlink(path.c_str());
-        RB_CHECK(rejected);
-    }
-    // 4. THE DERIVATION: b = (peak - rest) / peak_vel. The tracked file installs exactly
-    //    500 N*s/m, and halving peak_vel_mm_s doubles it - through the loader, not a
-    //    copy of the formula (2026-09-15: b is derived-only, there is no raise-only path).
-    {
-        const rb_servo::DualArmConfig cfg =
-            rb_servo::loadConfigFromYaml(stack_real_path.string());
-        const rb_servo::ForceControlConfig& fc = cfg.force_control;
-        const double b_expect = (fc.gate_peak_force_n - fc.gate_rest_force_n) /
-                                (fc.gate_peak_vel_mm_s * 1e-3);
-        RB_CHECK(std::abs(fc.law.b - b_expect) < 1e-9);
-        RB_CHECK(std::abs(fc.law.b - kShippedLawB) < 1e-9);
-        std::string body = real;
-        RB_CHECK(replaceOnce(&body, kYamlGatePeakVel, "    peak_vel_mm_s:   4.0"));
-        const rb_servo::DualArmConfig halved = loadSiblingOf(stack_real_path, "peak_vel_4", body);
-        RB_CHECK(std::abs(halved.force_control.gate_peak_vel_mm_s - 4.0) < 1e-12);
-        RB_CHECK(std::abs(halved.force_control.law.b - 1000.0) < 1e-9);
-        RB_CHECK(std::abs(halved.force_control.law.m - kShippedLawM) < 1e-12);
-    }
+    const auto path=servoRoot()/"config"/"stack_real.yaml";
+    const auto real=readFile(path);
+    const auto rejects=[&](const char* anchor,const std::string& replacement,const char* reason) {
+        std::string body=real;if(!replaceOnce(&body,anchor,replacement))return false;
+        const auto temp=writeTempConfig("force-single-target",body);
+        const bool rejected=loadRejectsContaining(temp,reason);::unlink(temp.c_str());return rejected;
+    };
+    for(const char* dead:{"peak_force_n: 24.0","rest_force_n: 20.0","peak_vel_mm_s: 8.0"})
+        RB_CHECK(rejects(kYamlGateRest,std::string("    ")+dead,"was DELETED on 2026-09-15"));
+    RB_CHECK(rejects(kYamlGatePeak,"","force_control.target_force_n"));
+    RB_CHECK(rejects(kYamlGateRest,"","contact_noise_low_n"));
+    RB_CHECK(rejects(kYamlGatePeakVel,"","contact_noise_full_n"));
+    RB_CHECK(rejects(kYamlGateRest,"    contact_noise_low_n: 3.0","contact_noise_low_n < contact_noise_full_n"));
+    RB_CHECK(rejects(kYamlGatePeakVel,"    contact_noise_full_n: 20.0","contact_noise_full_n < target_force_n"));
+    RB_CHECK(rejects(kYamlLawTranslation,"    translation: {m: 20.0}\n","damping_n_s_m"));
+    RB_CHECK(rejects(kYamlLawTranslation,"    translation: {m: 20.0, damping_n_s_m: .nan}\n","finite"));
+    RB_CHECK(rejects(kYamlLawRotation,"","rotation must be explicitly"));
+    std::string body=real;
+    RB_CHECK(replaceOnce(&body,kYamlLawTranslation,"    translation: {m: 20.0, damping_n_s_m: 1000.0}\n"));
+    const auto changed=loadSiblingOf(path,"damping-1000",body);
+    RB_CHECK(changed.force_control.law.b==1000.0);
+    RB_CHECK(changed.force_control.law.m==20.0 && changed.force_control.target_force_n==20.0);
     return true;
 }
 

@@ -166,39 +166,30 @@ from controller-manager's calibration and design contracts after v1 was
 removed. The hardware validation on 2026-08-26 measured deviation/F/k ratios
 of 0.97–0.99, 1.85 deg rotation at 55 N, and zero deviation-fence events.
 
-Since 2026-09-15 there is ONE law on the translation force vector (stand frame,
-`m*v' + b*v = (|F| - rest_force_n)+ * F_hat`, `k = 0`, rotation rigid) and the
-hold / chunk-follower / absolute paths are SOURCES of that one stage, not laws.
-Loader-enforced invariants:
+The current revision uses one 20 N isotropic translational target:
+`m*v_dot+b*v=max(|F|-target,0)*F_hat`, k=0, rotation rigid. Mass and damping are
+explicit (`20 kg`, `500 N s/m`), and the gate shares the same target. The old
+rest/peak pair is rejected. The required confidence band is 2–3 N on the 3 Hz
+compensated vector; it is not subtracted from the physical force. The law reads
+its own 25 Hz vector. `m >= 2*b*0.002`, valid tare and coverage remain required.
+Wrench reference and compose pivot remain at the TCP.
 
-- **The gate pair is required and derives `b`.** `force_gate.peak_force_n`,
-  `rest_force_n` and `peak_vel_mm_s` must all be declared; `b = (peak - rest) /
-  peak_vel` and may not be typed. `law.translation.m >= 2*b*dt` or the load is
-  refused. The fold is STRUCTURAL (k = 0 by construction): the deviation is
-  handed to the source's plan every tick, so `force_control.fold_deviation` is a
-  DELETED key (2026-09-15) and is refused, as are `stream`, `hold`,
-  `hold_compliance`, `hold_engage_force_n`, `hold_release_force_n`,
-  `hold_relatch_max_force_n`. Telemetry: `force_control.folded / fold_sink /
-  absorbed_*` per arm, logged as `<side>_fc_folded`, `<side>_fc_fold_sink`
-  ("chunk_follower", "hold", or "declined: ..."), `<side>_fc_fold_{x,y,z}_m`,
-  `<side>_fc_absorbed_*`.
-- **Wrench reference and compose pivot move together.** Both are the TCP. A
-  wrench shifted to one point must not drive rotation about another.
+Preview applies force authority once, relative to its feasible nominal candidate,
+with a continuous contact velocity bound and the existing finite stopping envelope.
+Execution, derivatives and splices use physical seconds; lead reduces future QP
+reference rate. Timeout/Hold must dispatch a finite accepted-state brake's terminal
+sample before yielding ownership. Chunk, Hold and relative-goal SMD paths absorb
+force yield; literal absolute PTP retains an explicit declined fold and fence.
 
-The force pipeline exposes, per arm, raw sensor axes at the sensing reference
-origin, gravity, compensated sensor/TCP/stand wrenches, bias status, sensor
-liveness, load estimate, tare status, and automatic-tare stage. The force law
-consumes the compensated PRE-deadzone stand-axis wrench at the TCP (low-passed
-by `wrench_filter_hz`). `force_control` telemetry exposes coverage and refusal
-reason, the active `source` (`chunk_follower` / `hold` / `absolute` / `none`)
-with its `source_demand_m_s`, the one `contact_normal_stand` unit vector every
-consumer cuts along (`ForceGate::contactNormal`: F_hat above 0.5 N, else zero),
-deviation/velocity, gate state, fence saturation, fold, and IK refusal counters.
-Removed on 2026-09-15: `law`, `gate_rotation`, `gate_stream_speed_m_s`,
-`gate_wrench_norm_n`, `hold_engaged`, `hold_force_n` (CSV: `<side>_fc_law`,
-`_fc_gate_rotation`, `_fc_gate_stream_speed_m_s`, `_fc_gate_wrench_norm_n`,
-`_fc_hold_engaged`, `_fc_hold_force_n`, all `_smd_gate_*`; added `_fc_source`,
-`_fc_source_demand_m_s`, `_fc_contact_normal_{x,y,z}`).
+State/CSV retain source/demand, coverage/refusal, contact normal, deviation/velocity,
+fold, fence and IK/dispatch diagnostics. New fields expose target, confidence,
+physical gate, tare noise statistics, accepted QP bound, nominal/actual closing speed,
+retired source travel, trusted prefix and source-stop completion counts. Deprecated
+rest/peak telemetry mirrors the single target; it is not configuration authority.
+
+See the [current force/preview contract](reference/force_preview_single_target.md)
+for schema migration, detailed fields and limitations. The new revision's physical
+acceptance is pending; historical hardware measurements above do not certify it.
 
 ### Tare contract
 
@@ -206,7 +197,7 @@ An arm without a valid bias is never force-control-covered. Manual GUI tare and
 automatic InitMotion tare share one RT mechanism:
 
 ```text
-250 consecutive samples of raw_sensor - tool_gravity -> bias
+250 consecutive samples of raw_sensor - tool_gravity - tool_inertia -> bias
 ```
 
 Never average raw sensor values directly: the box is deliberately configured

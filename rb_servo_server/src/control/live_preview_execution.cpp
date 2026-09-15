@@ -45,36 +45,17 @@ LivePreviewExecution::LivePreviewExecution(const RuckigFollowerConfig& c,
   telemetry_.enabled=true;telemetry_.epoch=epoch_;telemetry_.status="inactive";
 }
 
-namespace {
-// <= 0.05 per tick: the full 1.0 <-> 0.25 swing takes 30 ms, which at 300 mm/s is
-// 7.5 m/s^2 of pseudo-acceleration - under the tracker's own 12 m/s^2 limit.
-constexpr double kPlanClockGateMaxStepPerTick=0.05;
-}  // namespace
-
-void LivePreviewExecution::setPlanClockGate(double gate) {
-  plan_clock_gate_target_=std::isfinite(gate)?std::clamp(gate,0.0,1.0):1.0;
-  plan_clock_gate_+=std::clamp(plan_clock_gate_target_-plan_clock_gate_,
-                               -kPlanClockGateMaxStepPerTick,kPlanClockGateMaxStepPerTick);
-}
-
-double LivePreviewExecution::predictedPlanTime(double ahead_sec) const {
-  // The servo loop sets the gate (one slew step toward its target) BEFORE each step
-  // advances plan time by dt*gate; replay exactly that for the ticks until the splice.
-  double g=plan_clock_gate_,t=plan_time_;
-  const double dt=servo_period_sec_>0?servo_period_sec_:0.002;
-  const int ticks=static_cast<int>(std::lround(ahead_sec/dt));
-  for(int k=0;k<ticks;++k) {
-    g+=std::clamp(plan_clock_gate_target_-g,-kPlanClockGateMaxStepPerTick,kPlanClockGateMaxStepPerTick);
-    t+=dt*g;
-  }
-  return t;
+void LivePreviewExecution::setReferenceRateGate(double gate) {
+  // An invalid leash cannot authorize a faster forecast. QP v/a/j limits,
+  // rather than an output slew with unaccounted derivatives, shape the change.
+  reference_rate_gate_=std::isfinite(gate)?std::clamp(gate,0.0,1.0):0.0;
 }
 
 void LivePreviewExecution::reset(const char* reason) {
-  plan_time_=0.0;plan_clock_gate_=1.0;plan_clock_gate_target_=1.0;
+  reference_rate_gate_=1.0;
   if(initialized_ || staged_valid_ || hasPlan() || faulted_) {++epoch_;++gate_revision_;}
   cancelStaged(Reset,last_time_);
-  initialized_=false;faulted_=false;accepted_epoch_=false;
+  initialized_=false;faulted_=false;accepted_epoch_=false;stopping_=false;stop_terminal_dispatched_=false;
   active_.status=PreviewExecutionWorkerStatus::InvalidRequest;
   active_.trajectory.valid=false;
   phase_reference_result_.phase_reference.count=0;
@@ -87,6 +68,9 @@ void LivePreviewExecution::reset(const char* reason) {
   telemetry_.active=false;telemetry_.status=reason;telemetry_.epoch=epoch_;telemetry_.plan_id=0;
   telemetry_.backlog_sec=0;telemetry_.rate=1;telemetry_.plan_age_sec=0;
   telemetry_.phase_window_used=false;telemetry_.phase_window_sec=0;
+  telemetry_.contact_bound_active=false;telemetry_.retired_source_advance_m=0.;
+  telemetry_.contact_bound_normal_stand={};
+  telemetry_.nominal_closing_m_s=telemetry_.allowed_closing_m_s=telemetry_.executed_closing_m_s=0.;
 }
 void LivePreviewExecution::fail(const char* reason) {
   reset(reason);faulted_=true;
@@ -94,6 +78,40 @@ void LivePreviewExecution::fail(const char* reason) {
 bool LivePreviewExecution::contactGuardStopped() {
   ++telemetry_.contact_guard_count;
   return beginBrake("braking_contact",true);
+}
+bool LivePreviewExecution::requestStop(const char* reason) {
+  if(stopping_)return !faulted_; // Repeated Hold must never renew the clock.
+  if(!initialized_ || faulted_)return false;
+  recovery_cause_=PreviewRecoveryCause::None;
+  stop_fault_reason_=nullptr;
+  ++gate_revision_;cancelStaged(Reset,last_time_);
+  if(!beginBrake(reason))return false;
+  stopping_=true;
+  ++telemetry_.source_stop_count;
+  return true;
+}
+bool LivePreviewExecution::stopComplete() const {
+  return stopping_ && brake_trajectory_.valid && accepted_epoch_ &&
+      accepted_plan_id_==brake_plan_id_ &&
+      angular_continuation_.terminalHoldAvailableAt(accepted_sample_time_sec_) &&
+      accepted_sample_time_sec_-brake_origin_sec_>=brake_trajectory_.durationSec();
+}
+LivePreviewOutput LivePreviewExecution::stopOutput(double now) {
+  telemetry_.contact_bound_active=false;telemetry_.retired_source_advance_m=0.;
+  telemetry_.contact_bound_normal_stand={};
+  telemetry_.nominal_closing_m_s=telemetry_.allowed_closing_m_s=telemetry_.executed_closing_m_s=0.;
+  LivePreviewOutput out;out.pose=sample_.pose;
+  if(!stopping_ || faulted_ || !std::isfinite(now) || now<=0 ||
+     now>=static_cast<double>(UINT64_MAX)/1e9 || now<last_time_ ||
+     now-last_time_>=config_.preview_execution.max_result_age_sec) {
+    fail("invalid_stop_state");out.fault=true;out.reason=telemetry_.status;return out;
+  }
+  last_time_=now;telemetry_.sample_time_ns=static_cast<std::uint64_t>(now*1e9);
+  if(!sampleBrake()) {out.fault=true;out.reason=telemetry_.status;return out;}
+  out.pose=sample_.pose;out.active=true;
+  telemetry_.active=false;telemetry_.status=stopComplete()?"source_stopped":brake_reason_;
+  telemetry_.plan_age_sec=now-brake_origin_sec_;out.reason=telemetry_.status;
+  return out;
 }
 bool LivePreviewExecution::requestRecovery(PreviewRecoveryCause cause) {
   if (!config_.preview_execution.recovery.enable || cause==PreviewRecoveryCause::None ||
@@ -274,14 +292,13 @@ bool LivePreviewExecution::beginBrake(const char* reason,bool contact_only) {
 // that window: at 200 mm/s an authority change can be followed for 2 mm before the next
 // plan arrives, which is smaller than the 0.3-3.8 mm steps the clamp was injecting, and
 // it is continuous rather than a step.
-bool LivePreviewExecution::contactAllows(const PreviewMotionSample& proposed,const FollowerOutputKinematics& raw,
+bool LivePreviewExecution::contactAllows(const PreviewMotionSample& proposed,const PreviewMotionSample& nominal,
     double gate,const Eigen::Vector3d& normal) const {
   if(gate>=1 || normal.isZero(0))return true;
   // The canonical follower has already applied the force gate. Match the worker's
   // closing-velocity authority without applying that gate twice. A retreating
   // reference permits a stationary output.
-  const Eigen::Vector3d raw_velocity(raw.velocity.x,raw.velocity.y,raw.velocity.z);
-  const double allowed_velocity=std::max(0.0,normal.dot(raw_velocity));
+  const double allowed_velocity=gate*std::max(0.0,normal.dot(nominal.linear_velocity));
   return normal.dot(proposed.linear_velocity)<=allowed_velocity+
       config_.preview_execution.tracker.feasibility_tolerance;
 }
@@ -316,8 +333,14 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     const Pose6D& accepted_nominal,bool stationary,double contact_gate,
     const Eigen::Vector3d& contact_normal) {
   telemetry_.active=false;telemetry_.plan_lead_m=0.0;
+  retired_source_advance_.setZero();
+  telemetry_.nominal_closing_m_s=0.;telemetry_.allowed_closing_m_s=0.;
+  telemetry_.retired_source_advance_m=0.;
+  telemetry_.contact_bound_active=false;telemetry_.executed_closing_m_s=0.;
+  telemetry_.contact_bound_normal_stand={};
   LivePreviewOutput out;out.pose=accepted_nominal;
   if(faulted_) {out.fault=true;out.reason=telemetry_.status;return out;}
+  if(stopping_)return stopOutput(now);
   if(recovering()) return recoveryOutput(now);
   if(!std::isfinite(now)||now<=0||now>=static_cast<double>(UINT64_MAX)/1e9||!finitePreviewPose(accepted_nominal)||
      !std::isfinite(contact_gate)||contact_gate<0||contact_gate>1||!contact_normal.allFinite()||
@@ -348,13 +371,10 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
   } else if(now<=last_time_ || now-last_time_>=config_.preview_execution.max_result_age_sec) {
     fail("tick_gap");out.fault=true;out.reason=telemetry_.status;return out;
   }
-  const double step_dt=last_time_>0&&now>last_time_?now-last_time_:0.0;
+  const double step_dt=std::max(0.0,now-last_time_);
   last_time_=now;
-  // THE ACTIVE PLAN ADVANCES ON THE DILATED CLOCK (2026-09-15 night): plan time moves at
-  // plan_clock_gate_ x wall time. Everything else (admission, expiry, request
-  // scheduling, brakes) stays in wall time.
-  if(active_.accepted())plan_time_+=step_dt*plan_clock_gate_;
-  telemetry_.plan_clock_gate=plan_clock_gate_;
+  telemetry_.plan_clock_gate=1.0;
+  telemetry_.reference_rate_gate=reference_rate_gate_;
   // Continuously changing force magnitude/direction and plan-rate forecasts
   // do not change the coordinate/lifecycle identity. They are re-read in every
   // request AND checked against the current sample below. Authority folds and
@@ -399,17 +419,8 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
       ++telemetry_.staged_gauge_transported;
     else {++telemetry_.gauge_transport_failed;cancelStaged(Other,now);}
   }
-  // THE DILATED SPLICE WAITS FOR THE PREDECESSOR (2026-09-15 night). The worker sampled
-  // the predecessor at the plan time predicted for the splice instant; if the clock
-  // gate fell faster than predicted, the predecessor has not reached that point yet,
-  // and admitting now would step the command FORWARD by the deficit. Hold the
-  // predecessor a tick or two until it arrives, unless it is about to expire.
-  const bool dilated_wait=staged_valid_ && now>=staged_.splice_at_sec && active_.accepted() &&
-      !brake_trajectory_.valid && std::isfinite(staged_.spliced_predecessor_time_sec) &&
-      plan_time_+1e-9<staged_.spliced_predecessor_time_sec &&
-      now+servo_period_sec_<active_.valid_until_sec && now<staged_.valid_until_sec;
-  if(staged_valid_ && now>=staged_.splice_at_sec && !dilated_wait) {
-    PreviewMotionSample candidate;
+  if(staged_valid_ && now>=staged_.splice_at_sec) {
+    PreviewMotionSample candidate,nominal_candidate;
     // Recheck current authority before retiring the predecessor. In particular,
     // an obsolete contact forecast must not replace a finite brake and then
     // start a new brake from its latest sample, renewing the stopping clock.
@@ -421,8 +432,9 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     // renewed by a still-moving successor. Rejecting on authority alone fed the
     // expiry-brake cycle (39 rejections / 5 s while the allowed velocity swung
     // 0 <-> 125 mm/s tick to tick under a hand push).
+    const bool nominal_sampled=sampled && staged_.nominal_trajectory.sample(now-staged_.splice_at_sec,nominal_candidate);
     const bool contact_ok=sampled && (!brake_trajectory_.valid ||
-        contactAllows(candidate,raw_sample,contact_gate,contact_normal));
+        (nominal_sampled && contactAllows(candidate,nominal_candidate,contact_gate,contact_normal)));
     if(!contact_ok) {
       cancelStaged(expired?Expiry:!sampled?Sample:Contact,now);
       if(expired)++admission_diagnostics_.staged_expired;
@@ -432,20 +444,10 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
         ++d.staged_contact_rejected;d.last_contact_reject_time_sec=now;
         d.last_contact_reject_gate=contact_gate;d.last_contact_reject_normal=contact_normal;
         d.last_contact_reject_closing_m_s=contact_normal.dot(candidate.linear_velocity);
-        d.last_contact_reject_allowed_m_s=std::max(0.0,contact_normal.dot(
-            Eigen::Vector3d(raw_sample.velocity.x,raw_sample.velocity.y,raw_sample.velocity.z)));
+        d.last_contact_reject_allowed_m_s=contact_gate*std::max(0.0,contact_normal.dot(nominal_candidate.linear_velocity));
       }
     }
     else {
-      // THE NEW PLAN'S CLOCK STARTS WHERE THE WORKER SPLICED IT (2026-09-15 night): at the
-      // predecessor's PLAN time it was asked to sample, which on this dilated clock is
-      // where the predecessor stands now up to the gate's drift over one replan period
-      // (<= 0.5 ms at 0.05/tick, i.e. <= 0.15 mm at 300 mm/s). A brake or cold splice
-      // is in wall time: the new plan starts at the wall lag since its splice instant,
-      // scaled by the gate.
-      const double spliced=staged_.spliced_predecessor_time_sec;
-      if(active_.accepted() && std::isfinite(spliced)) plan_time_=std::max(0.0,plan_time_-spliced);
-      else plan_time_=std::max(0.0,(now-staged_.splice_at_sec)*plan_clock_gate_);
       active_=staged_;staged_valid_=false;++telemetry_.accepted;
       planning_starved_since_sec_=0;
       telemetry_.last_admission_gap_sec=telemetry_.last_admission_time_sec>0?now-telemetry_.last_admission_time_sec:0;
@@ -460,7 +462,7 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
   }
   if(active_.accepted()) {
     if(now>=active_.valid_until_sec ||
-       !active_.trajectory.sample(plan_time_,sample_)) {
+       !active_.trajectory.sample(now-active_.splice_at_sec,sample_)) {
       ++telemetry_.expired;
       if(planning_starved_since_sec_==0)planning_starved_since_sec_=now;
       if(!beginBrake("braking_expired")){out.fault=true;out.reason=telemetry_.status;return out;}
@@ -527,6 +529,28 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     if(requestRecovery(PreviewRecoveryCause::PlanExpired))return recoveryOutput(now);
     out.fault=true;out.reason=telemetry_.status;return out;
   }
+  if(active_.accepted() && !brake_trajectory_.valid && active_.contact_authority.enabled) {
+    PreviewMotionSample nominal;
+    if(!active_.nominal_trajectory.sample(now-active_.splice_at_sec,nominal)) {
+      fail("nominal_certificate_unavailable");out.fault=true;out.active=false;return out;
+    }
+    const auto& n=active_.contact_authority.normal_stand;
+    telemetry_.nominal_closing_m_s=std::max(0.0,n.dot(nominal.linear_velocity));
+    telemetry_.executed_closing_m_s=n.dot(sample_.linear_velocity);
+    telemetry_.contact_bound_active=true;telemetry_.contact_bound_normal_stand={n.x(),n.y(),n.z()};
+    const auto& authority=active_.contact_authority;
+    const double t=now-active_.splice_at_sec;
+    std::size_t k=1;while(k+1<authority.count && authority.knots[k].time_sec<t)++k;
+    const auto& a=authority.knots[k-1];const auto& b=authority.knots[k];
+    const double fraction=std::clamp((t-a.time_sec)/(b.time_sec-a.time_sec),0.,1.);
+    telemetry_.allowed_closing_m_s=a.upper_velocity_m_s+
+        fraction*(b.upper_velocity_m_s-a.upper_velocity_m_s);
+    // Retire unexecuted source travel, not the physical yield (a separate gauge
+    // fold). Only the source is moved; the accepted trajectory stays untouched.
+    const double blocked=std::max(0.0,n.dot(nominal.linear_velocity-sample_.linear_velocity));
+    retired_source_advance_=step_dt*blocked*n;
+    telemetry_.retired_source_advance_m=retired_source_advance_.norm();
+  }
   FollowerOutputKinematics phase_reference;
   if(!historySample(cursor_.timeSec(),phase_reference)) {
     if(config_.preview_execution.recovery.enable) {
@@ -591,6 +615,7 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     request_.generated_at_sec=now;request_.splice_at_sec=now+config_.preview_execution.splice_lead_sec;
     request_.valid_until_sec=now+config_.preview_execution.max_result_age_sec;
     request_.cursor_time_sec=phase.time_sec;request_.cursor_rate=phase.rate;
+    request_.reference_rate=reference_rate_gate_;
     request_.history_count=history_count_;
     for(std::size_t i=0;i<history_count_;++i)request_.history[i]=history_[(history_begin_+i)%history_.size()];
     request_.contact_gate=contact_gate;request_.contact_normal_stand=contact_normal;
@@ -600,11 +625,6 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     request_.brake_predecessor=brake_trajectory_;
     request_.angular_predecessor=angular_continuation_;
     request_.predecessor_origin_sec=brake_trajectory_.valid?brake_origin_sec_:active_.splice_at_sec;
-    // The predecessor's PLAN time at the splice instant, on this executor's dilated
-    // clock (2026-09-15 night). NaN for a brake predecessor, which is sampled in wall time.
-    request_.predecessor_sample_time_sec=(!brake_trajectory_.valid && active_.accepted())
-        ? predictedPlanTime(config_.preview_execution.splice_lead_sec)
-        : std::numeric_limits<double>::quiet_NaN();
     // NOTHING IS HELD BACK, so there is no dispatched-state offset to predict: the
     // worker splices from the predecessor's own sample at splice_at_sec (2026-09-11,
     // with the contact clamp's deletion).
@@ -686,6 +706,7 @@ void LivePreviewExecution::recordResult(PreviewExecutionAcceptance check,double 
   t.result_completed_at_sec=r.completed_at_sec;t.result_observed_at_sec=observed;
   t.solve_iterations=r.diagnostics.working_set_recalculations;
   t.solve_time_sec=r.diagnostics.solve_time_sec;
+  t.nominal_solve_time_sec=r.nominal_solve_time_sec;t.trusted_prefix_sec=r.trusted_prefix_sec;
   t.solve_angular_norm_coupled=r.diagnostics.angular_norm_coupled;
   t.solve_angular_norm_cuts=r.diagnostics.angular_norm_cuts;
   t.solve_max_angular_chart_velocity_norm=r.diagnostics.max_angular_chart_velocity_norm;
@@ -772,6 +793,9 @@ bool LivePreviewExecution::observeDispatch(const PreviewDispatchTransaction& tx,
     shiftSample(accepted_sample_,fold_translation_-tx.fold_translation,change);
   }
   accepted_epoch_=true;telemetry_.active=initialized_&&active_.accepted()&&!brake_trajectory_.valid;
+  if(stopComplete() && !stop_terminal_dispatched_) {
+    stop_terminal_dispatched_=true;++telemetry_.source_stop_completed;
+  }
   return true;
 }
 }  // namespace rb_servo::control

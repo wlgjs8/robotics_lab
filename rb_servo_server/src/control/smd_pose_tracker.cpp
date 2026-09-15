@@ -246,7 +246,7 @@ double SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
     return pos_step;
 }
 
-Pose6D SmdPoseTracker::step(double dt_sec) {
+Pose6D SmdPoseTracker::step(double dt_sec, double force_gate, const Eigen::Vector3d& outward_normal) {
     const double dt = std::max(0.0, dt_sec);
     if (!active_ || dt <= 0.0) {
         return poseFrom(position_, rotation_);
@@ -320,8 +320,32 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
     );
     // Semi-implicit Euler keeps the discrete system stable well past the
     // frequencies reachable at the 500 Hz servo rate.
+    const Eigen::Vector3d previous_velocity=velocity_;
     velocity_ = clampNorm(velocity_ + linear_accel * dt, vmax_lin,
                           &info.linear_velocity_clipped);
+    if(force_gate<1.0 && outward_normal.squaredNorm()>0.0) {
+        const Eigen::Vector3d normal=outward_normal.normalized();
+        const Eigen::Vector3d free_velocity=velocity_;
+        const double closing=std::min(0.0,normal.dot(free_velocity));
+        const Eigen::Vector3d desired=free_velocity-(1.0-std::clamp(force_gate,0.0,1.0))*closing*normal;
+        velocity_=previous_velocity+clampNorm(desired-previous_velocity,
+            config_.max_linear_accel_m_s2*dt,&info.linear_accel_clipped);
+        // Back-calculate source windup from the spring's requested steady
+        // velocity, BEFORE the acceleration cap. Using the capped one-tick
+        // velocity here retires only a*dt while incoming goals can advance much
+        // faster, banking an unbounded catch-up move during a long hand hold.
+        // The contact weight makes this correction continuous at g=1. It changes
+        // the goal, never the dispatched pose or velocity. Shift FF history too.
+        const double damping=2.0*config_.damping_ratio_linear*wn_lin;
+        const Eigen::Vector3d requested_velocity=goal_linear_velocity+
+            (wn_lin*wn_lin/damping)*(goal_position_-position_);
+        const double unexecuted=std::min(0.0,normal.dot(requested_velocity))-
+            std::min(0.0,normal.dot(velocity_));
+        const Eigen::Vector3d retired=(1.0-std::clamp(force_gate,0.0,1.0))*
+            std::min(0.0,unexecuted)*dt*normal;
+        goal_position_-=retired;previous_goal_position_-=retired;
+        info.force_removed_m=retired.norm();
+    }
     position_ += velocity_ * dt;
 
     const double wn_ang = kTwoPi * config_.natural_frequency_angular_hz;

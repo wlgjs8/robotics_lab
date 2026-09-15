@@ -39,8 +39,10 @@ JointTarget / TcpPoseTarget / TcpLinearMove
 
 Force-control v2 is live. It reads raw controller F/T channels, applies the
 controller-manager-derived sensor/tool calibration and tare/gravity
-compensation, and publishes per-arm `force_torque`/`force_control` telemetry.
-An arm without a valid tare bias is not covered.
+and delayed commanded-COM inertia compensation, and publishes per-arm `force_torque`/`force_control` telemetry.
+An arm without a valid tare bias is not covered. The current 20 N / 2–3 N confidence
+revision uses k=0, rigid rotation and physical-time preview execution; its physical
+acceptance is pending. See [the current contract](../../docs/reference/force_preview_single_target.md).
 
 J3 is fixed to the Rainbow/URDF range `[-150 deg, +150 deg]` in safety, the
 joint-limit barrier, and IK.

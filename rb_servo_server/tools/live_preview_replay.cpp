@@ -110,7 +110,8 @@ int run(const char* stack,const char* profile,const char* events,const char* con
   auto count=[](json& histogram,const char* name) {histogram[name]=histogram.value(name,std::size_t{0})+1;};
   json summary={{"schema","robotics_lab.live_preview_replay.v1"},{"status","running"},
     {"scope","Actual asynchronous coordinator, worker, current-contact guard and brake with aligned canonical reference and the same followerPreviewContactAuthority mapping as the production loop. The recorded tick force gate and the recorded measured F_hat (ForceGate::contactNormal, the unit physical force in the stand frame) are supplied directly (since 2026-09-15 the contact direction IS the measured force, so there is no classifier state to reconstruct). Ideal nominal dispatch only; no backend, dynamic plant/force feedback, admittance overlay, IK, final joint safety or gripper. Worker completion uses externally stepped source clock; wall pacing governs delivery opportunities."},
-    {"wall_pace_sec",wall_pace_sec},{"profile",profile}};
+    {"wall_pace_sec",wall_pace_sec},{"profile",profile},
+    {"reference_scope","Recorded raw gates and source history are exogenous historical inputs; this tool does not reconstruct the new production source-retirement, reference-leash or source-timeout loop. Use test_preview_servo_integration and test_force_overlay_resume for those paths."}};
   summary["offline_options"]=options;
   summary["geometry_scope"]=reconstructed_geometry?
     "Explicit exogenous reconstructed hold dp/dR at CSV precision, after raw tick before preview on next tick. This is not recomputed geometry/ROI/IK, not exact original RT fold telemetry, and not a counterfactual robot safety simulation.":"No geometry folds applied; v2 retains strict fold-free input scope.";
@@ -141,13 +142,8 @@ int run(const char* stack,const char* profile,const char* events,const char* con
        (!covered&&(tick_contact_gate!=1||!tick_contact_normal.isZero(0))))
       throw std::runtime_error("invalid contact authority");
     const bool recorded_active=j.at("active").get<bool>();
-    // 2026-09-15: the authority is the one curve's ratio and the recorded measured
-    // F_hat (ForceGate::contactNormal: the unit physical force in the stand frame,
-    // zero below the 0.5 N noise band). The recorded `stream_armed` column only
-    // survives as an input-shape counter, because a direction that is measured needs
-    // nothing armed before it can be trusted (2026-09-11 to 2026-09-15 it was a
-    // DECLARED tool-frame press axis). A recorded zero normal still means "no contact
-    // above the noise band".
+    // Exogenous recorded effective gate and confidence-qualified force normal.
+    // Their threshold/schema comes from the recording, not the current config.
     const auto contact=followerPreviewContactAuthority(
         recorded_active&&j.at("reference_strip_enabled").get<bool>(),
         tick_contact_gate,-tick_contact_normal);
@@ -223,8 +219,10 @@ int run(const char* stack,const char* profile,const char* events,const char* con
     const auto& motion=live->sample();
     const auto raw_motion=follower.outputKinematics();
     const Eigen::Vector3d raw_velocity{raw_motion.velocity.x,raw_motion.velocity.y,raw_motion.velocity.z};
-    const double closing=contact_normal.dot(motion.linear_velocity),allowed_closing=std::max(0.,contact_normal.dot(raw_velocity));
-    const double contact_violation=contact_gate<1&&!contact_normal.isZero(0)?std::max(0.,closing-allowed_closing):0.;
+    // The bound belongs to the accepted constrained trajectory, not raw follower
+    // velocity. Comparing with raw would recreate the retired binary authority.
+    const double closing=tele.executed_closing_m_s,allowed_closing=tele.allowed_closing_m_s;
+    const double contact_violation=tele.contact_bound_active?std::max(0.,closing-allowed_closing):0.;
     const bool braking=live->braking();
     const bool brake_stationary=braking&&motion.linear_velocity.isZero(0)&&motion.linear_acceleration.isZero(0)
       &&motion.angular_velocity_body.isZero(0)&&motion.angular_acceleration_body.isZero(0);
@@ -308,6 +306,13 @@ int run(const char* stack,const char* profile,const char* events,const char* con
     if(!observed_stage_valid)++missing_stage_observations;
     auto audit=rr::liveAudit(tele);
     audit["schema"]="robotics_lab.preview_replay_audit.v1";audit["tick"]=tick;audit["t"]=t;audit["mono"]=mono;
+    audit["nominal_closing_m_s"]=tele.nominal_closing_m_s;
+    audit["allowed_closing_m_s"]=tele.allowed_closing_m_s;
+    audit["executed_closing_m_s"]=tele.executed_closing_m_s;
+    audit["retired_source_advance_m"]=tele.retired_source_advance_m;
+    audit["contact_bound_active"]=tele.contact_bound_active;
+    audit["trusted_prefix_sec"]=tele.trusted_prefix_sec;
+    audit["nominal_solve_time_sec"]=tele.nominal_solve_time_sec;
     audit["status"]=current.reason;audit["admission_gap_sec"]=admission_gap;
     audit["recovery_active"]=live->recovering();
     audit["recovery_stopped"]=live->recoveryStopped();

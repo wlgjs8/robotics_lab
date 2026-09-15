@@ -235,11 +235,11 @@ DualArmConfig fixtureConfig(ArmId selected, bool rotation) {
     auto& fc = cfg.force_control;
     fc.enable = true;
     fc.gate_enable = true;
-    fc.gate_peak_force_n = 12.0;
-    fc.gate_rest_force_n = 10.0;
-    fc.gate_peak_vel_mm_s = 20.0;
+    fc.target_force_n = 10.0;
+    fc.contact_noise_low_n = 2.0;
+    fc.contact_noise_full_n = 3.0;
     fc.law.m = 12.0;
-    fc.law.b = (fc.gate_peak_force_n - fc.gate_rest_force_n) / (fc.gate_peak_vel_mm_s * 1e-3);
+    fc.law.b = 100.0; // This mock fixture retains its original response time.
     fc.max_deviation_m = 0.04;
     fc.max_deviation_rad = 0.03;
     fc.coverage_recover_sec = 0.5;
@@ -354,7 +354,7 @@ struct Fixture {
     // integrates to over `ticks` from rest (first-order lag tau = m/b subtracted).
     double yieldSpeed(double force) const {
         const auto& fc = cfg.force_control;
-        return std::max(0.0, force - fc.gate_rest_force_n) / fc.law.b;
+        return std::max(0.0, force - fc.target_force_n) / fc.law.b;
     }
     double expectedYield(double force, int ticks) const {
         const auto& fc = cfg.force_control;
@@ -363,6 +363,28 @@ struct Fixture {
         return yieldSpeed(force) * (t - tau * (1.0 - std::exp(-t / tau)));
     }
 };
+
+void testAbsoluteSmdFoldsYieldAndKeepsTheShiftOnRelease() {
+    Fixture f([](DualArmConfig& cfg) {
+        cfg.safety.self_collision.enable=false;
+        cfg.force_torque.auto_tare_after_init_motion.enable=false;
+        auto& smd=cfg.cartesian_control.tcp_pose_target_profiles[0].pose_track_smd;
+        smd.enable=true;smd.velocity_feedforward=true;
+        smd.natural_frequency_linear_hz=4.;smd.natural_frequency_angular_hz=4.;
+        smd.max_linear_velocity_m_s=.2;smd.max_linear_accel_m_s2=.5;
+    });
+    auto cmd=f.command(ControlMode::Hold,ControlMode::TcpPoseTarget);
+    const auto initial=cmd.right.tcp_target_stand;
+    f.warm(cmd,10.062);
+    const auto& fc=f.latest.right_force_control;
+    require(fc.source=="absolute" && fc.fold_sink=="absolute_relative_goal" && fc.folded,
+            "SMD absolute source did not receive its force fold");
+    require(fc.deviation_norm_m<2e-6 && !fc.bounded,"SMD fold left a standing deviation");
+    require(math::positionDistance(f.rightSent(),initial)>.0015,"SMD source opposed the hand's yield");
+    const auto released=f.rightSent();f.right->setWrench({});
+    for(int k=0;k<500;++k)f.tick(cmd);
+    require(math::positionDistance(f.rightSent(),released)<.0002,"constant absolute command undid the retained yield");
+}
 
 void testWrenchUsesAcquiredJointPose() {
     const auto stack = loadConfigFromYaml((std::filesystem::path(__FILE__).parent_path().parent_path() /
@@ -615,7 +637,7 @@ bool testCoveredSubmicronDeviationStillComposes() {
     const double tiny = f.latest.right_force_control.deviation_norm_m;
     require(tiny > 2e-7 && tiny < 9e-7, "tiny-deviation fixture missed the submicron band");
     require(f.latest.right_force_control.source == "absolute" &&
-            f.latest.right_force_control.fold_sink.rfind("declined: absolute target", 0) == 0 &&
+            f.latest.right_force_control.fold_sink.rfind("declined: absolute PTP", 0) == 0 &&
             !f.latest.right_force_control.folded,
             "absolute target must decline the fold and keep its deviation in the overlay");
     auto hold = f.command(ControlMode::Hold, ControlMode::Hold);
@@ -696,7 +718,7 @@ bool testHoldFoldSinkIsWalledAtTheRoi() {
         const auto& fc = f.latest.right_force_control;
         require(fc.source == "hold", std::string("hold-wall fixture: source is not the Hold during the ") + phase);
         require(fc.source_demand_m_s == 0.0, std::string("hold-wall fixture: the Hold reported a nonzero demand during the ") + phase);
-        require(fc.gate_translation == 1.0, std::string("hold-wall fixture: the gate closed on the Hold's own yield during the ") + phase);
+        require(fc.source_demand_m_s == 0.0, std::string("hold-wall fixture: Hold gained source demand during the ") + phase);
     };
     for (int i = 0; i < 250; ++i) {
         f.tick(hold);
@@ -1352,7 +1374,7 @@ bool testPreviewExecutionForceTareResume() {
         require(force_state.absorbed_norm_m>=absorbed_prev-1e-12,
                 "the absorbed force displacement shrank during recovery");
         absorbed_prev=force_state.absorbed_norm_m;
-        if(force_state.gate_force_n>f.cfg.force_control.gate_rest_force_n) {
+        if(force_state.gate_force_n>f.cfg.force_control.target_force_n) {
             ++covered_pushed_ticks;
             if(force_state.folded) ++folded_ticks;
             require(force_state.fold_sink=="chunk_follower"||
@@ -1619,6 +1641,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         runCase(rb_servo::ArmId::Right, false);
+        testAbsoluteSmdFoldsYieldAndKeepsTheShiftOnRelease();
         testSampledFollowerTelemetryClearsOnEmergencyStopBypass();
         runCase(rb_servo::ArmId::Left, true);
         runCase(rb_servo::ArmId::Right, false, true);

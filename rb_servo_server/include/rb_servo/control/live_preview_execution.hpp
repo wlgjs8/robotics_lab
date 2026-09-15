@@ -62,21 +62,22 @@ class LivePreviewExecution {
   // analytical state. It does not promise zero stopping distance. IK, contact
   // overlay and final joint safety retain their independent veto.
   bool contactGuardStopped();
+  // Ordinary source cancellation is terminal: no old worker result can resume
+  // it. Hold is entered only after the finite brake's terminal sample dispatch.
+  bool requestStop(const char* reason);
+  LivePreviewOutput stopOutput(double now_sec);
+  bool stopping() const { return stopping_; }
+  bool stopComplete() const;
   // Planning recovery never grants motion authority to a stale reference.
   // It sends one finite accepted-state brake, then holds until the shared
   // coordinator supplies a post-stop observation and a new execution epoch.
   bool requestRecovery(PreviewRecoveryCause cause);
   bool seedStationaryRecovery(double now_sec, const Pose6D& nominal,
                               bool stationary, PreviewRecoveryCause cause);
-  // THE PLAN-LEAD LEASH ACTS ON THIS CLOCK (2026-09-15 night). `gate` in [0, 1] scales
-  // how fast the ACTIVE plan is sampled (1 = wall time); the follower keeps its own
-  // clock, so its reference catches the command up and the lead closes - the opposite
-  // sign of leashing the follower, which froze the pose the lead is measured from and
-  // grew it. Slewed inside (<= 0.05 per call) because the command velocity scales with
-  // the gate and must never step. Splices stay exact: the worker samples the
-  // predecessor at the plan time this clock predicts for the splice instant.
-  void setPlanClockGate(double gate);
-  double planClockGate() const { return plan_clock_gate_; }
+  // Restrict the future reference rate inside the QP. The accepted trajectory
+  // is always sampled in wall time, so its certified v/a/j are physical values.
+  void setReferenceRateGate(double gate);
+  double referenceRateGate() const { return reference_rate_gate_; }
   // Which seed precondition refuses (nullptr = the seed would be accepted). The
   // coordinator puts this in the fault reason so a refused restart names its cause
   // instead of the bare "cannot certify a stop".
@@ -99,6 +100,7 @@ class LivePreviewExecution {
   bool hasPlan() const { return active_.accepted() || brake_trajectory_.valid; }
   bool braking() const { return brake_trajectory_.valid; }
   const PreviewMotionSample& sample() const { return sample_; }
+  const Eigen::Vector3d& retiredSourceAdvance() const { return retired_source_advance_; }
   const PreviewMotionSample& acceptedSample() const { return accepted_sample_; }
   const Pose6D& acceptedPose() const { return accepted_epoch_?accepted_sample_.pose:cold_.pose; }
   const Pose6D& recoveryAnchorPose() const { return recovery_seed_valid_?recovery_seed_.pose:acceptedPose(); }
@@ -120,7 +122,7 @@ class LivePreviewExecution {
   // closing velocity? Used ONLY to keep a still-closing successor from replacing a
   // finite brake in progress - the dispatched path itself is never clamped (see the
   // deletion note at the top of the .cpp).
-  bool contactAllows(const PreviewMotionSample& proposed, const FollowerOutputKinematics& raw,
+  bool contactAllows(const PreviewMotionSample& proposed, const PreviewMotionSample& nominal,
                      double gate, const Eigen::Vector3d& normal) const;
   void shiftSample(PreviewMotionSample& sample, const Eigen::Vector3d& dp,
                    const Eigen::Quaterniond& dR);
@@ -145,11 +147,8 @@ class LivePreviewExecution {
   double servo_period_sec_{0};
   double planning_starved_since_sec_{0};
   double brake_origin_sec_{0}, accepted_sample_time_sec_{0};
-  // The active plan's sampled PLAN time and the rate it advances at (see setPlanClockGate).
-  double plan_clock_gate_{1.0}, plan_clock_gate_target_{1.0}, plan_time_{0.0};
-  // Plan time the active plan will have reached `ahead_sec` of wall time from now,
-  // with the gate slewing toward its target exactly as setPlanClockGate will do.
-  double predictedPlanTime(double ahead_sec) const;
+  double reference_rate_gate_{1.0};
+  Eigen::Vector3d retired_source_advance_{Eigen::Vector3d::Zero()};
   std::uint64_t brake_plan_id_{0}, accepted_plan_id_{0};
   Eigen::Vector3d fold_translation_{Eigen::Vector3d::Zero()};
   Eigen::Quaterniond fold_rotation_{Eigen::Quaterniond::Identity()};
@@ -159,6 +158,8 @@ class LivePreviewExecution {
   PreviewMotionSample recovery_seed_{};
   bool recovery_seed_valid_{false};
   bool initialized_{false}, staged_valid_{false}, faulted_{false}, accepted_epoch_{false};
+  bool stopping_{false};
+  bool stop_terminal_dispatched_{false};
 };
 
 }  // namespace rb_servo::control

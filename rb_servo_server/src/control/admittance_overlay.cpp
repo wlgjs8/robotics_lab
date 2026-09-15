@@ -75,20 +75,11 @@ void AdmittanceOverlay::step(const math::Vector3& force_phys_stand,
         w_.setZero();
         return;
     }
-    // THE ONE-SIDED VECTOR DRIVE. Only the EXCESS over rest_force_n drives the
-    // deviation, along the direction the force points. Three properties follow, and
-    // all three are requirements:
-    //   * |F| <= rest is an equilibrium, so the arm does not move at all there. FREE
-    //     SPACE (F = 0) can therefore never be sought - the walk a two-sided setpoint
-    //     has to stop with a fence does not exist here.
-    //   * A contact RESTS at rest_force_n instead of retreating to zero, which is what
-    //     a pure damper does (its only equilibrium is F = 0; measured 2026-09-11: 28 N
-    //     at the floor, then 6.3 mm of retreat to 0.1-1.0 N).
-    //   * The yield line is |v| = (|F| - rest)/b along F_hat, which is what the gate's
-    //     curve is pinned to cross at peak_force_n - in every direction, because the
-    //     gate is judged on the same |F| and cuts along the same F_hat.
+    // Isotropic excess force drives translation. Zero drive allows m/b coasting;
+    // it never seeks a surface. The nominal gate shares this target, so head-on
+    // pressing has zero closing authority and zero yield drive at equilibrium.
     const double fn = force_phys_stand.norm();
-    const double excess = fn - cfg_.gate_rest_force_n;
+    const double excess = fn - cfg_.target_force_n;
     math::Vector3 drive = math::Vector3::Zero();
     if (excess > 0.0 && fn > 1e-12 && std::isfinite(excess)) {
         drive = (excess / fn) * force_phys_stand;
@@ -244,18 +235,14 @@ void AdmittanceOverlay::dropDeviation() {
 void ForceGate::configure(const ForceControlConfig& cfg, double control_period_sec) {
     cfg_ = cfg;
     dt_ = control_period_sec > 0.0 ? control_period_sec : 0.002;
-    // ONE b, ONE m: the law's. The loader derived b from the same pair the crossing
-    // is computed from, so the two halves cannot disagree; the formula is kept (not
-    // peak_vel copied) so a rounding can never split them either.
     b_eff_ = cfg_.law.b;
     m_eff_ = cfg_.law.m;
-    const double span = cfg_.gate_peak_force_n - cfg_.gate_rest_force_n;
-    v_cross_ = (b_eff_ > 1e-9 && span > 0.0) ? span / b_eff_ : 0.0;
     reset();
 }
 
 void ForceGate::reset() {
-    gate_t_ = 1.0;
+    gate_t_ = physical_gate_ = 1.0;
+    confidence_ = 0.0;
     force_dir_.setZero();
     contact_normal_.setZero();
     force_n_ = 0.0;
@@ -266,44 +253,30 @@ void ForceGate::reset() {
 void ForceGate::update(const math::Vector3& force_phys_stand, const math::Vector3& torque_phys_stand,
                        double source_demand_m_s) {
     const double fv = force_phys_stand.norm();
-    force_n_ = std::isfinite(fv) ? fv : 0.0;
+    demand_ = std::isfinite(source_demand_m_s) ? std::max(0.0,source_demand_m_s) : 0.0;
     torque_nm_ = torque_phys_stand.norm();
-    force_dir_ = (fv > 1e-9 && std::isfinite(fv)) ? math::Vector3(force_phys_stand / fv)
-                                                   : math::Vector3::Zero();
-    contact_normal_ = force_n_ > kContactNormalNoiseBandN ? force_dir_ : math::Vector3::Zero();
-    demand_ = std::isfinite(source_demand_m_s) && source_demand_m_s > 0.0
-                  ? source_demand_m_s : 0.0;
-
-    if (!cfg_.gate_enable) {
-        gate_t_ = 1.0;
-        return;
+    if(!std::isfinite(fv) || !std::isfinite(torque_nm_)) {
+        // Normal is retained only as a defensive closed direction; the upstream
+        // coverage gate rejects invalid sensor samples before motion composition.
+        force_n_=fv;confidence_=1.0;gate_t_=physical_gate_=0.0;return;
     }
-    // THE CURVE (CM 0049). Only attenuate when the source is actually faster than the
-    // crossing speed: below it the contact converges to rest + b*v_s < peak_force_n on
-    // its own and the gate has nothing to give. NOTE the scope this leaves open, the
-    // same one CM records: v_s is a TRANSLATION rate, so a rotation-dominant source is
-    // ungated and its contact torque is bounded by the rotational law alone - which on
-    // this cell is RIGID, so there is no rotational yield to run away, but also no
-    // rotational compliance to absorb the torque.
-    double t_raw = 1.0;
-    if (cfg_.gate_peak_force_n > 0.0 && v_cross_ > 0.0 && demand_ > v_cross_) {
-        const double u = force_n_ / cfg_.gate_peak_force_n;
-        const double e = std::pow(u, ForceControlConfig::kGateCurveExponent);
-        t_raw = std::pow(v_cross_ / demand_, e);
-        // A NON-FINITE RESULT CLOSES THE GATE, IT DOES NOT OPEN IT: the only way here
-        // is a non-finite force, i.e. the F/T pipeline produced a NaN, and the one
-        // thing that must not follow a broken force sensor is the source running on at
-        // full authority into whatever it was pressing.
-        if (!std::isfinite(t_raw)) t_raw = 0.0;
-        t_raw = clamp(t_raw, 0.0, 1.0);
+    force_n_=fv;
+    force_dir_=fv>0 ? math::Vector3(force_phys_stand/fv) : math::Vector3::Zero();
+    const auto smooth=[](double s) { s=clamp(s,0.0,1.0);return s*s*(3.0-2.0*s); };
+    const double width=cfg_.contact_noise_full_n-cfg_.contact_noise_low_n;
+    if(!(width>0) || !(cfg_.target_force_n>cfg_.contact_noise_full_n)) {
+        gate_t_=physical_gate_=0.0;confidence_=1.0;contact_normal_=force_dir_;return;
     }
-    // ASYMMETRIC first-order slew: FAST TO CLOSE, SLOW TO OPEN. A fast re-open is
-    // what turns the gate into a relay against the contact and sustains a limit cycle
-    // (CM: below 200 ms the contact loop rings; 0.15 s measured ringing here on
-    // 2026-09-11; shipped 0.40 s).
-    const double tau = (t_raw < gate_t_) ? cfg_.gate_close_tau_s : cfg_.gate_open_tau_s;
-    const double a = tau > 1e-6 ? (dt_ / tau) : 1.0;
-    gate_t_ = snapOpen(gate_t_ + (t_raw - gate_t_) * std::min(a, 1.0));
+    confidence_=smooth((fv-cfg_.contact_noise_low_n)/width);
+    contact_normal_=confidence_>0 ? force_dir_ : math::Vector3::Zero();
+    if(!cfg_.gate_enable) {gate_t_=physical_gate_=1.0;return;}
+    // At target, both inward nominal speed and excess-force drive are zero.
+    // No source-speed feedback: slowing the output cannot reopen its own gate.
+    const double desired=1.0-smooth(fv/cfg_.target_force_n);
+    const double tau=desired<physical_gate_ ? cfg_.gate_close_tau_s : cfg_.gate_open_tau_s;
+    physical_gate_+=std::min(dt_/tau,1.0)*(desired-physical_gate_);
+    physical_gate_=clamp(physical_gate_,0.0,1.0);
+    gate_t_=snapOpen(1.0-confidence_*(1.0-physical_gate_));
 }
 
 // A FIRST-ORDER SLEW ONLY EVER APPROACHES 1.0. Left alone, a gate that closed once

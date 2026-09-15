@@ -392,16 +392,17 @@ then rebuilt from `controller-manager`'s calibrated sensor/tool presets.
 in `stack_real.yaml`. The v2 overlay has run on hardware: deviation tracked
 F/k at 0.97–0.99, rotation was 1.85 deg at 55 N, and no deviation fence fired.
 
-The force configuration has two non-separable invariants enforced by the
-loader: a spring (`k > 0`) ships with the force gate, and the wrench reference
-point moves with the compose pivot. Both reference the TCP. Sensor axes, tool
-mass/COM, and TCP offset come from controller-manager presets and operator
-calibration, not a fresh derivation from the URDF. The measured sensor basis on
-this cell is left-handed (`det=-1`).
+The current force/preview revision has a single 20 N target and explicit mass/damping,
+with k=0 and rigid rotation. Confidence-weighted force authority is applied once in the
+preview QP; execution and splices use wall time. See the
+[current contract](reference/force_preview_single_target.md). Its physical acceptance is
+pending; the preceding v2 measurements describe historical revisions. Sensor axes, tool
+mass/COM and TCP offset remain operator-calibrated; the measured sensor basis is
+left-handed (`det=-1`), and wrench reference and compose pivot are both the TCP.
 
 An arm without a valid bias is not covered. The leaseless `TareForceSensor`
 command and `force_torque.auto_tare_after_init_motion` use the same RT tare:
-250 consecutive samples of `raw - gravity`. Automatic tare invalidates the
+250 consecutive samples of `raw - gravity - inertia`. Automatic tare invalidates the
 old bias when InitMotion is requested, waits for the init sequencer to finish,
 then requires the configured settle time and maximum sent speed before
 sampling. State JSON publishes per-arm `force_torque` and `force_control`

@@ -228,17 +228,17 @@ Rainbow RB5-850E 공식 범위이자 URDF/Pinocchio IK 범위입니다. 폐기�
 `[-180, 180]` 정규화는 control/safety/tracking/log source-of-truth에 쓰지
 않습니다. 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
 
-Force control v2는 **LIVE**입니다. v1은 2026-08-26에 제거됐지만 같은 날
-`controller-manager`를 calibration/design authority로 삼아 sensor/tool setup부터
-재구축됐습니다. `force_torque:`와 `force_control:`은 현재 서버 설정 섹션이며
-둘 다 `stack_real.yaml`에 선언돼 있습니다. 측정 sensor basis는 left-handed
-(`det=-1`)이고, gate와 spring은 함께 사용하며 wrench reference point와 compose
-pivot은 모두 TCP입니다. 이 조합은 실기에서 force/deviation 추종과 fence를
-검증했습니다.
+Force control은 서버 소유 제어 단계입니다. 현재 수정은 단일 **20 N** 목표,
+2–3 N 접촉 신뢰 구간, k=0 병진 yield-and-stay와 실제 시간 기반 delta preview를
+사용합니다. 회전은 rigid이며, 이 수정의 실기 검증은 아직 필요합니다.
+`force_torque:`와 `force_control:`은 양쪽 tracked stack에 선언돼 있습니다.
+측정 sensor basis (`det=-1`), calibration, TCP 기준점과 기존 safety 권한은 유지합니다.
+자세한 제어식·설정 이전·검증 범위는
+[현재 force/preview 계약](docs/reference/force_preview_single_target.md)을 봅니다.
 
 Force law는 bias가 없는 팔을 절대 cover하지 않습니다. GUI의 leaseless
 `TareForceSensor`와 `force_torque.auto_tare_after_init_motion`은 같은 RT tare
-경로를 쓰며 `raw - gravity`를 250 tick 평균합니다. 자동 tare는 InitMotion
+경로를 쓰며 `raw - gravity - inertia`를 250 tick 평균합니다. 자동 tare는 InitMotion
 요청 시 즉시 샘플링하지 않고, init pose 도착 후 settle 및 sent-speed 조건을
 만족한 뒤 수행합니다. v1 설계와 증거는 `docs/archive/force_control_v1/`에
 audit 전용으로 보관돼 있습니다.

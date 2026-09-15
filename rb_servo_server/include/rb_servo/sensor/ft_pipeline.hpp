@@ -183,6 +183,11 @@ private:
     math::Vector3 tare_force_sum_ = math::Vector3::Zero();
     math::Vector3 tare_torque_sum_ = math::Vector3::Zero();
     int tare_count_ = 0;
+    math::Vector3 tare_force_mean_ = math::Vector3::Zero();
+    math::Vector3 tare_force_m2_ = math::Vector3::Zero();
+    math::Vector3 tare_force_std_n_ = math::Vector3::Zero();
+    int tare_committed_samples_ = 0;
+    bool tare_noise_valid_ = false;
 
     math::Vector3 load_f_ = math::Vector3::Zero();
     bool load_seeded_ = false;

@@ -31,6 +31,7 @@ struct SmdStepInfo {
     // Manipulability velocity scale applied this step (1.0 = none, < 1 = slowed near
     // a singularity). Telemetry only.
     double singularity_velocity_scale = 1.0;
+    double force_removed_m = 0.0;
 };
 
 // Spring-Mass-Damper pose tracking filter for streaming TcpPoseTarget teleop.
@@ -108,7 +109,11 @@ public:
 
     // Advance the SMD state by dt toward the integrated goal and return the
     // smoothed pose to publish. Requires active().
-    Pose6D step(double dt_sec);
+    // The force authority modifies the velocity demand BEFORE integration.
+    // Existing acceleration limits shape any new restriction; no output pose
+    // clamp or instantaneous deletion of accepted velocity is used.
+    Pose6D step(double dt_sec, double force_gate = 1.0,
+                const Eigen::Vector3d& outward_normal = Eigen::Vector3d::Zero());
 
     // Diagnostics from the most recent step() (clip flags, feedforward source,
     // applied goal-velocity estimate). Pure telemetry.

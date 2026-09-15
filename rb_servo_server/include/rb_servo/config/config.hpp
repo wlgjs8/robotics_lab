@@ -1747,106 +1747,29 @@ struct FtConfig {
 };
 
 // ---- force control ----------------------------------------------------------
-// ONE LAW, ONE STAGE, ANY SOURCE (2026-09-15, operator: "hold / stream 구분 없이, 더
-// 범용적인 force control"). The admittance overlay on the emitted Cartesian target was
-// ported from controller-manager's shared overlay (arm/motions/AdmittanceOverlay.h);
-// until 2026-09-15 this block carried a `stream` law (a plan driven into contact) and a
-// `hold` law (an operator pushing by hand), each a per-axis {m,b,k,mode} triad in the
-// tool frame with ONE declared press axis. The loader had forced the two identical since
-// 2026-09-11, so the split was code paths only - and every incident of that week lived
-// in one of them: a hand-guide latch fed the press-axis component instead of |F| and
-// staircased a lateral push (2026-09-15), the fold declined on the press row and pinned
-// the fence (2026-09-11), a Hold's own yield was reported as stream demand and closed
-// the gate to 0.095 during a hand push (2026-09-15). And a single press axis left tool
-// x/y ungated: a hand holding the gripper mid-chunk saw F = b * v_plan (50 N at 100 mm/s).
-//
-// Now there is ONE law on the translation VECTOR, in the stand frame:
-//
-//     m * v' + b * v = (|F| - rest_force_n)+ * F_hat                          k = 0
-//
-// F is the compensated, PRE-deadzone physical force at the TCP (low-passed by
-// wrench_filter_hz), F_hat its direction. |F| <= rest_force_n is an equilibrium in
-// EVERY direction - nothing moves, free space is never sought. Above it the arm yields
-// ALONG THE MEASURED FORCE at (|F| - rest)/b whatever the direction and stays where it
-// was dragged (the fold, below). Per-axis one-sidedness is the wrong shape for this: a
-// diagonal 10 N push would read 5.8 N per axis and never move. Rotation is RIGID.
-//
-// Who drives the plan is a SOURCE of this stage, not a law: the chunk follower
-// (demand = its plan advance, deviation folded into the plan), a Hold (demand 0: it
-// yields to a hand above rest_force_n and stays, ROI/floor walled), or an absolute
-// TcpPoseTarget (UMI teleop: demand = the raw target's step rate; it declines the fold
-// and keeps its deviation fenced). The gate cuts only the source's advance into F_hat.
-//
-// KNOWN LIMIT, measured in the closed-loop model (test_force_control): the projective
-// cut leaves the part of the advance perpendicular to F_hat alone, so under FRICTION the
-// normal force settles above the declaration - mu 0.3: 12.3 N at 30 mm/s, 15.8 N at
-// 150 mm/s (m 20 / b 500 / rest 10 / peak 12). A deadlock ("gate shut, law at rest") is
-// structurally impossible: the law always has a yield direction. Cutting the WHOLE
-// into-contact advance would fix the number and kill sliding along a surface; not taken.
+// One isotropic stand-frame translation law: m*v_dot+b*v=max(|F|-target,0)*F_hat.
+// k=0 and rotation rigid. Law/gate use their own configured vector filters.
+// Yield folds into persistent sources; literal PTP retains the deviation fence.
+// Net-force direction is not a guarantee for friction or simultaneous contacts.
+// See docs/reference/force_preview_single_target.md for the current contract.
 struct ForceLawConfig {
-    // [kg] the virtual mass. TYPED. tau = m/b is the law's time constant (40 ms live).
-    double m = 0.0;
-    // [N*s/m] the damping. DERIVED by the loader from the gate pair and REFUSED if typed:
-    //     b = (force_gate.peak_force_n - force_gate.rest_force_n) / force_gate.peak_vel_mm_s
-    // It is the same b the gate computes its crossing speed from; two copies of one
-    // number is how a crossing drifts. b is the only delay-margin knob (docs/reference/
-    // force_control_stability_margin.md): raise it through peak_vel_mm_s.
-    double b = 0.0;
+    double m = 0.0; // kg; explicit virtual mass
+    double b = 0.0; // N*s/m; explicit damping_n_s_m in YAML
 };
 
 struct ForceControlConfig {
     bool enable = false;
     ForceLawConfig law{};
-
-    // ---- the gate ----------------------------------------------------------
-    // The SOURCE's advance is attenuated along the direction pushing INTO the measured
-    // force, PROJECTIVELY: only the component driving into F_hat is cut, so sliding along
-    // a contact and backing out of it keep full authority. Its curve is a function of
-    // the source's DEMAND: a Hold has demand 0 and reads g = 1 by construction; the
-    // chunk follower reports its plan advance; an absolute target its raw step rate.
-    // With k = 0 the gate is the only thing that stops a plan from driving into a
-    // contact (the damper yields, it does not hold the plan back), and the fold is
-    // what bounds the deviation - both are structural now, neither is a key.
+    // Shared physical target: the law yields only the excess; nominal closing
+    // authority tends to zero here. No subtraction of the confidence band.
+    double target_force_n = 0.0;
     bool gate_enable = false;
-    // THE CONVERGENCE PAIR (CM wiki/decisions/0049, adopted here 2026-09-11). The gate
-    // used to be a knee-less smoothstep that reached ZERO at a declared `max_force_n`.
-    // That bounds the force but it does not CONVERGE to it: with k = 0 the law's yield
-    // at that force is still F/b, so the only equilibrium a closed gate leaves is
-    // F = 0 - the arm retreats off the surface. Measured 2026-09-11 (hand press onto
-    // the floor, servo_log_20260911_123239): 28 N at contact, then 6.3 mm of retreat
-    // and a rest at 0.1-1.0 N. CM's structural statement of the same fact: with k = 0
-    // the steady state is the pure velocity balance F = b*v_cmd, and "a gate can only
-    // reduce a speed - it can never change an exchange rate".
-    //
-    // So the gate returns an ABSOLUTE speed at the declared force instead:
-    //
-    //     v_cross = (peak_force_n - rest_force_n) / b
-    //     g(F)    = (v_cross / v_s) ^ ((F / peak_force_n) ^ q)      [v_s > v_cross]
-    //     g(F)    = 1                                              [v_s <= v_cross]
-    //
-    // At F = 0 it is exactly 1, so free space and light contact cost the plan nothing.
-    // At F = peak_force_n it returns exactly v_cross WHATEVER v_s IS, and that point
-    // lies on the law's own yield line v = (F - rest_force_n)/b, so the two curves
-    // cross AT THE DECLARED FORCE for every stream speed. CM measured the converged
-    // force moving < 0.2 N over a 5x speed sweep, against > 3 N for the smoothstep.
-    //
-    // `rest_force_n` IS THE SECOND HALF OF THE DESIGN and it is ours, not CM's. CM runs
-    // rest = 0 (a pure damper), which pins the force only while the plan keeps advancing
-    // faster than v_cross; at v_s -> 0 - a hand push with the policy stopped, or a
-    // policy's own press-and-hold phase - their equilibrium is F = 0 again. A one-sided
-    // rest force makes |F| <= rest_force_n a whole continuum of equilibria: the axis
-    // does not move at all there, so free space cannot be sought (the walk CM's
-    // f_ref has to bound with a fence) and a contact RESTS at rest_force_n instead of
-    // retreating to zero. rest_force_n = 0 reproduces CM exactly.
-    double gate_peak_force_n = 0.0;    // [N]    streamed contact CONVERGES here
-    double gate_rest_force_n = 0.0;    // [N]    an external contact RESTS here
-    double gate_peak_vel_mm_s = 0.0;   // [mm/s] the yield speed at peak_force_n; DERIVES b
-    // THE CURVE'S BEND, not exposed in yaml. CM 0049 SS3.2/3.3 verified 2: higher q
-    // leaves light contact freer but steepens the operating point, and the pair
-    // (light-contact margin, loop gain) is best there. Moving it is a design change.
-    static constexpr double kGateCurveExponent = 2.0;
-    double gate_close_tau_s = 0.10;   // fast to close - protective
-    double gate_open_tau_s = 0.40;    // slow to open  - a fast re-open makes it a relay
+    // Required measured-residual confidence band, applied to vector magnitude.
+    // Below low: no direction authority; at full: full physical gate authority.
+    double contact_noise_low_n = 0.0;
+    double contact_noise_full_n = 0.0;
+    double gate_close_tau_s = 0.10;
+    double gate_open_tau_s = 0.40;
 
     // ---- the fence ---------------------------------------------------------
     // A DEAD BACKSTOP, not an operating limit. Non-positive = no fence on that part.
@@ -1871,7 +1794,7 @@ struct ForceControlConfig {
     // nothing can drift between them (CM measured 9.5 m of offset in 300 s without
     // it). What it costs: on a fold path the deviation fence is unreachable, so
     // free-space drift under a standing wrench (a bad tare, a load in the gripper) is
-    // bounded only by rest_force_n, the deviation RATE caps and the ROI / collision /
+    // bounded only by target_force_n, the deviation RATE caps and the ROI / collision /
     // joint layers downstream. Re-tare before trusting it.
     //
     // A producer that re-issues an ABSOLUTE target every tick (UMI teleop) DECLINES
@@ -2146,16 +2069,8 @@ struct PreviewExecutionConfig {
     double max_result_age_sec = 0.0;
     double worker_poll_period_sec = 0.0;
     int max_source_rows = 0;
-    // THE PLAN LEASH ON THE PLAN CLOCK. How far the dispatched pose may lead the
-    // source's own output before the CHUNK FOLLOWER'S CLOCK is slowed (the same
-    // ramp as the divergence leash: 1.0 at start, min_gate at full; see
-    // control::planLeashGate). Slowing the clock slows the reference and the plan
-    // together, so it cannot step the command - unlike the position clamp tried and
-    // removed on 2026-09-10, which decelerated the command at 17.7 m/s2 on entry and
-    // stepped it back up on exit. Size `start` ABOVE the tracker's designed
-    // anticipation (the reference is the follower rolled forward, so the plan stands
-    // ahead of it before every acceleration; measured max 20 mm) and `full` at the
-    // runaway scale (25-45 mm). min_gate > 0 always: the clock slows, never stops.
+    // Lead above these thresholds reduces the future reference rate INSIDE the
+    // preview QP. Accepted output, derivatives and splices stay in physical time.
     double plan_lead_leash_start_m = 0.0;
     double plan_lead_leash_full_m = 0.0;
     double plan_lead_leash_min_gate = 0.0;

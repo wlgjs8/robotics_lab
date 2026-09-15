@@ -27,7 +27,7 @@ bool widenContactAuthorityWithRamp(PreviewContactConstraint& contact,double v0,d
   using Knot=PreviewContactConstraint::Knot;
   const double a_max=tracker.max_linear_acceleration_m_s2,j_max=tracker.max_linear_jerk_m_s3;
   const double h_plan=tracker.planning_dt_sec,h=servo_period_sec;
-  if(!(v0>0.0)||!(a_max>0.0)||!(j_max>0.0)||!(h_plan>0.0)||!(h>0.0))return false;
+  if(!(v0>=0.0)||!(a_max>0.0)||!(j_max>0.0)||!(h_plan>0.0)||!(h>0.0))return false;
   // The tracker certifies contact rows on Bernstein controls per servo sub-interval:
   // the middle control of a quadratic velocity piece sits |j| h^2 / 8 ABOVE the
   // curve, and the curve's chord between knots sits |j| h^2 / 8 below it, so a
@@ -257,6 +257,11 @@ bool transportPreviewExecutionResult(PreviewExecutionResult& result,
   for(std::size_t i=0;i<=result.trajectory.count;++i)
     result.trajectory.p.row(i).head<3>()+=dp.transpose();
   result.trajectory.rotation0=dR*result.trajectory.rotation0;
+  if(result.nominal_trajectory.valid) {
+    for(std::size_t i=0;i<=result.nominal_trajectory.count;++i)
+      result.nominal_trajectory.p.row(i).head<3>()+=dp.transpose();
+    result.nominal_trajectory.rotation0=dR*result.nominal_trajectory.rotation0;
+  }
   for(std::size_t i=0;i<result.phase_reference.count;++i) {
     auto& state=result.phase_reference.samples[i].kinematics;
     auto pose=math::se3FromPose(state.pose);pose.translation()+=dp;pose.rotation()=dR*pose.rotation();
@@ -279,6 +284,7 @@ struct PreviewExecutionWorker::Impl {
   };
   PreviewExecutionWorkerConfig cfg;
   PreviewTrajectoryTracker tracker;
+  PreviewTrajectoryTracker nominal_tracker;
   std::array<std::unique_ptr<RequestSlot>, kSlots> requests;
   std::array<ResultSlot, kSlots> results;
   std::array<std::atomic<std::uint64_t>,8> worker_status_counts{}, solve_status_counts{};
@@ -289,7 +295,7 @@ struct PreviewExecutionWorker::Impl {
 
   Impl(const PreviewTrackerConfig& tracker_cfg, const CartesianChunkFollowerConfig& follower_cfg,
        const PreviewExecutionWorkerConfig& worker_cfg)
-      : cfg(worker_cfg), tracker(tracker_cfg) {
+      : cfg(worker_cfg), tracker(tracker_cfg), nominal_tracker(tracker_cfg) {
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     static_assert(std::atomic<SlotState>::is_always_lock_free,
                   "Preview mailboxes require lock-free slot ownership");
@@ -328,6 +334,7 @@ struct PreviewExecutionWorker::Impl {
         !std::isfinite(r.generated_at_sec) || !std::isfinite(r.splice_at_sec) ||
         !std::isfinite(r.valid_until_sec) || !std::isfinite(r.cursor_time_sec) ||
         !std::isfinite(r.cursor_rate) || r.cursor_rate < 0.0 ||
+        !std::isfinite(r.reference_rate) || r.reference_rate < 0.0 || r.reference_rate > 1.0 ||
         !std::isfinite(r.contact_gate) || r.contact_gate<0.0 || r.contact_gate>1.0 ||
         !r.contact_normal_stand.allFinite() ||
         r.splice_at_sec <= r.generated_at_sec || r.valid_until_sec <= r.splice_at_sec ||
@@ -363,23 +370,13 @@ struct PreviewExecutionWorker::Impl {
       PreviewMotionSample initial;
       const double predecessor_duration=r.has_brake_predecessor?r.brake_predecessor.durationSec():r.predecessor.durationSec();
       const bool predecessor_valid=r.has_brake_predecessor?r.brake_predecessor.valid:r.predecessor.valid;
-      // THE PREDECESSOR IS SAMPLED ON THE EXECUTOR'S CLOCK (2026-09-15 night): the
-      // plan-lead leash dilates how fast the active plan is sampled, so the plan time
-      // it will have reached at the splice instant is what the executor predicts in
-      // `predecessor_sample_time_sec`, not the wall lag since its origin. A brake is
-      // sampled in wall time (it is not dilated). NaN = the wall formula.
-      const bool dilated = !r.has_brake_predecessor && std::isfinite(r.predecessor_sample_time_sec);
+      // The predecessor and successor share physical seconds. No alternate
+      // clock can supply derivatives that differ from the dispatched motion.
       if (!std::isfinite(r.predecessor_origin_sec) || !predecessor_valid ||
           r.identity.parent_plan_id == 0 || r.splice_at_sec < r.predecessor_origin_sec ||
-          (!r.has_brake_predecessor && !dilated &&
-           r.splice_at_sec > r.predecessor_origin_sec + predecessor_duration) ||
-          (dilated && (r.predecessor_sample_time_sec < 0.0 ||
-                       r.predecessor_sample_time_sec > predecessor_duration + 1e-9)))
+          (!r.has_brake_predecessor && r.splice_at_sec > r.predecessor_origin_sec + predecessor_duration))
         return finish(PreviewExecutionWorkerStatus::SpliceUnavailable);
-      // Absolute endpoint comparison above permits only cancellation roundoff,
-      // not a late or expired predecessor, to be clamped at its own endpoint.
-      const double t = r.has_brake_predecessor?r.splice_at_sec-r.predecessor_origin_sec:
-          dilated?std::clamp(r.predecessor_sample_time_sec,0.0,predecessor_duration):
+      const double t=r.has_brake_predecessor?r.splice_at_sec-r.predecessor_origin_sec:
           std::clamp(r.splice_at_sec-r.predecessor_origin_sec,0.0,predecessor_duration);
       if (!(r.has_brake_predecessor?r.brake_predecessor.sample(t, initial):r.predecessor.sample(t, initial)))
         return finish(PreviewExecutionWorkerStatus::SpliceUnavailable);
@@ -410,52 +407,89 @@ struct PreviewExecutionWorker::Impl {
     out.phase_reference.count=future.samples.size();
     std::copy(future.samples.begin(),future.samples.end(),out.phase_reference.samples.begin());
 
+    // Only the already selected segment may create future position demand.
+    // execute_steps is a publisher replacement cadence, not a commitment to
+    // execute later rows. Continue the last sample of this prefix at its own
+    // velocity; the next live tick/replan will expose the next selected row.
+    std::size_t prefix_end=0;
+    for(std::size_t k=1;k<future.samples.size();++k) {
+      if(future.samples[k].step_index!=future.samples[0].step_index || future.samples[k].stalled)break;
+      prefix_end=k;
+    }
+    const auto& prefix=future.samples[prefix_end];
+    out.trusted_prefix_sec=prefix.relative_time_sec;
+    const auto reference_state=[&](double time,FollowerOutputKinematics& state) {
+      if(time<=r.generated_at_sec)return sampleHistory(r,time,state);
+      const double relative=time-r.generated_at_sec;
+      if(relative<=prefix.relative_time_sec)return sampleFuture(future,time,state);
+      state=prefix.kinematics;
+      const double dt=relative-prefix.relative_time_sec;
+      auto pose=math::se3FromPose(state.pose);
+      pose.translation()+=dt*Eigen::Vector3d(state.velocity.x,state.velocity.y,state.velocity.z);
+      pose.rotation()=pose.rotation()*math::exp3(dt*Eigen::Vector3d(
+          state.velocity.rx,state.velocity.ry,state.velocity.rz));
+      state.pose=math::poseFromSe3(pose);state.acceleration={};
+      return finitePreviewState(state);
+    };
+
     PreviewReference reference;
     reference.count = tracker.config().horizon_steps + 1;
     for (std::size_t k = 0; k < reference.count; ++k) {
       const double relative = k * tracker.config().planning_dt_sec;
-      const double from_generation = lead + relative;
+      const double from_generation = lead + r.reference_rate * relative;
       const double time = std::min(r.generated_at_sec + from_generation,
           r.cursor_time_sec + r.cursor_rate * from_generation);
       FollowerOutputKinematics state;
-      const bool valid = time <= r.generated_at_sec ? sampleHistory(r, time, state)
-                                                   : sampleFuture(future, time, state);
+      const bool valid = reference_state(time,state);
       if (!valid) return finish(PreviewExecutionWorkerStatus::PreviewUnavailable);
       reference.knots[k].time_sec = relative;
       reference.knots[k].pose = state.pose;
     }
+    // Obtain a physically feasible free candidate from the SAME reference and
+    // seed. An arbitrarily small force restriction must approach this candidate,
+    // not suddenly substitute the (often much slower) raw follower velocity.
+    const auto remaining_budget=[&] {
+      return std::min(r.splice_at_sec,r.valid_until_sec)-
+          PreviewExecutionWorker::monotonicNowSec()-cfg.servo_period_sec;
+    };
     PreviewContactConstraint contact;
     if(contact_active) {
+      if(remaining_budget()<=0)return finish(PreviewExecutionWorkerStatus::Late);
+      out.solve_attempted=true;
+      const auto nominal=nominal_tracker.plan(reference,out.initial,{},
+          PreviewContactSolveMode::Automatic,remaining_budget());
+      out.nominal_solve_time_sec=nominal.diagnostics.solve_time_sec;
+      if(!nominal.accepted() || !nominal_tracker.exportTrajectory(out.nominal_trajectory)) {
+        out.diagnostics=nominal.diagnostics;
+        return finish(PreviewExecutionWorkerStatus::SolveRejected);
+      }
       contact.enabled=true;contact.normal_stand=r.contact_normal_stand;
-      const auto intervals=static_cast<std::size_t>(std::ceil(tracker.durationSec()/cfg.servo_period_sec))+1;
-      if(2*intervals+1>contact.knots.size())return finish(PreviewExecutionWorkerStatus::InvalidRequest);
-      const double first_canonical_tick=std::floor(lead/cfg.servo_period_sec)+1;
-      double previous_time=0,previous_velocity=0;
-      for(std::size_t k=0;k<=intervals;++k) {
-        // Preserve original canonical-grid corners even for a splice between
-        // servo ticks. Resampling onto a shifted grid would change its bound.
-        const double relative=k==0?0.:std::min((first_canonical_tick+k-1)*cfg.servo_period_sec-lead,
-                                             tracker.durationSec());
-        FollowerOutputKinematics allowed;
-        // Authority follows canonical wall time, never a lagged/catching-up
-        // tracking cursor or old historical contact direction.
-        if(!sampleFuture(future,r.splice_at_sec+relative,allowed))
-          return finish(PreviewExecutionWorkerStatus::PreviewUnavailable);
-        const double velocity=r.contact_normal_stand.dot(
-            Eigen::Vector3d{allowed.velocity.x,allowed.velocity.y,allowed.velocity.z});
-        // The canonical follower already applied its advance gate. Multiplying
-        // by contact_gate again would impose a second attenuation. Escape is
-        // unrestricted; zero crossing insertion represents max(0, linear v)
-        // exactly, instead of a secant that invents positive closing authority.
-        if(k && ((previous_velocity<0&&velocity>0)||(previous_velocity>0&&velocity<0))) {
-          const double crossing=previous_time+(relative-previous_time)*
-              (-previous_velocity)/(velocity-previous_velocity);
-          if(crossing>previous_time && crossing<relative)
-            contact.knots[contact.count++]={crossing,0.0};
+      // A certified upper envelope of the free candidate's closing velocity.
+      // On each servo subinterval use its three Bernstein controls. Each end
+      // knot takes the maximum of its adjacent intervals, hence the linear
+      // envelope bounds the full quadratic, including between samples. Its
+      // conservatism shrinks with the servo grid; at g=1 the free optimum is
+      // feasible exactly. At g=0 all bounds are zero, independent of that margin.
+      const auto& nominal_path=out.nominal_trajectory;
+      contact.count=1;contact.knots[0]={0.,0.};
+      for(std::size_t segment=0;segment<nominal_path.count;++segment) {
+        const double start=segment*nominal_path.step_sec;
+        const double end=(segment+1)*nominal_path.step_sec;
+        for(double a=start;a<end;) {
+          const double b=std::min(a+cfg.servo_period_sec,end);
+          if(!(b>a) || contact.count>=contact.knots.size())return finish(PreviewExecutionWorkerStatus::InvalidRequest);
+          PreviewMotionSample sample;
+          if(!nominal_path.sample(a,sample))return finish(PreviewExecutionWorkerStatus::SpliceUnavailable);
+          const double v=contact.normal_stand.dot(sample.linear_velocity);
+          const double accel=contact.normal_stand.dot(sample.linear_acceleration);
+          const double jerk=contact.normal_stand.dot(nominal_path.jerk.row(segment).head<3>());
+          const double dt=b-a;
+          const double upper=r.contact_gate*std::max({0.,v,v+.5*dt*accel,v+dt*accel+.5*dt*dt*jerk});
+          auto& previous=contact.knots[contact.count-1];
+          previous.upper_velocity_m_s=std::max(previous.upper_velocity_m_s,upper);
+          contact.knots[contact.count++]={b,upper};
+          a=b;
         }
-        contact.knots[contact.count++]={relative,std::max(0.0,velocity)};
-        previous_time=relative;previous_velocity=velocity;
-        if(relative==tracker.durationSec())break;
       }
     }
     // SPLICE FROM THE PREDECESSOR'S OWN SAMPLE. Since the contact clamp's deletion
@@ -472,7 +506,7 @@ struct PreviewExecutionWorker::Impl {
       // yet holding anything back) is never refused as Infeasible: the plan gets the
       // fastest brake it can realise from that state, and nothing looser (2026-09-10
       // pm: 27 such refusals in 5 s fed the expiry-brake cycle under a hand push).
-      if(closing_velocity>bound0+tol &&
+      if((closing_velocity>bound0+tol || (closing_velocity>=bound0-tol && closing_acceleration>tol)) &&
          !widenContactAuthorityWithRamp(contact,closing_velocity,-closing_acceleration,
                                         tracker.config(),cfg.servo_period_sec))
         return finish(PreviewExecutionWorkerStatus::InvalidRequest);
@@ -482,16 +516,18 @@ struct PreviewExecutionWorker::Impl {
     // Leave one configured servo period for mailbox delivery and admission.
     // Spending the looser offline QP budget after this request's splice would
     // only starve fresher requests; the deadline and predecessor stay immutable.
-    const double solve_budget=std::min(r.splice_at_sec,r.valid_until_sec)-
-        PreviewExecutionWorker::monotonicNowSec()-cfg.servo_period_sec;
+    const double solve_budget=remaining_budget();
     if(solve_budget<=0.0)return finish(PreviewExecutionWorkerStatus::Late);
     out.solve_attempted = true;
     const auto solved = tracker.plan(reference,out.initial,contact,
         PreviewContactSolveMode::Automatic,solve_budget);
     out.diagnostics = solved.diagnostics;
+    out.diagnostics.solve_time_sec+=out.nominal_solve_time_sec;
+    out.contact_authority=contact;
     if (!solved.accepted()) return finish(PreviewExecutionWorkerStatus::SolveRejected);
     if (!tracker.exportTrajectory(out.trajectory))
       return finish(PreviewExecutionWorkerStatus::SolveRejected);
+    if(!contact_active)out.nominal_trajectory=out.trajectory;
     const double completed = PreviewExecutionWorker::monotonicNowSec();
     if (completed >= r.splice_at_sec || completed >= r.valid_until_sec)
       return finish(PreviewExecutionWorkerStatus::Late);

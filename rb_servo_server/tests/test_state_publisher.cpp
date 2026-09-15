@@ -836,7 +836,8 @@ bool testPreviewTelemetryAndCapabilitySurviveWitnessBudget() {
         {"backlog_sec",.012},{"rate",1.03},{"plan_age_sec",.024},
         {"accepted_position_error_m",.00015},{"accepted_rotation_error_rad",.00025},
         {"solve_time_sec",.0004},{"submitted",23},{"accepted",19},{"rejected",3},
-        {"expired",2},{"contact_guard_count",5},{"plan_lead_m",.0035},{"plan_clock_gate",.75}};
+        {"expired",2},{"contact_guard_count",5},{"plan_lead_m",.0035},{"plan_clock_gate",.75},
+        {"reference_rate_gate",1.0}};
     // Check the complete original telemetry contract while allowing explicitly
     // additive fields. Large integer source IDs must not pass through double.
     for (auto it = expected.begin(); it != expected.end(); ++it) RB_CHECK(left.at(it.key()) == it.value());

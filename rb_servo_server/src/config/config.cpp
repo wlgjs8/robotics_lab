@@ -2545,18 +2545,13 @@ void validateConfig(const DualArmConfig& cfg) {
             if (!cfg.kinematics.enable) {
                 throw std::runtime_error("force_control.enable requires kinematics.enable");
             }
-            // ---- THE ONE LAW AND ITS GATE PAIR (2026-09-15) --------------------------
-            // The gate pair is what b is DERIVED from, so it is required whether or not
-            // the gate is enabled; gate.enable = false only pins the ratio at 1.
-            validatePositiveFinite(fc.gate_peak_force_n, "force_control.force_gate.peak_force_n");
-            validateNonNegativeFinite(fc.gate_rest_force_n, "force_control.force_gate.rest_force_n");
-            validatePositiveFinite(fc.gate_peak_vel_mm_s, "force_control.force_gate.peak_vel_mm_s");
-            if (fc.gate_rest_force_n >= fc.gate_peak_force_n) {
-                throw std::runtime_error(
-                    "force_control.force_gate.rest_force_n must be < peak_force_n - the gate's "
-                    "crossing speed is (peak - rest)/b, so equal values leave the curve with no "
-                    "speed to return at the declared force and the equilibrium disappears");
-            }
+            validatePositiveFinite(fc.target_force_n, "force_control.target_force_n");
+            validatePositiveFinite(fc.contact_noise_low_n, "force_control.force_gate.contact_noise_low_n");
+            validatePositiveFinite(fc.contact_noise_full_n, "force_control.force_gate.contact_noise_full_n");
+            if(!(fc.contact_noise_low_n<fc.contact_noise_full_n && fc.contact_noise_full_n<fc.target_force_n))
+                throw std::runtime_error("force_control requires contact_noise_low_n < contact_noise_full_n < target_force_n");
+            if(!fc.gate_enable)
+                throw std::runtime_error("force_control.enable requires force_gate.enable: target force needs nominal closing authority");
             validatePositiveFinite(fc.gate_close_tau_s, "force_control.force_gate.close_tau_s");
             validatePositiveFinite(fc.gate_open_tau_s, "force_control.force_gate.open_tau_s");
             // FAST TO CLOSE, SLOW TO OPEN. Reversing them makes the gate a relay
@@ -2567,11 +2562,7 @@ void validateConfig(const DualArmConfig& cfg) {
                     "re-opens faster than it closes is a relay against the contact");
             }
             validatePositiveFinite(fc.law.m, "force_control.law.translation.m");
-            if (!(fc.law.b > 0.0) || !std::isfinite(fc.law.b)) {
-                throw std::runtime_error(
-                    "force_control.law.b was not derived - force_gate.peak_force_n, rest_force_n "
-                    "and peak_vel_mm_s must all be declared (b = (peak - rest) / peak_vel)");
-            }
+            validatePositiveFinite(fc.law.b, "force_control.law.translation.damping_n_s_m");
             // SEMI-IMPLICIT EULER: b < m/dt is the no-per-tick-oscillation limit and
             // b >= 2m/dt diverges outright. The old loader raised m silently to hold
             // b <= m/(2 dt); a number an operator predicts the robot from may not
@@ -2581,9 +2572,8 @@ void validateConfig(const DualArmConfig& cfg) {
                 if (fc.law.m < m_min) {
                     throw std::runtime_error(
                         "force_control.law.translation.m (" + std::to_string(fc.law.m) +
-                        " kg) must be >= 2*b*dt = " + std::to_string(m_min) + " kg for the derived "
-                        "b = " + std::to_string(fc.law.b) + " N*s/m - raise m, or lower b by raising "
-                        "force_gate.peak_vel_mm_s / narrowing (peak_force_n - rest_force_n)");
+                        " kg) must be >= 2*b*dt = " + std::to_string(m_min) + " kg for the explicit "
+                        "damping = " + std::to_string(fc.law.b) + " N*s/m - raise m or lower damping_n_s_m");
                 }
             }
             validatePositiveFinite(fc.max_velocity_m_s, "force_control.max_velocity_m_s");
@@ -4742,7 +4732,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         // DELETED KEYS ARE REFUSED, NOT IGNORED (2026-09-15, the same rule the gate's
         // dead keys got on 2026-09-11). Every one of these named a piece of the
         // hold/stream split that is gone: there is ONE source-agnostic law on the force
-        // VECTOR (m*v' + b*v = (|F| - rest_force_n)+ * F_hat, rotation rigid), hold and
+        // VECTOR (m*v' + b*v = (|F| - target_force_n)+ * F_hat, rotation rigid), hold and
         // stream are SOURCES of the same stage, a Hold under force_control is always
         // covered with zero demand, and the fold is structural (k = 0 by construction).
         // A config that still carries one of them was written for a different controller
@@ -4756,7 +4746,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 {"hold_compliance", "a Hold under force_control is ALWAYS a compliant source; "
                                     "there is no separate switch"},
                 {"hold_engage_force_n", "the hand-guide latch is gone - the one-sided law is its "
-                                        "own threshold (nothing moves at or below rest_force_n)"},
+                                        "own threshold (zero drive at or below target_force_n)"},
                 {"hold_release_force_n", "the hand-guide latch is gone (see hold_engage_force_n)"},
                 {"hold_relatch_max_force_n", "the relatch guard kept a SPRING from anchoring at "
                                              "the pushed pose; with k = 0 there is no spring and "
@@ -4768,14 +4758,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(sec, dead[0]))
                     fail(std::string("force_control.") + dead[0] + " was DELETED on 2026-09-15. "
                          "There is ONE source-agnostic law on the force VECTOR "
-                         "(m*v' + b*v = (|F| - rest_force_n)+ * F_hat, rotation rigid); hold and "
+                         "(m*v' + b*v = (|F| - target_force_n)+ * F_hat, rotation rigid); hold and "
                          "stream are SOURCES of the same stage, a Hold under force_control is "
                          "always covered with zero demand, and the fold is structural (k = 0 by "
                          "construction) - " + dead[1], sec);
             }
         }
         validateAllowedKeys(sec, {
-            "enable", "law", "force_gate",
+            "enable", "target_force_n", "law", "force_gate",
             "max_deviation_m", "max_deviation_rad",
             "max_velocity_m_s", "max_acceleration_m_s2",
             "max_velocity_rad_s", "max_acceleration_rad_s2",
@@ -4791,26 +4781,19 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }, "force_control");
         ForceControlConfig& fc = cfg.force_control;
         if (has(sec, "enable")) fc.enable = asBool(sec["enable"], "force_control.enable");
+        if (has(sec,"target_force_n")) fc.target_force_n=asDouble(sec["target_force_n"],"force_control.target_force_n");
         if (has(sec, "law")) {
             const YAML::Node law = sec["law"];
             validateAllowedKeys(law, {"translation", "rotation"}, "force_control.law");
             if (has(law, "translation")) {
                 const YAML::Node t = law["translation"];
-                // ONE NUMBER, ONE PLACE. b, k, mode and ref_force are not typeable: b IS
-                // (peak - rest)/peak_vel, k is 0 by construction (a spring RETURNS the arm,
-                // reverted 2026-09-10), and the law acts on the force VECTOR so there is
-                // no per-axis mode and rest_force_n is the rest point.
-                for (const char* dead : {"b", "k", "mode", "ref_force"}) {
-                    if (has(t, dead))
-                        fail(std::string("force_control.law.translation.") + dead +
-                             " may not be typed (2026-09-15): b is DERIVED from force_gate as "
-                             "(peak_force_n - rest_force_n) / peak_vel_mm_s, k is 0 by construction "
-                             "(a spring returns the arm instead of leaving it where it was dragged), "
-                             "and the law acts on the force VECTOR (no per-axis mode; rest_force_n is "
-                             "the rest point). Only m is typed", t);
+                for(const char* dead:{"b","k","mode","ref_force"}) {
+                    if(has(t,dead))fail(std::string("force_control.law.translation.")+dead+
+                        " may not be typed (2026-09-15): use m and damping_n_s_m; k=0, isotropic excess-force law",t);
                 }
-                validateAllowedKeys(t, {"m"}, "force_control.law.translation");
-                if (has(t, "m")) fc.law.m = asDouble(t["m"], "force_control.law.translation.m");
+                validateAllowedKeys(t,{"m","damping_n_s_m"},"force_control.law.translation");
+                if(has(t,"m"))fc.law.m=asDouble(t["m"],"force_control.law.translation.m");
+                if(has(t,"damping_n_s_m"))fc.law.b=asDouble(t["damping_n_s_m"],"force_control.law.translation.damping_n_s_m");
             }
             if (has(law, "rotation")) {
                 // ROTATION IS RIGID (2026-09-03, operator): every torque that stands on
@@ -4825,48 +4808,27 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }
         if (has(sec, "force_gate")) {
             const YAML::Node g = sec["force_gate"];
-            // DELETED KEYS ARE REFUSED, NOT IGNORED (2026-09-11, CM 0049's rule). A
-            // config that still declares `max_force_n` asks for a gate that fades to
-            // ZERO at that force, which converges the contact to 0 N, not to it.
+            // Retired schemas must fail explicitly, including old classifier keys.
             for (const char* dead : {"max_force_n", "max_torque_nm", "stream_judge_lpf_hz",
                                      "stream_arm_force_n", "stream_release_force_n",
                                      "stream_arm_dwell_sec", "stream_release_dwell_sec"}) {
                 if (has(g, dead))
                     fail(std::string("force_control.force_gate.") + dead + " was DELETED on "
-                         "2026-09-11. The gate is one exponential whose crossing with the law's "
-                         "yield line is pinned at (peak_force_n, peak_vel_mm_s); a fade to zero "
-                         "converges the contact to 0 N instead of to the declaration, and the "
-                         "sustained-contact stream channel it needed a direction from is gone "
-                         "(the contact direction is the measured force)", g);
+                         "2026-09-11. Use the current single target, explicit damping and "
+                         "contact_noise_low_n/contact_noise_full_n confidence band", g);
             }
-            validateAllowedKeys(g, {"enable", "peak_force_n", "rest_force_n", "peak_vel_mm_s",
-                                    "close_tau_s", "open_tau_s"},
-                                "force_control.force_gate");
-            if (has(g, "enable")) fc.gate_enable = asBool(g["enable"], "force_control.force_gate.enable");
-            if (has(g, "peak_force_n")) fc.gate_peak_force_n = asDouble(g["peak_force_n"], "force_control.force_gate.peak_force_n");
-            if (has(g, "rest_force_n")) fc.gate_rest_force_n = asDouble(g["rest_force_n"], "force_control.force_gate.rest_force_n");
-            if (has(g, "peak_vel_mm_s")) fc.gate_peak_vel_mm_s = asDouble(g["peak_vel_mm_s"], "force_control.force_gate.peak_vel_mm_s");
-            if (has(g, "close_tau_s")) fc.gate_close_tau_s = asDouble(g["close_tau_s"], "force_control.force_gate.close_tau_s");
-            if (has(g, "open_tau_s")) fc.gate_open_tau_s = asDouble(g["open_tau_s"], "force_control.force_gate.open_tau_s");
+            for(const char* dead:{"peak_force_n","rest_force_n","peak_vel_mm_s"})
+                if(has(g,dead))fail(std::string("force_control.force_gate.")+dead+
+                    " was DELETED on 2026-09-15: declare target_force_n and law.translation.damping_n_s_m; old/new force schemas cannot be mixed",g);
+            validateAllowedKeys(g,{"enable","contact_noise_low_n","contact_noise_full_n","close_tau_s","open_tau_s"},"force_control.force_gate");
+            if(has(g,"enable"))fc.gate_enable=asBool(g["enable"],"force_control.force_gate.enable");
+            if(has(g,"contact_noise_low_n"))fc.contact_noise_low_n=asDouble(g["contact_noise_low_n"],"force_control.force_gate.contact_noise_low_n");
+            if(has(g,"contact_noise_full_n"))fc.contact_noise_full_n=asDouble(g["contact_noise_full_n"],"force_control.force_gate.contact_noise_full_n");
+            if(has(g,"close_tau_s"))fc.gate_close_tau_s=asDouble(g["close_tau_s"],"force_control.force_gate.close_tau_s");
+            if(has(g,"open_tau_s"))fc.gate_open_tau_s=asDouble(g["open_tau_s"],"force_control.force_gate.open_tau_s");
         }
-        // ---- b IS NOT TYPED, IT IS DERIVED (CM 0049; derived-only since 2026-09-15) ----
-        // b = (peak_force_n - rest_force_n) / peak_vel_mm_s: the yield speed the law
-        // has at the declared peak, and the same b the gate computes its crossing
-        // speed from - one source for both halves, or the crossing drifts. Printed:
-        // this is the number an operator predicts the robot from.
-        if (fc.gate_peak_force_n > 0.0 && fc.gate_peak_vel_mm_s > 0.0 &&
-            fc.gate_peak_force_n > fc.gate_rest_force_n) {
-            fc.law.b = (fc.gate_peak_force_n - fc.gate_rest_force_n) /
-                       (fc.gate_peak_vel_mm_s * 1e-3);
-            if (fc.enable) {
-                std::cerr << "[INFO] force_control.law.b = " << fc.law.b
-                          << " N*s/m (DERIVED from force_gate{peak " << fc.gate_peak_force_n
-                          << " N, rest " << fc.gate_rest_force_n << " N, "
-                          << fc.gate_peak_vel_mm_s << " mm/s}); m " << fc.law.m
-                          << " kg -> tau " << (fc.law.b > 0.0 ? fc.law.m / fc.law.b * 1e3 : 0.0)
-                          << " ms\n";
-            }
-        }
+        if(fc.enable && (!has(sec,"law") || !has(sec["law"],"rotation")))
+            fail("force_control.law.rotation must be explicitly declared rigid",sec);
         if (has(sec, "max_deviation_m")) fc.max_deviation_m = asDouble(sec["max_deviation_m"], "force_control.max_deviation_m");
         if (has(sec, "max_deviation_rad")) fc.max_deviation_rad = asDouble(sec["max_deviation_rad"], "force_control.max_deviation_rad");
         if (has(sec, "max_velocity_m_s")) fc.max_velocity_m_s = asDouble(sec["max_velocity_m_s"], "force_control.max_velocity_m_s");

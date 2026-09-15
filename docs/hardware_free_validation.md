@@ -220,3 +220,12 @@ for explicit parameters, reproduction commands and rejected stability cases.
 The 6,498 audit scenario runs are not 6,498 passing tests: stable release and
 last-second force criteria are separated from initial impacts, sensor/servo
 uncertainty and coupled contact. Physical acceptance has not been performed.
+
+## Force/preview revision checks
+
+The [single-target contract](reference/force_preview_single_target.md) identifies the new
+source, solver, tare-noise and lifecycle tests. Run the full CTest suite plus the GUI/policy
+Python suites. `test_preview_execution_worker --wall-clock-benchmark` reports actual worker
+latency against the tracked splice deadline. Do not treat a frozen-clock numerical test as a
+real-time latency measurement. Raw chunk-row JSONL is required for an exact source replay; a
+fixed force log cannot validate a new physical feedback loop.

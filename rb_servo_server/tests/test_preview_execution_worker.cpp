@@ -1,4 +1,5 @@
 #include "rb_servo/control/preview_execution_worker.hpp"
+#include "rb_servo/config/config.hpp"
 #include "rb_servo/control/follower_preview_reference.hpp"
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/math/se3.hpp"
@@ -6,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <new>
@@ -90,6 +92,45 @@ bool sameState(const PreviewMotionState& a,const PreviewMotionState& b,double to
       (a.linear_velocity-b.linear_velocity).norm()<tol && (a.linear_acceleration-b.linear_acceleration).norm()<tol &&
       (a.angular_velocity_body-b.angular_velocity_body).norm()<tol &&
       (a.angular_acceleration_body-b.angular_acceleration_body).norm()<tol;
+}
+
+// Regression for the free-space run: changing only g=1 to g=1-eps used
+// to reverse the 40 ms output from +9.57 to -1.94 mm/s.
+bool testContactRestrictionConvergesToTheFreeCandidate() {
+  setExternalSteadyNs(1000000000ULL);
+  auto fc=followerConfig();CartesianChunkFollower f(fc);auto fr=frame();
+  for(std::size_t k=0;k<fr.delta.size();++k)fr.delta[k].x=k<4?.0002:.008;
+  f.submitDeltaFrame(fr,pose(.4));f.tick(.002);
+  auto tc=trackerConfig();tc.jerk_difference_weight=.01;
+  PreviewExecutionWorker worker(tc,fc,workerConfig());
+  auto r=request(f);r.contact_normal_stand={1,0,0};
+  CHECK(worker.trySubmit(f,r));PreviewExecutionResult free;CHECK(waitResult(worker,free));CHECK(free.accepted());
+  for(const Eigen::Vector3d normal:{Eigen::Vector3d(1,0,0),Eigen::Vector3d(1,2,3).normalized(),
+                                   Eigen::Vector3d(-1,2,-3).normalized()}) {
+    r.contact_normal_stand=normal;
+  double previous_error=1e9;
+  for(double eps:{1e-2,1e-4,1e-6}) {
+    r.contact_gate=1.-eps;
+    CHECK(worker.trySubmit(f,r));PreviewExecutionResult cut;CHECK(waitResult(worker,cut));
+    CHECK(cut.accepted());double error=0.;
+    for(int k=0;k<=120;++k) {
+      PreviewMotionSample a,b;CHECK(free.trajectory.sample(k*.002,a));CHECK(cut.trajectory.sample(k*.002,b));
+      error=std::max(error,(a.linear_velocity-b.linear_velocity).norm());
+    }
+    std::cout<<"gate epsilon "<<eps<<" max velocity difference "<<error<<" m/s\n";
+    CHECK(error<=previous_error+1e-6);previous_error=error;
+    if(eps==1e-6)CHECK(error<1e-5);
+  }
+  }
+  // An unselected tail can change radically without changing this prefix.
+  auto other=fr;for(std::size_t k=4;k<other.delta.size();++k)other.delta[k].x=-.03;
+  CartesianChunkFollower f2(fc);f2.submitDeltaFrame(other,pose(.4));f2.tick(.002);
+  r=request(f2);CHECK(worker.trySubmit(f2,r));PreviewExecutionResult tail;CHECK(waitResult(worker,tail));CHECK(tail.accepted());
+  for(int k=0;k<=120;++k) {
+    PreviewMotionSample a,b;CHECK(free.trajectory.sample(k*.002,a));CHECK(tail.trajectory.sample(k*.002,b));
+    CHECK(sameState(a,b,1e-7));
+  }
+  return true;
 }
 
 bool testSnapshotAndExport() {
@@ -368,13 +409,15 @@ bool testVelocityAuthorityAtSourceZeroCrossing() {
   }
   CHECK(crosses);
   for(int k=0;k<=24000;++k) {
-    const double t=.24*k/24000,source_t=.011+t;
-    const std::size_t index=std::min<std::size_t>(source_t/.002,canonical.samples.size()-2);
-    const double u=(source_t-index*.002)/.002;
-    const double source=(1-u)*canonical.samples[index].kinematics.velocity.x+
-        u*canonical.samples[index+1].kinematics.velocity.x;
+    const double t=.24*k/24000;
+    const auto& cert=out.contact_authority;std::size_t hi=1;
+    while(hi+1<cert.count && cert.knots[hi].time_sec<t)++hi;
+    const auto& a=cert.knots[hi-1];const auto& b=cert.knots[hi];
+    const double u=(t-a.time_sec)/(b.time_sec-a.time_sec);
+    const double bound=(1-u)*a.upper_velocity_m_s+u*b.upper_velocity_m_s;
     PreviewMotionSample output;CHECK(out.trajectory.sample(t,output));
-    CHECK(output.linear_velocity.x()<=std::max(0.,source)+trackerConfig().feasibility_tolerance);
+    CHECK(output.linear_velocity.x()<=bound+trackerConfig().feasibility_tolerance);
+
   }
   return true;
 }
@@ -440,10 +483,45 @@ bool testGaugeTransportPreservesC2AndIdentity() {
   corrupt=result;corrupt.gauge.rotation.coeffs().setZero();CHECK(!transportPreviewExecutionResult(corrupt,target,1e-7));
   return true;
 }
+bool wallClockBenchmark() {
+  setExternalSteadyNs(0);
+  const auto root=std::filesystem::path(__FILE__).parent_path().parent_path();
+  const auto config=loadConfigFromYaml((root/"config/stack_real.yaml").string());
+  PreviewExecutionConfig execution;
+  for(const auto& p:config.cartesian_control.tcp_pose_target_profiles)
+    if(p.name=="flow_infer_preview")execution=p.ruckig_follower.preview_execution;
+  CHECK(execution.enable);
+  auto fc=followerConfig();
+  PreviewExecutionWorker worker(execution.tracker,fc,{.002,execution.worker_poll_period_sec,
+      execution.max_result_age_sec,static_cast<std::size_t>(execution.max_source_rows)});
+  for(double gate:{1.,.99,.5,0.}) {
+    std::vector<double> times;int accepted=0,rejected=0;
+    for(int k=0;k<40;++k) {
+      CartesianChunkFollower follower(fc);auto fr=frame();
+      fr.recv_time=PreviewExecutionWorker::monotonicNowSec();
+      follower.submitDeltaFrame(fr,pose(.4));follower.tick(.002);
+      const double generated=PreviewExecutionWorker::monotonicNowSec();
+      auto r=request(follower,generated);r.splice_at_sec=generated+execution.splice_lead_sec;
+      r.valid_until_sec=generated+execution.max_result_age_sec;
+      r.contact_gate=gate;r.contact_normal_stand=Eigen::Vector3d(1,2,3).normalized();
+      CHECK(worker.trySubmit(follower,r));PreviewExecutionResult result;CHECK(waitResult(worker,result));
+      times.push_back((result.completed_at_sec-generated)*1e3);
+      if(result.accepted()) {++accepted;CHECK(result.completed_at_sec<r.splice_at_sec);}
+      else ++rejected;
+    }
+    std::sort(times.begin(),times.end());
+    std::cout<<"wall-clock gate="<<gate<<" accepted="<<accepted<<" rejected="<<rejected
+      <<" worker_ms median="<<times[times.size()/2]<<" p95="<<times[37]<<" max="<<times.back()
+      <<" splice_budget_ms="<<execution.splice_lead_sec*1000<<'\n';
+    CHECK(accepted>0); // throughput is reported; this is not a WCET guarantee.
+  }
+  return true;
+}
 } // namespace
 
-int main() {
-  const bool okay=testSnapshotAndExport()&&testWorkerSpliceAndAdmission()&&testRefusalsAndBoundedSnapshots()&&
+int main(int argc,char** argv) {
+  if(argc==2 && std::string(argv[1])=="--wall-clock-benchmark")return wallClockBenchmark()?0:1;
+  const bool okay=testContactRestrictionConvergesToTheFreeCandidate()&&testSnapshotAndExport()&&testWorkerSpliceAndAdmission()&&testRefusalsAndBoundedSnapshots()&&
       testPhysicalContactAndBrakePredecessor()&&testClampedDispatchSplice()&&testVelocityAuthorityAtSourceZeroCrossing()&&testGaugeTransportPreservesC2AndIdentity();
   setExternalSteadyNs(0);
   if (!okay) return 1;

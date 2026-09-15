@@ -22,8 +22,9 @@ Current review-sensitive boundaries:
   supported profile. The checked-out controller-manager RB3 model still says
   `+/-155 deg`; do not propagate it here, and align that external config in a
   separately authorized change.
-- Force-control v2 is live and hardware-validated; an untared arm is not
-  covered, and the tracked gate/spring/fence configuration is indivisible.
+- Force/preview now uses one 20 N target, 2–3 N confidence, explicit damping,
+  source folds and physical-time QP execution. Physical acceptance is pending;
+  an untared arm remains uncovered. See [the current contract](docs/reference/force_preview_single_target.md).
 - `servo.worker_setpoint_interpolation` is implemented and unit-tested but is
   still `false` in `stack_real.yaml` pending its own supervised hardware A/B.
 - The tracked pgmode-sim telemetry tuple remains `run_mode: real`,

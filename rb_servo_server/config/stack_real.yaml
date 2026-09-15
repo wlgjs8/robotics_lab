@@ -1624,90 +1624,29 @@ force_torque:
     applied_force_mm: [0.0, 0.0, 202.642]
 
 # =============================================================================
-# FORCE CONTROL - ONE LAW, ONE STAGE, ANY SOURCE (2026-09-15, operator: "hold / stream
-# 구분 없이, 더 범용적인 force control").
-#
-#     m*v' + b*v = (|F| - rest_force_n)+ * F_hat      translation VECTOR, stand frame, k = 0
-#
-# F is the compensated, PRE-deadzone physical force at the TCP (low-passed by
-# wrench_filter_hz), F_hat its direction. |F| <= rest_force_n: nothing moves, in ANY
-# direction (free space is never sought). Above it the arm yields ALONG the measured
-# force at (|F| - rest)/b whatever the direction - 24 N -> 8 mm/s, 30 N -> 20 mm/s - and
-# STAYS where it was dragged: every tick the deviation is folded into the source's
-# plan (plan == arm, no standing offset, no spring-back). Rotation is RIGID.
-#
-# WHO DRIVES THE PLAN IS A SOURCE OF THIS STAGE, NOT A LAW:
-#   chunk_follower  a policy plan; demand = its advance, the fold moves the plan.
-#   hold            a Hold under force control is ALWAYS a zero-demand source: it yields
-#                   to a hand above rest_force_n, stays, and its pose is walled at the
-#                   ROI/floor. No latch, no relatch guard, no separate law.
-#   absolute        an absolute TcpPoseTarget (UMI teleop): demand = the raw target's
-#                   step rate, the fold is declined (the source re-issues its target)
-#                   and max_deviation_m below is its dead backstop.
-#
-# THE GATE (CM 0049) cuts only the SOURCE's advance INTO F_hat, judged on |F|:
-#   g = (v_cross/v_s)^((|F|/peak_force_n)^2), v_cross = (peak - rest)/b = peak_vel_mm_s,
-# so the gate's speed at peak_force_n IS the law's yield there and a streamed contact
-# converges at peak_force_n for every demand (verified 12.00 N at 30/60/150 mm/s in the
-# closed-loop model, test_force_control). A Hold has demand 0 -> g = 1 by construction.
-#
-# KNOWN LIMIT: the projective cut leaves the advance perpendicular to F_hat alone, so
-# under FRICTION the normal force settles above the declaration (mu 0.3: ~12.3 N at
-# 30 mm/s, ~15.8 N at 150 mm/s). A deadlock ("gate shut, law at rest") is impossible:
-# the law always has a yield direction. The impact PEAK is v*sqrt(k_env*m) and is not
-# bounded by any number here (39.5 N measured at a 115 mm/s approach).
-#
-# WHAT WAS HERE BEFORE (a `stream` law + a `hold` law, per-axis {m,b,k,mode} triads,
-# one declared tool-z press axis, the 5/2 N hand-guide latch, the 5 N relatch guard,
-# `hold_compliance`, `fold_deviation`) is refused by the loader with a dated message.
-# The measured history that justified each of those keys lives in git
-# (rb_servo_server/config/stack_real.yaml before 2026-09-15) and in AGENTS.md.
-# =============================================================================
+# Force control: one 20 N target, k=0 translational yield-and-stay, rigid rotation.
+# Explicit m/b=40 ms; direction confidence is based on compensated residuals.
+# Preview force authority is applied once inside the QP, sampled in wall time.
+# Physical acceptance is pending. No impact ceiling or universal stability claim.
+# Contract and migration: docs/reference/force_preview_single_target.md (repo root).
 force_control:
   enable: true
+  target_force_n: 20.0
 
   law:
-    # [kg] the virtual mass; tau = m/b = 40 ms. b is NOT typed - it is DERIVED below
-    # ((24 - 20) N / 8 mm/s = 500 N*s/m). 20 kg since 2026-09-11 (m = 2*b*dt is the
-    # loader's floor at this b: 2 kg).
-    translation: {m: 20.0}
+    translation: {m: 20.0, damping_n_s_m: 500.0}
     rotation: rigid
 
-  # THE CONVERGENCE PAIR (CM wiki/decisions/0049, adopted 2026-09-11).
-  #   peak_force_n   the force a STREAMED contact converges to, at any demand.
-  #   rest_force_n   the law's rest point: at or below it nothing moves, in any
-  #                  direction; a hand or a stopped press rests here. OURS, not CM's
-  #                  (CM runs rest = 0 and accepts F -> 0 when the plan stops).
-  #   peak_vel_mm_s  the yield speed AT peak_force_n. It DERIVES the law's b:
-  #                  b = (peak - rest)/peak_vel = 2 N / 4 mm/s = 500 N*s/m.
-  # 10 N was this cell's threshold from 2026-07-24 to 2026-09-15; 20 N is the operating
-  # value since 2026-09-15 (evening, operator). WHY IT MOVED: on the 15:57 policy run the
-  # arm's OWN dynamic force - 15-24 Hz tool/servo ringing excited by the executor's
-  # 12 m/s^2 re-plans, 68-78 % of the force energy, zero contact - sat at 5-15 N after the
-  # inertial term, and at v_cross/v_s ~ 0.03 the curve reads g(5 N) = 0.55, g(8 N) = 0.22:
-  # half the plan cut for a force that was the robot shaking. Doubling rest/peak puts
-  # that residual at g(5 N) = 0.87 with the same b; peak_vel doubles with the span so b
-  # stays 500 N*s/m (tau 40 ms) and v_cross doubles to 8 mm/s, which also moves the
-  # operating point out of the curve's steepest tail. Paired with wrench_filter_hz 3.0
-  # below (the other half of the same fix).
-  # b is the only delay-margin knob (docs/reference/force_control_stability_margin.md):
-  # at b 500 the loop is stable against contacts below ~15 kN/m (the TPU fingertips),
-  # marginal against a rigid jig. To raise b, lower peak_vel_mm_s.
   force_gate:
     enable: true
-    peak_force_n:   24.0
-    rest_force_n:   20.0
-    peak_vel_mm_s:   8.0
-    close_tau_s: 0.10       # fast to close - protective
-    # 0.40 s = CM's shipped value and 2x their measured ringing boundary (below 200 ms
-    # the contact loop sustains a limit cycle). 0.15 s was tried on 2026-09-11 and rang:
-    # the gate's median authority doubled and the 5-15 Hz ripple grew 50 %. Slower only
-    # rectifies (1.0 s: 5.5x below the curve's own value).
-    open_tau_s:  0.40
+    # 2026-09-15 right-arm compensated 3 Hz residual: post-stop maximum 0.641 N.
+    # Confidence only, no subtraction from the physical 20 N target.
+    contact_noise_low_n: 2.0
+    contact_noise_full_n: 3.0
+    close_tau_s: 0.10
+    open_tau_s: 0.40
 
-  # A DEAD BACKSTOP, not an operating limit: on a fold path (chunk_follower, hold) the
-  # deviation is booked into the plan every tick and never accumulates here; only the
-  # absolute-target source (fold declined) can reach it.
+  # Per-episode deviation backstop; source-owned folds keep accepted yield.
   max_deviation_m: 0.040
   max_deviation_rad: 0.2617993878     # 15 deg
 
@@ -1722,7 +1661,7 @@ force_control:
   # 2026-09-15; GATE-ONLY since the same night, see law_filter_hz below). Filters FORCE,
   # not motion; the servo command path keeps its own
   # filters off. The logged/published wrench stays the RAW measurement; the filtered one
-  # is *_fc_wrench_filt_*. It is applied to the VECTOR before the magnitude, which is
+  # is *_fc_gate_wrench_filt_*. It is applied to the VECTOR before the magnitude, which is
   # what makes it work against ringing (a low-pass on |F| would rectify the ringing into
   # a DC offset instead).
   # 3 Hz (2026-09-15 evening, operator): the force the sensor reads while the arm MOVES
@@ -1741,7 +1680,7 @@ force_control:
   # position-controlled (servo_log_20260915_161234, 11.0-11.85 s; gate >= 0.87, yield 0).
   # The yield must answer a real impact within milliseconds, so the law reads its own
   # pole: 25 Hz is the 2026-08-27 shock filter (takes the single-tick 53.8 N burst out,
-  # ~6 ms lag). What keeps the arm's own 5-15 N ringing out of the yield is rest_force_n
+  # ~6 ms lag). What keeps the arm's own 5-15 N ringing out of the yield is target_force_n
   # (20 N), not this filter. The loader refuses law_filter_hz below wrench_filter_hz;
   # 0 = raw wrench to the law.
   law_filter_hz: 25.0

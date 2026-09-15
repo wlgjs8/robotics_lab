@@ -150,5 +150,53 @@ class AnalyzeForceStageTests(unittest.TestCase):
         self.assertTrue(out.exists())
 
 
+class SingleTargetAuditTests(unittest.TestCase):
+    def make_log(self, speed_scale=1., wrong_gate=False, missing_force=False):
+        n=1500
+        force=np.zeros((n,3));force[200:700]=[18.,0.,24.]
+        force[700:1000]=[-24.,18.,0.]
+        vel=np.zeros((n,3));physical=np.ones(n);confidence=np.zeros(n)
+        smooth=lambda x: np.clip(x,0.,1.)**2*(3.-2.*np.clip(x,0.,1.))
+        for i in range(1,n):
+            mag=np.linalg.norm(force[i]);drive=force[i]*max(0.,mag-20.)/max(mag,1e-30)
+            vel[i]=vel[i-1]+DT*(drive-500.*vel[i-1])/20.
+            desired=1.-smooth(mag/20.);tau=.1 if desired<physical[i-1] else .4
+            physical[i]=physical[i-1]+DT/tau*(desired-physical[i-1])
+            confidence[i]=smooth(mag-2.)
+        cols={"loop_start_time_ns":10**16+np.arange(n)*2_000_000,
+              "right_fc_covered":np.ones(n),"right_fc_source":np.full(n,"hold"),
+              "right_fc_source_demand_m_s":np.zeros(n),"right_fc_target_force_n":np.full(n,20.),
+              "right_fc_gate_m_eff":np.full(n,20.),"right_fc_gate_b_eff":np.full(n,500.),
+              "right_fc_physical_gate":physical,"right_fc_contact_confidence":confidence,
+              "right_fc_gate_translation":np.ones(n) if wrong_gate else 1.-confidence*(1.-physical),
+              "right_fc_gate_force_n":np.linalg.norm(force,axis=1)}
+        for j,axis in enumerate("xyz"):
+            if not missing_force:cols[f"right_fc_wrench_filt_f{axis}_n"]=force[:,j]
+            cols[f"right_fc_vel_{axis}_m_s"]=speed_scale*vel[:,j]
+            cols[f"right_ft_comp_sensor_nodz_f{axis}_n"]=np.full(n,100.)
+        path=write_csv(list(cols),zip(*cols.values()));self.addCleanup(path.unlink)
+        return path
+
+    def test_dynamic_law_uses_its_filtered_input_and_coast(self):
+        report=audit.analyze(self.make_log(),("right",),audit.Params())
+        checks=by_name(report)
+        self.assertEqual(report["arms"][0]["law_schema"],"single_target")
+        self.assertEqual(checks["yield_law"]["status"],audit.PASS,checks["yield_law"])
+        self.assertEqual(checks["rest_equilibrium"]["status"],audit.PASS,checks["rest_equilibrium"])
+        self.assertEqual(checks["gate_model"]["status"],audit.PASS,checks["gate_model"])
+        self.assertEqual(checks["hold_source"]["status"],audit.PASS)
+        self.assertEqual(checks["floor_episodes"]["status"],audit.SKIPPED)
+
+    def test_wrong_dynamics_and_gate_fail(self):
+        checks=by_name(audit.analyze(self.make_log(.5,True),("right",),audit.Params()))
+        self.assertEqual(checks["yield_law"]["status"],audit.FAIL)
+        self.assertEqual(checks["gate_model"]["status"],audit.FAIL)
+
+    def test_missing_law_vector_never_falls_back_to_raw_force(self):
+        checks=by_name(audit.analyze(self.make_log(missing_force=True),("right",),audit.Params()))
+        self.assertEqual(checks["yield_law"]["status"],audit.SKIPPED)
+        self.assertEqual(checks["rest_equilibrium"]["status"],audit.SKIPPED)
+
+
 if __name__ == "__main__":
     unittest.main()

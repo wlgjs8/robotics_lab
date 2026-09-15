@@ -425,40 +425,8 @@ ArmCommand applyPoseTrackSmd(
     const math::Vector3 normal =
         contact_normal_stand != nullptr ? *contact_normal_stand : math::Vector3::Zero();
     ArmCommand smoothed = command;
-    const Pose6D before = tracker->currentPose();
-    smoothed.tcp_target_stand = tracker->step(dt_sec);
-    // THE FORCE GATE ON THE ABSOLUTE-TARGET PATH (2026-09-04). Until now only the
-    // chunk follower's plan advance was gated; a TcpPoseTarget aimed under a surface
-    // drove this tracker into it, the spring stretched to the 40 mm fence, and the arm
-    // went rigid - a spring without its gate, the exact pairing the loader refuses.
-    // Same projective rule as the follower's (only the component pushing INTO the
-    // contact is cut); the difference is where the cut is booked: the tracker's STATE
-    // is held here (constrainTranslation), the goal is left alone.
-    //
-    // JUDGED ON THE ONE CURVE, ALONG THE MEASURED F_hat (2026-09-15). This used to run
-    // a second "stream channel" of the gate (a 2 Hz filtered force vector with its own
-    // arm/release Schmitt, to 2026-09-11) and then a DECLARED tool axis (to
-    // 2026-09-15). The curve no longer fades to zero, so a sign flip of the direction at
-    // low force removes nothing (g ~ 1 there), and the law yields along the same F_hat
-    // the cut is taken along, so there is no lateral force the gate could close for
-    // that nothing yields against.
-    if (gate != nullptr && gate->translation() < 1.0 && normal.squaredNorm() > 0.5) {
-        const math::Vector3 p0(before.x, before.y, before.z);
-        const math::Vector3 p1(smoothed.tcp_target_stand.x, smoothed.tcp_target_stand.y,
-                               smoothed.tcp_target_stand.z);
-        const double proj = (p1 - p0).dot(normal);
-        if (proj < 0.0) {
-            const math::Vector3 cut = (1.0 - gate->translation()) * proj * normal;
-            const double removed = cut.norm();
-            const math::Vector3 held = p0 + (p1 - p0) - cut;
-            // The velocity drop is PROPORTIONAL to the closure, like the cut.
-            tracker->constrainTranslation(held, normal, 1.0 - gate->translation());
-            smoothed.tcp_target_stand.x = held.x();
-            smoothed.tcp_target_stand.y = held.y();
-            smoothed.tcp_target_stand.z = held.z();
-            if (gate_removed_m != nullptr) *gate_removed_m = removed;
-        }
-    }
+    smoothed.tcp_target_stand=tracker->step(dt_sec,gate?gate->translation():1.0,normal);
+    if(gate_removed_m)*gate_removed_m=tracker->lastStepInfo().force_removed_m;
     return smoothed;
 }
 
@@ -2162,38 +2130,11 @@ DualArmServoLoop::DualArmServoLoop(
         // the two declared forces, the crossing they pin and the yield they buy.
         const ForceControlConfig& f = config.force_control;
         const double b = f.law.b;
-        const double v_cross = (b > 0.0 && f.gate_peak_force_n > f.gate_rest_force_n)
-            ? (f.gate_peak_force_n - f.gate_rest_force_n) / b : 0.0;
-        const auto yield_mm_s = [&](double force_n) {
-            return b > 0.0 ? std::max(0.0, force_n - f.gate_rest_force_n) / b * 1e3 : 0.0;
-        };
-        std::cerr << "[INFO] force_control ENABLED: ONE law, any source (2026-09-15)\n";
-        std::cerr << "[INFO]   translation  m*v' + b*v = (|F| - rest)+ * F_hat   m " << f.law.m
-                  << " kg, b " << b << " N*s/m (DERIVED: (" << f.gate_peak_force_n << " - "
-                  << f.gate_rest_force_n << ") N / " << f.gate_peak_vel_mm_s << " mm/s), tau "
-                  << (b > 0.0 ? f.law.m / b * 1e3 : 0.0) << " ms\n";
-        std::cerr << "[INFO]   rest " << f.gate_rest_force_n
-                  << " N: at or below it nothing moves, in any direction. Above it the arm yields "
-                     "ALONG the measured force: " << yield_mm_s(f.gate_peak_force_n) << " mm/s at "
-                  << f.gate_peak_force_n << " N, " << yield_mm_s(20.0)
-                  << " mm/s at 20 N. Rotation RIGID\n";
-        std::cerr << "[INFO]   gate " << (f.gate_enable ? "ON" : "OFF")
-                  << ": a streamed contact converges at " << f.gate_peak_force_n
-                  << " N for every demand (crossing " << v_cross * 1e3 << " mm/s, q "
-                  << ForceControlConfig::kGateCurveExponent << ", close " << f.gate_close_tau_s
-                  << " s, open " << f.gate_open_tau_s
-                  << " s); it cuts only the SOURCE's advance into F_hat, judged on |F|\n";
-        std::cerr << "[INFO]   sources: chunk_follower (fold -> plan) | hold (demand 0, fold -> hold "
-                     "pose, ROI/floor walled) | absolute (fold declined, fence "
-                  << f.max_deviation_m * 1e3 << " mm / " << f.max_deviation_rad * 180.0 / M_PI
-                  << " deg)\n";
-        std::cerr << "[INFO]   a Hold under force control ALWAYS yields to a hand above "
-                  << f.gate_rest_force_n << " N and STAYS where it was dragged (no spring-back)\n";
-        std::cerr << "[INFO]   wrench filter " << f.wrench_filter_hz << " Hz | oscillation guard "
-                  << (f.oscillation_guard_enable ? "ON" : "OFF") << " | rate caps "
-                  << f.max_velocity_m_s * 1e3 << " mm/s, " << f.max_acceleration_m_s2 << " m/s^2\n";
-        std::cerr << "[INFO]   known limit: under friction the normal force settles above the "
-                     "declaration (mu 0.3: ~12.3 N at 30 mm/s, ~15.8 N at 150 mm/s)\n";
+        std::cerr << "[INFO] force control: target " << f.target_force_n
+                  << " N, m " << f.law.m << " kg, damping " << b
+                  << " N*s/m, confidence " << f.contact_noise_low_n << ".."
+                  << f.contact_noise_full_n << " N; excess-force yield, rigid rotation\n";
+
     }
     left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
@@ -5330,6 +5271,21 @@ void DualArmServoLoop::applyPreviewExecution(ArmId arm, ArmCommand& command,
     const bool enabled=profile.ruckig_follower.preview_execution.enable;
 #ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
     const int i=arm==ArmId::Left?0:1;
+    if(auto* stopping=preview_executor_[i]; stopping && stopping->stopping()) {
+        const auto output=stopping->stopOutput(last_loop_start_ns_*1e-9);
+        preview_used_this_tick_[i]=true;
+        auto ctx=armContext(arm);ctx.abc_telemetry.preview_execution=stopping->telemetry();
+        if(output.fault) {
+            command.mode=ControlMode::Hold;command.has_tcp_target=false;
+            preview_dispatch_transaction_[i].valid=false;
+            recordChunkFollowerFaultRequest(arm,output.reason);return;
+        }
+        command.mode=ControlMode::TcpPoseTarget;command.has_tcp_target=true;
+        command.tcp_target_stand=output.pose;command.has_gripper=false;
+        ctx.abc_telemetry.stage_tcp_target_stand=output.pose;
+        preview_dispatch_transaction_[i]=stopping->transaction(output.pose,output.pose);
+        return;
+    }
     control::LivePreviewExecution* selected=nullptr;
     if (enabled) for (auto& entry:preview_profile_executors_) {
         if (entry.name==profile.name) {selected=entry.arm[i].get();break;}
@@ -5370,14 +5326,16 @@ void DualArmServoLoop::applyPreviewExecution(ArmId arm, ArmCommand& command,
     const JointArray& previous_previous=i==0?left_prevprev_sent_q_deg_:right_prevprev_sent_q_deg_;
     const bool stationary=control::sentJointsStationary(ctx.prev_sent_q_deg,previous_previous);
     const auto& gate=i==0?left_force_gate_:right_force_gate_;
-    // This additional output constraint belongs to a sustained contact episode.
-    // The canonical follower keeps its existing tick gate, including approach
-    // and release; a tiny filtered direction plus a release slew must not create
-    // a new binary speed constraint throughout otherwise free movement.
+    // Preview owns force authority once. The raw follower's slot carries only
+    // geometry here; contact uses the force gate's confidence-qualified direction.
     const auto contact=control::followerPreviewContactAuthority(force.reference_strip_enabled,
-        gate.translation(),ctx.chunk_follower.advanceDirection());
+        gate.translation(),gate.contactNormal());
     const auto output=selected->step(last_loop_start_ns_*1e-9,ctx.chunk_follower,reference,
                                    stationary,contact.gate,contact.normal_into_stand);
+    if(output.active && !output.fault && !selected->retiredSourceAdvance().isZero(0.0) &&
+       !ctx.chunk_follower.absorbOffset(-selected->retiredSourceAdvance(),Eigen::Quaterniond::Identity())) {
+        hold();recordChunkFollowerFaultRequest(arm,"preview source retirement failed");return;
+    }
     abc.preview_execution=selected->telemetry();
     if (output.fault) {
         hold();recordChunkFollowerFaultRequest(arm,std::string("preview_execution: ")+output.reason);return;
@@ -5796,6 +5754,27 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     double dt_sec
 ) {
     const RuckigFollowerConfig& rf = profile.ruckig_follower;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    const int preview_index=arm_id==ArmId::Left?0:1;
+    preview_force_owner_[preview_index]=rf.preview_execution.enable;
+    if(auto* executor=preview_executor_[preview_index]; executor && executor->initialized() &&
+       (command.mode==ControlMode::Hold || command.compliant_hold || executor->stopping())) {
+        if(executor->stopComplete()) {
+            executor->reset("source_stopped");
+        } else {
+            if(!executor->requestStop("source_stop_braking"))
+                recordChunkFollowerFaultRequest(arm_id,"preview source stop could not be certified");
+            // Retire the old source, including its window. A later command cannot
+            // resume a stale row; a new frame is required after the bounded stop.
+            follower->deactivate();output_smd->deactivate();smd_tracker->deactivate();
+            *submitted_recv_seq=chunk_frame_cache_recv_seq_;
+            resetChunkFollowerEngageWait(arm_id);
+            force_source_[preview_index]=ForceSource{};
+            return command; // applyPreviewExecution owns the finite brake below.
+        }
+    }
+#endif
+
     const bool delta_preview = rf.controller == RuckigFollowerController::DeltaPreview;
     // The measured TCP carries the force overlay's standing deviation physically; the
     // plan does not. Compare plan against measured on the PLAN's side of the overlay.
@@ -6449,19 +6428,10 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         leash_gate = control::planLeashGate(
             abc.follower_divergence_pos_m, abc.follower_divergence_ang_rad, leash);
     }
-#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
-    // THE PREVIEW LEASH READS THE EXECUTOR'S LEAD (2026-09-10 pm, operator decision).
-    // Under preview execution the divergence above is the wrong signal (the executor
-    // sits between this plan and the robot), so the leash reads how far the DISPATCHED
-    // pose leads this follower's own output (last tick's - the executor runs after this
-    // stage - which is 2 ms of a quantity that moves in tens of ms), and it acts on the
-    // CLOCK. The preview reference is this follower rolled forward BY A COPY that carries
-    // the same gate, so a slowed clock slows the reference and the plan with it. Slowing the
-    // clock slows the reference and, through it, the plan - the command is never
-    // stepped. The position clamp that did step it was removed the same evening
-    // (live_preview_execution.cpp). The ramp starts above the tracker's designed
-    // anticipation, so ordinary motion never touches it.
     double lead_gate = 1.0;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    // Leash the QP's future reference when output leads the live source. The
+    // accepted command remains on wall time with certified derivatives.
     if (rf.plan_leash_enable && rf.preview_execution.enable) {
         if (auto* executor = preview_executor_[arm_id == ArmId::Left ? 0 : 1]) {
             control::PlanLeashParams leash;
@@ -6469,17 +6439,10 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             leash.full_m = rf.preview_execution.plan_lead_leash_full_m;
             // Position only. The angular ramp is left degenerate (start == full == 0),
             // which planLeashGate evaluates to 1.0 for the 0 passed here: the plan's
-            // rotation rides the same clock, so slowing on the position lead slows it.
+            // rotation uses the same future reference rate.
             leash.min_gate = rf.preview_execution.plan_lead_leash_min_gate;
-            // THE LEASH ACTS ON THE EXECUTOR'S CLOCK, NOT THE FOLLOWER'S (2026-09-15 night).
-            // Slowing the follower's knot clock slowed the pose the lead is MEASURED from
-            // while the command clock (wall time) ran on: the lead grew by exactly the
-            // plan time the gate removed, a positive feedback - measured 0.6 -> 47.7 mm in
-            // 0.25 s with the reference standing still (servo_log_20260915_161234). The
-            // executor now samples its active plan at this rate; the follower keeps its
-            // clock, so the reference catches the command up and the lead closes.
             lead_gate = control::planLeashGate(executor->telemetry().plan_lead_m, 0.0, leash);
-            executor->setPlanClockGate(lead_gate);
+            executor->setReferenceRateGate(lead_gate);
         }
     }
 #endif
@@ -6506,8 +6469,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // path the force input was prepared before this stage, so the cut at this tick's
     // segment boundary sees this tick's gate; on the legacy path it is one tick old.
     publishAdvanceGate(arm_id);
-    // Contact-aware following is gone with the F/T stack: no external reaction
-    // is supplied, which is the follower's own blind-mode behaviour.
+    // Force limiting is source-gating for legacy paths, QP-owned for preview.
     const Pose6D pre_filter = follower->tick(dt_sec);
     abc.follower_prefilter_stand = pre_filter;
     // PROFILE FEED-FORWARD (2026-09-06): the SMD is fed the plan's velocity and
@@ -7428,7 +7390,16 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             // stream end with compliance on). Keep the Hold raw until the brake has
             // brought the arm to rest; the nominal then latches where it stopped.
             if (motionGeneratorInFlight(fc_arm)) {
-                overlay.freeze();
+                bool preview_brake=false;
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+                const auto* executor=preview_executor_[i];
+                preview_brake=executor && executor->initialized() && !executor->failed();
+#endif
+                // Preview keeps composing the same force integrator onto its
+                // finite brake. Freezing v every tick would erase yield momentum
+                // and make the next Hold a different force law. The finite brake
+                // retains its deviation fence; Hold takes the fold after stopping.
+                if(!preview_brake)overlay.freeze();
                 // No source while the brake owns the arm: a stale plan demand must not
                 // keep the gate closed into the Hold that follows.
                 force_source_[static_cast<std::size_t>(i)] = ForceSource{};
@@ -7966,7 +7937,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // The QP consumes the canonical state AFTER the pending, one-shot safety
         // folds. Its output is independent of the next delta integration anchor.
         for (int i=0;i<2;++i) {
-            if (arm_raw_mode[i]==ControlMode::TcpPoseTarget)
+            if (arm_raw_mode[i]==ControlMode::TcpPoseTarget || arm_brake_candidate[i])
                 applyPreviewExecution(arm_ctx[i].arm,arm_pose_track_command[i],*arm_tcp_profile[i]);
             else
                 resetPreviewExecution(arm_ctx[i].arm,"mode_changed");
@@ -10929,6 +10900,11 @@ bool DualArmServoLoop::forceControlCovered(
 }
 
 bool DualArmServoLoop::motionGeneratorInFlight(ArmId arm) {
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    if(const auto* executor=preview_executor_[arm==ArmId::Left?0:1];
+       executor && executor->initialized() && !executor->failed() &&
+       (!executor->stopping() || !executor->stopComplete()))return true;
+#endif
     auto ctx = armContext(arm);
     const SmdPoseTracker& tracker = ctx.pose_track_smd;
     if (tracker.active() &&
@@ -11032,7 +11008,7 @@ void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
     // still answers "what did the sensor say".
     tel.wrench_stand = pipe.compStand();
     // THE ONE WRENCH FORCE CONTROL READS (2026-09-15): compensated, BEFORE the
-    // deadzone. rest_force_n is then the force a sensor reads, not that force plus the
+    // deadzone. target_force_n is then the force a sensor reads, not that force plus the
     // deadzone (judged on the deadzoned wrench the gate arrived 3 N late, 2026-09-04).
     // The law, the gate's magnitude and the contact normal all read this one filtered
     // vector, so they cannot disagree about where the contact is or how hard it is.
@@ -11090,15 +11066,8 @@ void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
     const math::Vector3 gate_m(gate_w.tx, gate_w.ty, gate_w.tz);
     const math::Vector3 f_stand(law_w.fx, law_w.fy, law_w.fz);
     const math::Vector3 m_stand(law_w.tx, law_w.ty, law_w.tz);
-    // THE GATE READS THE SOURCE'S DEMAND, one tick old on the preview path (this
-    // preparation runs before the stages there). Two milliseconds of staleness on a
-    // quantity that moves in tens of ms, against the alternative of feeding the gate
-    // its own output - which reads g = 1 at the operating point and loses the
-    // crossing. A Hold's demand is exactly 0 by construction, so a hand push in Hold
-    // leaves the gate at 1 (it used to read the Hold's own yield: 0.095 on
-    // 2026-09-15). The contact normal every consumer cuts along is the GATE's
-    // (slow) direction: a cut direction that flips with ringing was the 52 Hz
-    // failure of 2026-09-11.
+    // Demand remains diagnostic only. Confidence and physical force determine
+    // authority even for a stationary goal; the law independently reads 25 Hz.
     gate.update(gate_f, gate_m, force_source_[i].demand_m_s);
     contact_normal_[i] = gate.contactNormal();
     prepared_force_wrench_[i] = {f_stand.x(), f_stand.y(), f_stand.z(),
@@ -11125,6 +11094,12 @@ void DualArmServoLoop::publishAdvanceGate(ArmId arm) {
         ctx.chunk_follower.setAdvanceGate(1.0, math::Vector3::Zero());
         return;
     }
+#ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
+    if(preview_force_owner_[i]) {
+        ctx.chunk_follower.setAdvanceGate(1.0,math::Vector3::Zero());
+        return;
+    }
+#endif
     // +F_hat = the free-space direction; the follower cuts advances whose projection
     // on it is negative, the preview QP negates it into its closing direction.
     ctx.chunk_follower.setAdvanceGate(gate.translation(), contact_normal_[i]);
@@ -11158,7 +11133,7 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
 
     // ONE LAW, EVERY SOURCE, EVERY TICK (2026-09-15). No engagement latch and no law
     // switch: the one-sided vector law is its own threshold (nothing moves at or below
-    // rest_force_n, in any direction), and the gate throttles the SOURCE's advance,
+    // target_force_n, in any direction), and the gate throttles the SOURCE's advance,
     // not the law. A gated source stops WALKING; the arm never stops being soft.
     overlay.step(f_stand, m_stand);
 
@@ -11207,13 +11182,15 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     tel.gate_b_eff = gate.bEff();
     tel.gate_m_eff = gate.mEff();
     tel.gate_cross_speed_m_s = gate.crossSpeedMs();
-    tel.gate_rest_force_n = config_.force_control.gate_rest_force_n;
-    tel.gate_peak_force_n = config_.force_control.gate_peak_force_n;
+    tel.target_force_n = config_.force_control.target_force_n;
+    tel.gate_rest_force_n = tel.gate_peak_force_n = tel.target_force_n;
+    tel.contact_confidence = gate.confidence();
+    tel.physical_gate = gate.physicalGate();
     tel.gate_closed = gate.closed();
 
     // A SATURATION IS NEVER SILENT: while pinned at the fence the overlay holds the
     // bound instead of tracking, and the operator must know which state they are in.
-    // Reachable only on the absolute-target source (the fold declines there).
+    // Literal PTP and finite source-stop brakes can retain fenced deviation.
     bool& prev = left ? left_overlay_bounded_prev_ : right_overlay_bounded_prev_;
     if (tel.bounded && !prev) {
         std::cerr << "[WARN] force overlay " << toString(arm)
@@ -11228,11 +11205,9 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     bool& gate_prev = left ? left_gate_closed_prev_ : right_gate_closed_prev_;
     if (tel.gate_closed && !gate_prev) {
         std::cerr << "[INFO] force gate " << toString(arm) << " nearly shut (|F| "
-                  << tel.gate_force_n << " N vs peak " << config_.force_control.gate_peak_force_n
-                  << " N, rest " << config_.force_control.gate_rest_force_n << " N, source "
-                  << tel.source << " demanding " << tel.source_demand_m_s * 1e3
-                  << " mm/s) - the source's advance into the contact is down to the law's own "
-                     "yield. This is the design: the contact converges to peak_force_n\n";
+                  << tel.gate_force_n << " N, target " << tel.target_force_n
+                  << " N, confidence " << tel.contact_confidence << ", source " << tel.source
+                  << ") - nominal closing motion constrained; excess-force yield remains active\n";
     } else if (!tel.gate_closed && gate_prev) {
         std::cerr << "[INFO] force gate " << toString(arm) << " re-opened\n";
     }
@@ -11279,8 +11254,11 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm, ForceSourceKind source,
             sink = "hold";
             break;
         case ForceSourceKind::AbsoluteTarget:
-            tel.fold_sink = "declined: absolute target (the source re-issues it; fenced)";
-            return;
+            if(!armContext(arm).pose_track_smd.active()) {
+                tel.fold_sink="declined: absolute PTP has no persistent source";return;
+            }
+            sink="absolute_relative_goal";
+            break;
         case ForceSourceKind::None:
             tel.fold_sink = "declined: no source this tick";
             return;
@@ -11337,6 +11315,13 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm, ForceSourceKind source,
         } else {
             total = 0.0;
         }
+    } else if(source==ForceSourceKind::AbsoluteTarget) {
+        auto& tracker=armContext(arm).pose_track_smd;
+        const Pose6D composed=overlay.compose(tracker.currentPose());
+        const Pose6D walled=clampPoseToRoi(clampPoseToFloor(composed));
+        accepted=math::Vector3(walled.x-tracker.currentPose().x,
+            walled.y-tracker.currentPose().y,walled.z-tracker.currentPose().z);
+        tracker.shift(accepted,dR);
     } else {
         // BOOKED, NOT APPLIED (2026-09-07). The chunk-follower sink no longer shifts
         // the plan here, mid-tick. The deviation is booked into the SAME pending

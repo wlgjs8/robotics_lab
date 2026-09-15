@@ -198,12 +198,17 @@ void FtPipeline::tareSample() {
     tare_force_sum_ += force(raw_sensor_) - force(gravity_sensor_) - force(inertial_sensor_);
     tare_torque_sum_ += torque(raw_sensor_) - torque(gravity_sensor_) - torque(inertial_sensor_);
     ++tare_count_;
+    const math::Vector3 f=force(raw_sensor_)-force(gravity_sensor_)-force(inertial_sensor_);
+    const math::Vector3 delta=f-tare_force_mean_;
+    tare_force_mean_+=delta/static_cast<double>(tare_count_);
+    tare_force_m2_+=delta.cwiseProduct(f-tare_force_mean_);
 }
 
 void FtPipeline::invalidateBias() {
     bias_ = Wrench6D{};
     bias_valid_ = false;
     bias_source_ = "none";
+    tare_noise_valid_=false;tare_committed_samples_=0;tare_force_std_n_.setZero();
     tareReset();
 }
 
@@ -211,10 +216,11 @@ void FtPipeline::tareReset() {
     tare_force_sum_.setZero();
     tare_torque_sum_.setZero();
     tare_count_ = 0;
+    tare_force_mean_.setZero();tare_force_m2_.setZero();
 }
 
 bool FtPipeline::tareCommit(int min_samples, std::string* reason) {
-    if (tare_count_ < min_samples) {
+    if (tare_count_ < min_samples || tare_count_<=0) {
         if (reason != nullptr) {
             *reason = "tare needs " + std::to_string(min_samples) + " samples, got " +
                       std::to_string(tare_count_);
@@ -227,6 +233,9 @@ bool FtPipeline::tareCommit(int min_samples, std::string* reason) {
     bias_valid_ = true;
     bias_source_ = "tare";
     ++bias_generation_;
+    tare_committed_samples_=tare_count_;
+    tare_noise_valid_=tare_count_>1;
+    tare_force_std_n_=tare_noise_valid_ ? math::Vector3((tare_force_m2_/static_cast<double>(tare_count_-1)).cwiseMax(0.0).cwiseSqrt()) : math::Vector3::Zero();
     tareReset();
     // A NEW ZERO MOVED WHAT ZERO MEANS, so the tool-load estimate must forget what it
     // had converged to and re-seed against the new bias instead of asserting a mass
@@ -311,6 +320,10 @@ void FtPipeline::fillTelemetry(FtTelemetry* out) const {
     out->bias_source = bias_source_;
     out->bias_generation = bias_generation_;
     out->tare_samples = tare_count_;
+    out->tare_committed_samples=tare_committed_samples_;
+    out->tare_noise_valid=tare_noise_valid_;
+    out->tare_force_std_n={tare_force_std_n_.x(),tare_force_std_n_.y(),tare_force_std_n_.z()};
+    out->tare_force_noise_rms_n=tare_force_std_n_.norm();
     out->load_force_n = load_force_n_;
     out->load_mass_kg = load_mass_kg_;
     out->load_settled = load_settled_;
