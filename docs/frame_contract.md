@@ -139,6 +139,28 @@ desired trajectory against `tcp_ref_stand` when the state stream recommends it.
 Physical real-motion reports should compare desired trajectory against
 `tcp_actual_stand`.
 
+## F/T Acquisition Pose
+
+The F/T sensor follows the physical flange. `DualArmServoLoop::stepFtPipeline`
+uses the measured `q_actual_deg` accompanying the wrench in the same `RobotState`
+to obtain `R_stand_flange`. Both joint-state validity and actual-joint validity,
+finite measured joints, and a valid flange FK are required. Sent joints and
+controller reference joints must not substitute for a missing measurement.
+
+The matrix maps flange-axis vectors into stand axes. Tool gravity is evaluated
+with its transpose; compensation and the TCP moment shift retain the measured
+sensor basis, mass, COM and TCP calibration. This change aligns data within the
+received state; it does not establish hardware-level synchronization between
+the controller's F/T and encoder acquisition channels. No acceleration-based
+tool inertia subtraction is enabled by this change.
+
+CSV logging preserves `*_state_acquisition_sequence` (received-state identity)
+and `*_state_robot_time_ns` (raw controller clock) alongside host receive time.
+These do not certify that all joints and F/T were acquired together. In recorded
+RB5 runs, changing subsets of joint values alternate inside fresh state packets;
+unchanged values alone cannot distinguish stationary joints from held samples.
+See `reference/force_reference_development.md` for the offline observability audit.
+
 ## Joint-Only Versus Geometry-Dependent Behavior
 
 Joint-only actions do not require measured calibration.

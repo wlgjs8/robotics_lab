@@ -2059,8 +2059,21 @@ force_control:
   # F/T housing (a cable or a resting hand; the teleop mux was idle, no gripper command,
   # no mode change). That is what "vibration without pushing" was. A hand that means it
   # pushes past 5 N without noticing; at b = 1000 the arm answers at 5 mm/s from there.
-  hold_engage_force_n: 5.0
-  hold_release_force_n: 2.0
+  # 2026-09-15: LATCH OFF (operator). Since ba89b399 (2026-09-11) the latch was fed the
+  # PRESS-AXIS component instead of |F| - the same variable was repurposed for the
+  # gate and the latch inherited it silently. Measured servo_log_20260915_112545,
+  # right arm hand-guide: a 20-40 N push along tool x carried only 2-6 N on tool z,
+  # so the latch toggled 31 times on that component (engage at 5.0-5.5 N, release
+  # at <= 2 N), the arm was frozen for 65 % of the time |F| exceeded 10 N, and every
+  # release edge was a kick (freeze() zeroing 35-74 mm/s in one tick: 1,000-3,280
+  # deg/s^2, 17 m/s^2 of command acceleration). That was the "staircase".
+  # The stream law has no latch, and hold == stream by the 2026-09-11 decision, so
+  # the hold law runs without one too: any force past the 3 N deadzone (x/y) or past
+  # rest_force_n (the press axis) moves the arm. What this gives up is the 2026-09-03
+  # crawl guard against 1-3 N parasitic wrist forces; the deadzone went 2 -> 3 N since
+  # (one full noise p-p), so watch *_fc_vel_* with the hand off. To restore: 5.0 / 2.0.
+  hold_engage_force_n: 0.0
+  hold_release_force_n: 0.0
 
   # Make a plain Hold compliant by latching its measured TCP as the nominal. This is
   # what lets an operator push the arm by hand and watch it yield and spring back

@@ -10747,17 +10747,17 @@ bool DualArmServoLoop::stepFtPipeline(ArmId arm, const RobotState& state) {
     }
 
     // ---- the wrench itself ---------------------------------------------------
-    // The FK configuration is the arm's CURRENT COMMAND, not its measurement: the
-    // sensor rides the commanded configuration, and the correction this wrench drives
-    // is applied to that same command. One configuration per cycle, so the wrench
-    // compensation and the correction it feeds cannot disagree about where the arm is.
+    // Sensor axes and gravity belong to the MEASURED flange at acquisition. The
+    // already sent reference leads that flange by transport/servo delay; rotating
+    // the sensor by that future pose turns ordinary motion into a false wrench.
     sensor::FtPipelineInput in;
     in.raw_sensor_axes = state.eft_wrench;
     in.raw_valid = state.eft_valid;
-    const JointArray& q_cmd = left ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_;
-    if (kinematics_ != nullptr && state.has_valid_joint_state) {
+    if (kinematics_ != nullptr && state.has_valid_joint_state && state.q_actual_valid &&
+        std::all_of(state.q_actual_deg.begin(), state.q_actual_deg.end(),
+                    [](double q) { return std::isfinite(q); })) {
         const ArmMountConfig& mount = left ? config_.left_mount : config_.right_mount;
-        const std::optional<Pose6D> flange = kinematics_->computeFlangeStand(arm, q_cmd, mount);
+        const std::optional<Pose6D> flange = kinematics_->computeFlangeStand(arm, state.q_actual_deg, mount);
         if (flange.has_value()) {
             in.r_stand_flange = math::rotationFromPose(*flange);
             in.kinematics_valid = true;

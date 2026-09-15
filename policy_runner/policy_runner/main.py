@@ -1607,12 +1607,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--proprio-mode",
         default="velocity",
-        choices=("pose", "velocity", "velocity_grip", "velocity_grav"),
+        choices=("pose", "velocity", "velocity_grip", "velocity_grip_rel", "velocity_grav"),
         help=(
             "observation/state representation sent to an openpi server; MUST match the served "
             "checkpoint's training distribution (openpi convert --state-mode). 'pose' (default) = "
             "14-D reset-relative pose; 'velocity' = 12-D ee_local velocity (init-pose-independent, "
-            "no gripper); 'velocity_grip' = 14-D ee_local velocity + absolute gripper; 'velocity_grav' = "
+            "no gripper); 'velocity_grip' = 14-D ee_local velocity + absolute gripper; 'velocity_grip_rel' = "
+            "20-D velocity_grip + arm-to-arm relative pose (left tip in the right tip frame: pos3, rotvec3) "
+            "at dims 14..19; 'velocity_grav' = "
             "20-D ee_local velocity + gravity-tilt anchor + absolute gripper [pos_vel3, rot_vel3, "
             "gravity3, grip] x L,R (gravity = world-down in the tool frame, yaw-invariant). velocity* are "
             "finite-differenced from the robot TCP pose (use a small --chunk-execute-steps for the "

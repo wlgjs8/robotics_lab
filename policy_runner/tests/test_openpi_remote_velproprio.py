@@ -42,7 +42,7 @@ class VelocityProprioTest(unittest.TestCase):
     def _make_source(self, *, proprio_mode: str, r_align=None):
         src = OpenpiRemoteActionSource.__new__(OpenpiRemoteActionSource)
         src.proprio_mode = proprio_mode
-        src._state_dim = {"velocity": 12, "velocity_grav": 20}.get(proprio_mode, 14)
+        src._state_dim = {"velocity": 12, "velocity_grip_rel": 20, "velocity_grav": 20}.get(proprio_mode, 14)
         src.ee_local_r_align = resolve_ee_local_r_align(r_align)
         # Huge policy_dt -> scale clamps to 1.0, so the raw one-step delta is returned
         # unscaled and we can assert the exact ee_local formula.
@@ -77,7 +77,7 @@ class VelocityProprioTest(unittest.TestCase):
         self.assertAlmostEqual(float(out[13]), 0.0, places=6)
 
     def test_state_dims(self) -> None:
-        for mode, dim in (("velocity", 12), ("velocity_grip", 14), ("velocity_grav", 20)):
+        for mode, dim in (("velocity", 12), ("velocity_grip", 14), ("velocity_grip_rel", 20), ("velocity_grav", 20)):
             src = self._make_source(proprio_mode=mode)
             out = src._proprio_state(_payload(_IDENT, _IDENT))
             self.assertEqual(out.shape, (dim,), mode)
@@ -122,6 +122,36 @@ class VelocityProprioTest(unittest.TestCase):
         self.assertEqual(out[6], 0.0)
         self.assertEqual(out[13], 0.0)
 
+
+    def test_velocity_grip_rel_layout_and_relative_pose(self) -> None:
+        # velocity_grip_rel = velocity_grip 14-D unchanged + [left tip in the right tip frame] 6-D.
+        src = self._make_source(proprio_mode="velocity_grip_rel")
+        base = self._make_source(proprio_mode="velocity_grip")
+        yaw90 = [0.0, 0.0, float(np.sin(np.pi / 4)), float(np.cos(np.pi / 4))]  # right tip yawed +90 deg
+        left = [0.5, 0.2, 0.1] + [0, 0, 0, 1]
+        right = [0.3, -0.2, 0.1] + yaw90
+        out = src._proprio_state(_payload(left, right))
+        self.assertEqual(out.shape, (20,))
+        np.testing.assert_allclose(out[:14], base._proprio_state(_payload(left, right)), atol=1e-7)
+        # inv(T_right) * T_left: world offset (0.2, 0.4, 0) seen from a frame yawed +90 -> (0.4, -0.2, 0);
+        # relative rotation = yaw -90 deg about Z.
+        np.testing.assert_allclose(out[14:17], [0.4, -0.2, 0.0], atol=1e-6)
+        np.testing.assert_allclose(out[17:20], [0.0, 0.0, -np.pi / 2], atol=1e-6)
+        # Pure translation of BOTH tips together leaves the relative pose unchanged (world-frame invariant).
+        shifted = src._proprio_state(_payload([1.5, 1.2, 2.1] + [0, 0, 0, 1], [1.3, 0.8, 2.1] + yaw90))
+        np.testing.assert_allclose(shifted[14:20], out[14:20], atol=1e-6)
+
+    def test_velocity_grip_rel_r_align_conjugates(self) -> None:
+        # Tip frame = TCP frame rotated by R_align (pika_rz180): the relative transform is conjugated,
+        # i.e. BOTH pos_rel and rotvec_rel rotate by R_align (x,y flip under rz180, z unchanged).
+        src = self._make_source(proprio_mode="velocity_grip_rel", r_align="pika_rz180")
+        plain = self._make_source(proprio_mode="velocity_grip_rel")
+        left = [0.5, 0.2, 0.1] + [0, 0, 0, 1]
+        right = [0.3, -0.2, 0.1] + [float(np.sin(0.3)), 0.0, 0.0, float(np.cos(0.3))]  # right rolled 0.6 rad
+        a = src._proprio_state(_payload(left, right))[14:20]
+        b = plain._proprio_state(_payload(left, right))[14:20]
+        np.testing.assert_allclose(a[:3], [-b[0], -b[1], b[2]], atol=1e-6)
+        np.testing.assert_allclose(a[3:], [-b[3], -b[4], b[5]], atol=1e-6)
 
     def test_velocity_grav_layout_and_gravity(self) -> None:
         # velocity_grav per arm = [pos_vel(3), rot_vel(3), gravity(3), grip(1)] = 10; dual = 20.
@@ -170,7 +200,7 @@ class VelocityProprioFixedStepTest(unittest.TestCase):
 
         src = OpenpiRemoteActionSource.__new__(OpenpiRemoteActionSource)
         src.proprio_mode = proprio_mode
-        src._state_dim = {"velocity": 12, "velocity_grav": 20}.get(proprio_mode, 14)
+        src._state_dim = {"velocity": 12, "velocity_grip_rel": 20, "velocity_grav": 20}.get(proprio_mode, 14)
         src.ee_local_r_align = resolve_ee_local_r_align(None)
         src.policy_dt_sec = policy_dt
         src.velproprio_sample_mode = "fixed_step"

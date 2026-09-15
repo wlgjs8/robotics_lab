@@ -208,3 +208,15 @@ the policy tests successfully. No physical backend is started. Motion equations,
 limits and stack configuration are unchanged; physical rollout and full dynamics
 replay are not repeated for this publication-only fix. Evidence and exact real
 binary qualification: `outputs/state_udp_repair_20260906/report.md`.
+
+## Offline force / velocity preview development (2026-09-12)
+
+The optional `RB_SERVO_BUILD_FORCE_EXPERIMENTS=ON` build now includes a
+translation velocity preview and `ForceReference::stepVelocity`, plus regression,
+fixed-force replay and contact-sensitivity audits. They are not linked into the
+servo core or selected by `make run`. See
+[`force_reference_development.md`](reference/force_reference_development.md)
+for explicit parameters, reproduction commands and rejected stability cases.
+The 6,498 audit scenario runs are not 6,498 passing tests: stable release and
+last-second force criteria are separated from initial impacts, sensor/servo
+uncertainty and coupled contact. Physical acceptance has not been performed.

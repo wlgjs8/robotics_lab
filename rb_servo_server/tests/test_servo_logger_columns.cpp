@@ -202,6 +202,10 @@ int main() {
             }
         }
         sample.left_force_control.smd_gate_sample_valid = true;
+        sample.left_state.acquisition_sequence = 9007199254740993ULL;
+        sample.left_state.robot_time_ns = 9007199254740995ULL;
+        sample.right_state.acquisition_sequence = 9007199254740997ULL;
+        sample.right_state.robot_time_ns = 0; // unavailable/raw clock stays explicit
         sample.left_force_control.smd_gate_releasing = true;
         sample.left_force_control.smd_gate_translation = .75;
         sample.left_force_control.smd_gate_normal_stand = {0, 0, 1};
@@ -332,6 +336,17 @@ int main() {
         }
         return {};
     };
+    for (const auto& item : std::vector<std::pair<std::string,std::string>>{
+             {"left_state_acquisition_sequence","9007199254740993"},
+             {"left_state_robot_time_ns","9007199254740995"},
+             {"right_state_acquisition_sequence","9007199254740997"},
+             {"right_state_robot_time_ns","0"}}) {
+        if (std::count(header_fields.begin(),header_fields.end(),item.first)!=1 ||
+            column(item.first)!=item.second) {
+            std::cerr << "incorrect acquisition identity/clock: " << item.first << '\n';
+            return 1;
+        }
+    }
     for (const char* side : {"left", "right"}) {
         for (const char* field : {"enabled","active","status","sample_time_ns","epoch","plan_id",
              "source_wire_seq","source_recv_seq","backlog_sec","rate","plan_age_sec",

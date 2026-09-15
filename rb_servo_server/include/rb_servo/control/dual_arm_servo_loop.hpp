@@ -123,6 +123,7 @@ AutoTareTickResult stepAutoTareDecision(const AutoTareTickInput& in);
 
 class DualArmServoLoop {
     friend struct PreviewRecoveryTestAccess;
+    friend struct FtPipelineTestAccess;
 public:
     DualArmServoLoop(
         std::unique_ptr<IRobotBackend> left_robot,

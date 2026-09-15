@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <functional>
 #include <stdexcept>
@@ -23,6 +24,19 @@
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
 #include "rb_servo/math/se3.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
+
+namespace rb_servo {
+struct FtPipelineTestAccess {
+    static bool sample(DualArmServoLoop& loop, ArmId arm, const RobotState& state,
+                       const JointArray& sent, Wrench6D* output) {
+        (arm == ArmId::Left ? loop.left_prev_sent_q_deg_ : loop.right_prev_sent_q_deg_) = sent;
+        const bool valid = loop.stepFtPipeline(arm, state);
+        *output = (arm == ArmId::Left ? loop.left_ft_pipeline_ : loop.right_ft_pipeline_)
+                      .compStandNoDeadzone();
+        return valid;
+    }
+};
+}
 
 #ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
 namespace rb_servo {
@@ -336,6 +350,71 @@ struct Fixture {
         require(latest.right_force_control.covered, "additional fixture never covered the right arm");
     }
 };
+
+void testWrenchUsesAcquiredJointPose() {
+    const auto stack = loadConfigFromYaml((std::filesystem::path(__FILE__).parent_path().parent_path() /
+                                           "config/stack_real.yaml").string());
+    Fixture f([&](DualArmConfig& cfg) {
+        cfg.force_control.enable = false;
+        cfg.force_torque.auto_tare_after_init_motion.enable = false;
+        cfg.force_torque.left = stack.force_torque.left;
+        cfg.force_torque.right = stack.force_torque.right;
+        for (auto* sensor : {&cfg.force_torque.left, &cfg.force_torque.right}) {
+            sensor->enable = true;
+            sensor->bias_from_config = true;
+            sensor->bias_force_n = {0.2, -0.3, 0.4};
+            sensor->bias_torque_nm = {0.01, 0.02, -0.03};
+        }
+    });
+    const auto vec = [](const std::array<double,3>& v) { return Eigen::Vector3d(v[0],v[1],v[2]); };
+    for (const auto arm : {ArmId::Left, ArmId::Right}) {
+        const auto& ft = arm == ArmId::Left ? f.cfg.force_torque.left : f.cfg.force_torque.right;
+        const auto& mount = arm == ArmId::Left ? f.cfg.left_mount : f.cfg.right_mount;
+        Eigen::Matrix3d axes;
+        axes.col(0)=vec(ft.axis_fx);axes.col(1)=vec(ft.axis_fy);axes.col(2)=vec(ft.axis_fz);
+        require(axes.determinant()<0, "fixture must exercise calibrated left-handed sensor axes");
+        for (const double wrist : {-40.0, 0.0, 40.0}) {
+            RobotState state;
+            state.q_actual_deg=f.initial;
+            state.q_actual_deg[4]+=wrist;
+            state.has_valid_joint_state=state.q_actual_valid=state.eft_valid=true;
+            state.host_time_ns=nowSteadyNs();
+            const auto flange=f.kin->computeFlangeStand(arm,state.q_actual_deg,mount);
+            require(flange.has_value(), "measured FK unavailable in wrench fixture");
+            const Eigen::Matrix3d rotation=math::rotationFromPose(*flange);
+            const Eigen::Vector3d gravity=rotation.transpose()*Eigen::Vector3d(0,0,-9.80665)*ft.tool_mass_kg;
+            JointArray sent=state.q_actual_deg;
+            sent[3]+=25;sent[4]-=30; // an in-flight command, never sent to a backend
+            for (const Eigen::Vector3d external : {Eigen::Vector3d(0,0,0),Eigen::Vector3d(4,-6,2)}) {
+                const Eigen::Vector3d force=rotation.transpose()*external;
+                const Eigen::Vector3d raw_force=axes.transpose()*(gravity+force+vec(ft.bias_force_n));
+                const Eigen::Vector3d raw_torque=axes.transpose()*(
+                    (vec(ft.tool_com_mm)*1e-3).cross(gravity)+
+                    (vec(ft.tool_xyz_mm)*1e-3).cross(force)+vec(ft.bias_torque_nm));
+                state.eft_wrench={raw_force.x(),raw_force.y(),raw_force.z(),
+                                  raw_torque.x(),raw_torque.y(),raw_torque.z()};
+                Wrench6D compensated;
+                require(FtPipelineTestAccess::sample(*f.loop,arm,state,sent,&compensated),
+                        "valid acquired wrench rejected");
+                require((Eigen::Vector3d(compensated.fx,compensated.fy,compensated.fz)-external).norm()<1e-7,
+                        "sent target contaminated measured gravity or external force direction");
+                require(Eigen::Vector3d(compensated.tx,compensated.ty,compensated.tz).norm()<1e-7,
+                        "measured wrench lost its TCP reference point");
+            }
+            Wrench6D compensated;
+            state.q_actual_valid=false; // q_ref alone cannot locate the physical sensor
+            require(!FtPipelineTestAccess::sample(*f.loop,arm,state,sent,&compensated),
+                    "invalid acquired joints accepted via command fallback");
+            require(Eigen::Vector3d(compensated.fx,compensated.fy,compensated.fz).isZero(0),
+                    "invalid acquired joints fabricated a gravity-derived force");
+            state.q_actual_valid=true;
+            state.q_actual_deg[0]=std::numeric_limits<double>::quiet_NaN();
+            require(!FtPipelineTestAccess::sample(*f.loop,arm,state,sent,&compensated),
+                    "nonfinite acquired joints accepted");
+        }
+    }
+    std::cout << "measured-pose wrench: both calibrated arms, gravity, force direction, TCP moment, invalid joints passed\n";
+}
 
 bool testInitWithoutAutoTareResetsOnlySelectedArmAndDeduplicates() {
     Fixture f([](DualArmConfig& cfg) {
@@ -1363,6 +1442,10 @@ void testLinearConditionerCandidates() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string(argv[1]) == "--measured-wrench-only") {
+            testWrenchUsesAcquiredJointPose();
+            return 0;
+        }
 #ifdef RB_SERVO_ENABLE_PREVIEW_EXECUTION
         if(argc==2&&std::string(argv[1])=="--preview-execution-only"){
             testPreviewExecutionForceTareResume();return 0;

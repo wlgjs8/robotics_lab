@@ -50,9 +50,9 @@ struct FtPipelineInput {
     // The raw sensor reading in the SENSOR'S OWN AXES (RobotState::eft_wrench).
     Wrench6D raw_sensor_axes{};
     bool raw_valid = false;
-    // Rotation stand -> flange at THE CONFIGURATION THE WRENCH BELONGS TO. CM pins
-    // this to the arm's current COMMAND, so the wrench compensation and the
-    // correction it drives are evaluated in ONE configuration per cycle.
+    // Flange axes expressed in stand coordinates at the measured configuration
+    // accompanying this wrench. The sent command can lead the sensor by the
+    // transport/servo delay and must not substitute for that measurement.
     math::Matrix3 r_stand_flange = math::Matrix3::Identity();
     bool kinematics_valid = false;
 };

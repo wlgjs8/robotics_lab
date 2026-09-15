@@ -765,6 +765,13 @@ void ServoLogger::writeHeader() {
     // its 0-then-2x catch-up pair in q_ref mimics a wire double-step and
     // contaminated the lag-8 event set ~40 %). Filter q_ref analyses on this.
     file_ << ",left_state_host_time_ns,right_state_host_time_ns";
+    // Receipt identity and raw controller clock are separate from host receipt
+    // time. None certifies simultaneous per-joint/FT acquisition. Preserve them
+    // for offline sampling audits; do not derive freshness from changed q values.
+    for (const char* side : {"left", "right"}) {
+        file_ << ',' << side << "_state_acquisition_sequence"
+              << ',' << side << "_state_robot_time_ns";
+    }
     file_ << ",projection_joint_stage_trace_valid";
     for (const char* side : {"left", "right"}) {
         for (const char* stage : {"projection_requested_q_deg", "projection_solved_q_deg", "projection_released_q_deg"})
@@ -1721,6 +1728,9 @@ void ServoLogger::writeSample(const ServoSample& sample) {
     }
     file_ << ',' << sample.left_state.host_time_ns
           << ',' << sample.right_state.host_time_ns;
+    for (const auto* state : {&sample.left_state, &sample.right_state}) {
+        file_ << ',' << state->acquisition_sequence << ',' << state->robot_time_ns;
+    }
     file_ << ',' << sample.safety_projection.joint_stage_trace_valid;
     for (std::size_t side = 0; side < 2; ++side) {
         for (const auto* stage : {&sample.safety_projection.requested_q_deg,

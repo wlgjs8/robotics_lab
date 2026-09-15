@@ -120,6 +120,18 @@ remains visible and auditable.
 
 ## Force Control
 
+2026-09-11 development update: the current requirement is transient excursions
+above the 10 N test threshold may occur, but contact must not remain at or above
+10 N. The possible future 20 N setting is not promoted. Historical rest/peak
+declarations below describe the existing law, not acceptance of the new goal.
+The runtime F/T adapter now uses valid, finite **measured joints from the wrench's
+RobotState** for flange rotation and gravity; an in-flight sent target is not the
+sensor pose. Calibration values and the left-handed basis stay intact.
+The new `RB_SERVO_BUILD_FORCE_EXPERIMENTS` option builds an **offline-only** force
+reference candidate. It is not linked to the runtime and failed robustness
+qualification; passing its ideal-model regression is not a promotion criterion.
+See `docs/reference/force_reference_development.md` for evidence and remaining work.
+
 The v1 stack was removed on 2026-08-26. A v2 was then rebuilt against
 `controller-manager` as the calibration and design authority, starting from
 sensor and tool setup, and is LIVE: `force_torque:` and `force_control:` are

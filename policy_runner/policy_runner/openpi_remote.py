@@ -734,12 +734,17 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # per-frame delta, not SI velocity; only legacy modes rescale it to approximate one policy
         # step. velocity_grav ADDS an absolute gravity-tilt anchor (world-down in the tool frame,
         # still yaw-invariant/ego-centric). See _proprio_state_velocity.
-        if str(proprio_mode) not in ("pose", "velocity", "velocity_grip", "velocity_grav"):
+        #   velocity_grip_rel -> 20-D: the velocity_grip 14-D layout UNCHANGED at dims 0..13, then
+        #                    dims 14..19 = ARM-TO-ARM relative pose [pos3 m, rotvec3] = the LEFT tip
+        #                    expressed in the RIGHT tip frame, inv(T_right) * T_left, R_align-conjugated
+        #                    (openpi --state-mode velocity_grip_rel, converter _arm_relative_pose).
+        if str(proprio_mode) not in ("pose", "velocity", "velocity_grip", "velocity_grip_rel", "velocity_grav"):
             raise ValueError(
-                f"proprio_mode must be 'pose', 'velocity', 'velocity_grip', or 'velocity_grav', got {proprio_mode!r}"
+                f"proprio_mode must be 'pose', 'velocity', 'velocity_grip', 'velocity_grip_rel', or "
+                f"'velocity_grav', got {proprio_mode!r}"
             )
         self.proprio_mode = str(proprio_mode)
-        self._state_dim = {"velocity": 12, "velocity_grav": 20}.get(self.proprio_mode, 14)
+        self._state_dim = {"velocity": 12, "velocity_grip_rel": 20, "velocity_grav": 20}.get(self.proprio_mode, 14)
         # How the velocity-proprio finite-difference window is chosen:
         #   replan     (default): difference the TCP pose between successive proprio SAMPLES
         #              (chunk-replan boundaries) and rescale the multi-step displacement to one
@@ -1153,7 +1158,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         explicitly rather than pretending it is a server ACK/sample timestamp.
         """
         if (getattr(self, "velproprio_source", "measured") != "servo_command" or
-                self.proprio_mode not in ("velocity_grip", "velocity_grav")):
+                self.proprio_mode not in ("velocity_grip", "velocity_grip_rel", "velocity_grav")):
             return payload
         key = "_servo_command_proprio_observation"
         if key in payload:
@@ -1190,7 +1195,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         reset anchor is latched on the first state this rollout sees, and MUST
         match the episode-first-frame anchor used when building the training
         dataset (examples/pika_umi/convert_pika_umi_data_to_lerobot.py)."""
-        if self.proprio_mode in ("velocity", "velocity_grip", "velocity_grav"):
+        if self.proprio_mode in ("velocity", "velocity_grip", "velocity_grip_rel", "velocity_grav"):
             return self._proprio_state_velocity(payload)
         from scipy.spatial.transform import Rotation
 
@@ -1225,6 +1230,21 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             # asymmetric (input left in TCP frame while output is rotated to tip).
             state = rotate_flow_arm_vectors(state, self.ee_local_r_align)
         return state
+
+    @staticmethod
+    def _arm_relative_pose6(left_pose7: np.ndarray, right_pose7: np.ndarray) -> np.ndarray:
+        """[pos_rel(3), rotvec_rel(3)] of the LEFT tip expressed in the RIGHT tip frame:
+        inv(T_right) * T_left, from two stand-frame pose7 [x,y,z,qx,qy,qz,qw]. Mirrors the openpi
+        converter's `_arm_relative_pose` (velocity_grip_rel dims 14..19) exactly."""
+        from scipy.spatial.transform import Rotation
+
+        left = np.asarray(left_pose7, dtype=np.float64)
+        right = np.asarray(right_pose7, dtype=np.float64)
+        r_right = Rotation.from_quat(right[3:7])
+        r_left = Rotation.from_quat(left[3:7])
+        pos_rel = r_right.inv().apply(left[:3] - right[:3])
+        rot_rel = (r_right.inv() * r_left).as_rotvec()
+        return np.concatenate([pos_rel, rot_rel]).astype(np.float64)
 
     @staticmethod
     def _rotate_vel6(vel6: np.ndarray, r_align: Any) -> np.ndarray:
@@ -1269,12 +1289,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             if str(proprio_mode) == "pose":
                 raise ValueError(
                     "velproprio_source='command' requires a velocity proprio mode "
-                    "('velocity', 'velocity_grip', or 'velocity_grav'), not proprio_mode='pose'"
+                    "('velocity', 'velocity_grip', 'velocity_grip_rel', or 'velocity_grav'), not proprio_mode='pose'"
                 )
         if source == "servo_command":
             if str(velproprio_sample_mode) != "fixed_step":
                 raise ValueError("velproprio_source='servo_command' requires velproprio_sample_mode='fixed_step'")
-            if str(proprio_mode) not in ("velocity", "velocity_grip", "velocity_grav"):
+            if str(proprio_mode) not in ("velocity", "velocity_grip", "velocity_grip_rel", "velocity_grav"):
                 raise ValueError("velproprio_source='servo_command' requires a velocity proprio mode")
         return source
 
@@ -1757,7 +1777,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         else:
             diagnostics["camera_observation_monotonic_ns"] = None
             diagnostics["camera_minus_state_ms"] = None
-        if self.proprio_mode in ("velocity_grip", "velocity_grav"):
+        if self.proprio_mode in ("velocity_grip", "velocity_grip_rel", "velocity_grav"):
             frozen_gripper = payload.get("_servo_command_proprio_observation")
             arms = frozen_gripper.get("arms", {}) if isinstance(frozen_gripper, dict) else {}
             gripper_valid = all(
@@ -2056,11 +2076,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         zeroing)."""
         from scipy.spatial.transform import Rotation
 
-        include_grip = self.proprio_mode in ("velocity_grip", "velocity_grav")
+        include_grip = self.proprio_mode in ("velocity_grip", "velocity_grip_rel", "velocity_grav")
         include_grav = self.proprio_mode == "velocity_grav"
+        include_rel = self.proprio_mode == "velocity_grip_rel"
         vel_by_side = self._arm_body_velocities(payload)
         features: list[np.ndarray] = []
         vel_for_print: dict[str, np.ndarray] = {}
+        pose_by_side: dict[str, np.ndarray] = {}
         for side in ("left", "right"):
             pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
             vel = vel_by_side[side]
@@ -2068,6 +2090,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 endpoint = getattr(self, "_last_velproprio_diagnostics", {}).get("arms", {}).get(side, {}).get("end_pose")
                 if endpoint is not None:
                     pose = np.asarray(endpoint, dtype=np.float64)
+            pose_by_side[side] = pose
             if self.ee_local_r_align is not None:
                 # Body deltas are in the RB TCP frame; the checkpoint trained in the
                 # EE (pika tip) frame -> v_tip = R_align . v_tcp (same as the pose path).
@@ -2106,6 +2129,18 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                         grip = _gripper_from_arm_payload(payload.get(side, {}))
                 parts.append(np.array([float(grip) / 100.0]))
             features.append(np.concatenate(parts))
+        if include_rel:
+            # ARM-TO-ARM RELATIVE POSE (velocity_grip_rel dims 14..19): the left tip in the right tip
+            # frame, T_rel = inv(T_right) * T_left, from the SAME per-arm pose the velocity window ended
+            # on (measured TCP or the frozen servo_command endpoint). Both TCPs are stand-frame, so no
+            # calibration is needed and the (unmeasured) world->stand transform cancels. The checkpoint
+            # trained in the pika TIP frame = TCP frame rotated by R_align; a fixed per-arm frame change
+            # C conjugates the relative transform (C^-1 T_rel C), which for a pure rotation is exactly
+            # "rotate pos_rel AND rotvec_rel by R_align" -- the same _rotate_vel6 the velocity uses.
+            rel = self._arm_relative_pose6(pose_by_side["left"], pose_by_side["right"])
+            if self.ee_local_r_align is not None:
+                rel = self._rotate_vel6(rel, self.ee_local_r_align)
+            features.append(np.asarray(rel, dtype=np.float64))
         if getattr(self, "_print_velproprio_enabled", False):
             try:
                 parts: list[str] = []
