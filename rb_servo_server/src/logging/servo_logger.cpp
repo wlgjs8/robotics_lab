@@ -477,6 +477,12 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_wrench_filt_fx_n"
        << ',' << side << "_fc_wrench_filt_fy_n"
        << ',' << side << "_fc_wrench_filt_fz_n"
+       // ... and the GATE's slower input beside it (force_control.wrench_filter_hz):
+       // two bandwidths since 2026-09-15, the law's above is law_filter_hz.
+       << ',' << side << "_fc_gate_filter_hz"
+       << ',' << side << "_fc_gate_wrench_filt_fx_n"
+       << ',' << side << "_fc_gate_wrench_filt_fy_n"
+       << ',' << side << "_fc_gate_wrench_filt_fz_n"
        // THE FOLD (structural): what moved into the source's plan this tick, where
        // it went, and the running total for the run.
        << ',' << side << "_fc_folded"
@@ -976,6 +982,10 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.wrench_filtered_stand.fx
        << ',' << fc.wrench_filtered_stand.fy
        << ',' << fc.wrench_filtered_stand.fz
+       << ',' << fc.gate_filter_hz
+       << ',' << fc.gate_wrench_filtered_stand.fx
+       << ',' << fc.gate_wrench_filtered_stand.fy
+       << ',' << fc.gate_wrench_filtered_stand.fz
        << ',' << fc.folded
        << ',' << csvEscape(fc.fold_sink)
        << ',' << fc.fold_m[0]

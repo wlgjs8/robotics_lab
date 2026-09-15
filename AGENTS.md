@@ -132,7 +132,7 @@ m * v' + b * v = (|F| - rest_force_n)+ * F_hat        k = 0, rotation RIGID
 `force_control.wrench_filter_hz`; real 0.0 = raw, sim 25.0). At or below
 `rest_force_n` NOTHING moves, in any direction, so free space is never sought and a
 hand or a stopped press rests there. Above it the arm yields ALONG the measured
-force at `(|F| - rest)/b` (12 N -> 4 mm/s, 20 N -> 20 mm/s) and STAYS where it was
+force at `(|F| - rest)/b` (24 N -> 8 mm/s, 30 N -> 20 mm/s at the 20/24 N pair shipped since 2026-09-15 pm; 10/12 before) and STAYS where it was
 dragged: the fold books the deviation into the source's plan every tick, so plan ==
 arm (yield-and-stay; a spring that RETURNS the arm was tried 2026-09-04/10 and
 rejected). Per-axis one-sidedness was rejected too: a diagonal 10 N push would read
@@ -156,7 +156,7 @@ absolute source can reach), the rate caps, `wrench_filter_hz`, the oscillation g
 with `v_cross = peak_vel_mm_s`, judged on |F| of the PHYSICAL vector, `v_s` = the
 SOURCE's demanded advance only (never the achieved speed, never the law's own yield),
 direction = `F_hat`. At `peak_force_n` the gate's speed IS the law's yield, so a
-streamed contact converges at 12 N for every demand (closed-loop model: 12.00 N at
+streamed contact converges at `peak_force_n` (24 N since 2026-09-15 pm) for every demand (closed-loop model at the 12 N pair: 12.00 N at
 30/60/150 mm/s, 0.00 N p-p). Every consumer — the chunk follower
 (`CartesianChunkFollower::setAdvanceGate`), the pose-track SMD
 (`SmdPoseTracker::constrainTranslation`) and the preview QP
@@ -279,6 +279,48 @@ break (init reset, freedrive resync). A model term like gravity, not a rule. Res
 in the violent regime is still ~half (the box's servo overshoots the commanded
 acceleration ~2× there), but the loop cannot START from a compensated 12 → ~4 N.
 Unverified on hardware at the time of writing.
+
+**2026-09-15 (night) — THE FORCE THE SENSOR READS WHILE THE ARM MOVES IS THE ARM.**
+Second policy run under the one law, inertia compensation live
+(`servo_log_20260915_155708`): the compensation held (valid on 97-100 % of ticks,
+4-24 N removed) and the start was gentle (0.8 m/s²), yet 150 ms in both executors ran
+their commands to 3-5× the follower reference (250-540 mm/s against 30-160, lead 32 mm,
+initial acceleration pinned at the 12 m/s² tracker limit) and the loop closed again
+without a fault. The force-VECTOR spectrum in the vibration was 68-78 % in 15-60 Hz
+(peaks 16-24 Hz), 0 % below 4 Hz: the 0.8 kg pika on its 200 mm lever ringing to the
+executor's re-plans, |F| p50 20-27 N with nothing touched, the tare valid (0.6 N before
+the plan moved). Command acceleration led force by ~48 ms (r 0.34) and force led command
+acceleration by ~35 ms (r 0.35): an ~80 ms round trip, the 6-12 Hz in every spectrum. At
+v_cross/v_s ≈ 0.03 the curve read g(5 N) = 0.55, g(8 N) = 0.22 — half the plan cut for a
+force that was the robot shaking. Two config levers shipped together (operator): the
+wrench VECTOR the law and gate read is low-passed at `wrench_filter_hz` 3 Hz (replayed,
+the same vector reads p50 4 N / p90 7-11 N; a low-pass on |F| would have rectified the
+ringing into DC instead), and the pair moved to `rest_force_n` 20 / `peak_force_n` 24 /
+`peak_vel_mm_s` 8 (b stays 500, v_cross doubles to 8 mm/s, g(5 N) → 0.87). Not yet run on
+hardware. The executor's overshoot of its own reference is the loop's energy source and
+is the 2026-09-10 leash pathology, still open.
+
+**2026-09-15 (night, second run) — TWO INPUTS, TWO BANDWIDTHS.** With the 3 Hz vector
+and the 20/24 N pair the free-space loop was gone (`servo_log_20260915_161142` /
+`_161234`), and the contact "oscillation" that remained was the force stage doing
+NOTHING: filtered |F| <= 14.5 N, yield 0 on every tick, gate >= 0.87, while the preview
+executor ran 33-48 mm ahead of the follower reference (`plan_lead_m` 0.6 -> 47.7 mm in
+0.25 s, initial acceleration pinned at 12 m/s^2) into the objects and the raw force
+spiked 40-84 N in few-ms bursts (22 % of ticks < 2 N, 14 % > 40 N) - a 3 Hz pole
+averages that to 2-14 N. The right arm meanwhile bobbed at 2.2 Hz on a geometry wall
+(`RoiViolation` 74 ticks, 31 geometry-hold folds, |F| < 6 N; the tracked ROI floor is
+-0.330 m and the violation was at z -0.296, so a runtime ROI/floor or a reach/floor row).
+The law and the gate therefore read DIFFERENT poles of the same physical vector: the
+GATE keeps `wrench_filter_hz` 3 Hz (a plan cut is a sustained decision and must not
+answer ringing), the LAW gets `law_filter_hz` 25 Hz (the 2026-08-27 shock filter: a
+real impact yields within ~6 ms; `rest_force_n` 20 N, not the filter, keeps the
+5-15 N ringing out of the yield). The loader refuses a law pole below the gate's.
+Logged as `*_fc_wrench_filt_*` (law) beside `*_fc_gate_wrench_filt_*` (gate). The
+hand-press "0 N": the law is one-sided, so a resting contact sits anywhere in 0-20 N
+and only a STREAMED press converges at 24 N; and a hand on the gripper is distal to
+the sensor, so the floor's reaction cancels it there (measured 9.5-13 N net while
+pressed to the floor). Push the arm above the sensor to see the floor. The executor
+lead runaway and the geometry-wall bounce are not force control and stay open.
 
 ### The zero (tare)
 

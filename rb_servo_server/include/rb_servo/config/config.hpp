@@ -1933,7 +1933,18 @@ struct ForceControlConfig {
     // A first-order low-pass at this corner removes the burst without touching
     // the steady contact force the law regulates against. 0 = off (raw wrench,
     // the pre-2026-08-27 behaviour).
+    //
+    // TWO INPUTS, TWO BANDWIDTHS (2026-09-15 night). `wrench_filter_hz` is the GATE's
+    // corner: the plan-cut is a slow, sustained decision and must not answer the arm's
+    // own 15-24 Hz ringing (68-78 % of the force energy while the policy moved,
+    // servo_log_20260915_155708). `law_filter_hz` is the LAW's corner: the yield must
+    // answer a real impact within milliseconds (40-84 N spikes lasting a few ms,
+    // servo_log_20260915_161234), which a 3 Hz filter averaged to 2-14 N and the law
+    // never saw - the arm plowed 40 mm into the objects position-controlled. The law's
+    // rest force (20 N) is what keeps the ringing (5-15 N) out of the yield; the filter
+    // only has to take the single-tick shock out (the 2026-08-27 job, 25 Hz).
     double wrench_filter_hz = 0.0;
+    double law_filter_hz = 0.0;
 
     // ---- oscillation guard (2026-08-27) ------------------------------------
     // The deviation dynamics obey the per-part velocity/acceleration caps and the

@@ -1083,8 +1083,10 @@ private:
     // law, the gate's magnitude, the contact normal). Not on the servo command path.
     // Unprimed while the arm is uncovered, so a resumed law seeds from the live
     // wrench instead of ramping up from a stale one.
-    std::array<Wrench6D, 2> phys_wrench_filt_{};
+    std::array<Wrench6D, 2> phys_wrench_filt_{};        // the GATE's (force_control.wrench_filter_hz)
     std::array<bool, 2> phys_wrench_filt_primed_{};
+    std::array<Wrench6D, 2> law_wrench_filt_{};         // the LAW's (force_control.law_filter_hz)
+    std::array<bool, 2> law_wrench_filt_primed_{};
     // Deactivated-box gate debounce (loop thread only).
     int left_box_deactivated_ticks_ = 0;
     int right_box_deactivated_ticks_ = 0;

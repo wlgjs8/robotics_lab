@@ -1632,7 +1632,7 @@ force_torque:
 # F is the compensated, PRE-deadzone physical force at the TCP (low-passed by
 # wrench_filter_hz), F_hat its direction. |F| <= rest_force_n: nothing moves, in ANY
 # direction (free space is never sought). Above it the arm yields ALONG the measured
-# force at (|F| - rest)/b whatever the direction - 12 N -> 4 mm/s, 20 N -> 20 mm/s - and
+# force at (|F| - rest)/b whatever the direction - 24 N -> 8 mm/s, 30 N -> 20 mm/s - and
 # STAYS where it was dragged: every tick the deviation is folded into the source's
 # plan (plan == arm, no standing offset, no spring-back). Rotation is RIGID.
 #
@@ -1667,8 +1667,9 @@ force_control:
   enable: true
 
   law:
-    # [kg] the virtual mass; tau = m/b = 40 ms. b is NOT typed - it is DERIVED below.
-    # 20 kg since 2026-09-11 (m = 2*b*dt is the loader's floor at this b: 2 kg).
+    # [kg] the virtual mass; tau = m/b = 40 ms. b is NOT typed - it is DERIVED below
+    # ((24 - 20) N / 8 mm/s = 500 N*s/m). 20 kg since 2026-09-11 (m = 2*b*dt is the
+    # loader's floor at this b: 2 kg).
     translation: {m: 20.0}
     rotation: rigid
 
@@ -1679,16 +1680,24 @@ force_control:
   #                  (CM runs rest = 0 and accepts F -> 0 when the plan stops).
   #   peak_vel_mm_s  the yield speed AT peak_force_n. It DERIVES the law's b:
   #                  b = (peak - rest)/peak_vel = 2 N / 4 mm/s = 500 N*s/m.
-  # 10 N is this cell's threshold (operator, 2026-07-24); 20 N is a possible later
-  # operating value, not promoted. b is the only delay-margin knob
-  # (docs/reference/force_control_stability_margin.md): at b 500 the loop is stable
-  # against contacts below ~15 kN/m (the TPU fingertips), marginal against a rigid
-  # jig. To raise b, lower peak_vel_mm_s.
+  # 10 N was this cell's threshold from 2026-07-24 to 2026-09-15; 20 N is the operating
+  # value since 2026-09-15 (evening, operator). WHY IT MOVED: on the 15:57 policy run the
+  # arm's OWN dynamic force - 15-24 Hz tool/servo ringing excited by the executor's
+  # 12 m/s^2 re-plans, 68-78 % of the force energy, zero contact - sat at 5-15 N after the
+  # inertial term, and at v_cross/v_s ~ 0.03 the curve reads g(5 N) = 0.55, g(8 N) = 0.22:
+  # half the plan cut for a force that was the robot shaking. Doubling rest/peak puts
+  # that residual at g(5 N) = 0.87 with the same b; peak_vel doubles with the span so b
+  # stays 500 N*s/m (tau 40 ms) and v_cross doubles to 8 mm/s, which also moves the
+  # operating point out of the curve's steepest tail. Paired with wrench_filter_hz 3.0
+  # below (the other half of the same fix).
+  # b is the only delay-margin knob (docs/reference/force_control_stability_margin.md):
+  # at b 500 the loop is stable against contacts below ~15 kN/m (the TPU fingertips),
+  # marginal against a rigid jig. To raise b, lower peak_vel_mm_s.
   force_gate:
     enable: true
-    peak_force_n:   12.0
-    rest_force_n:   10.0
-    peak_vel_mm_s:   4.0
+    peak_force_n:   24.0
+    rest_force_n:   20.0
+    peak_vel_mm_s:   8.0
     close_tau_s: 0.10       # fast to close - protective
     # 0.40 s = CM's shipped value and 2x their measured ringing boundary (below 200 ms
     # the contact loop sustains a limit cycle). 0.15 s was tried on 2026-09-11 and rang:
@@ -1709,12 +1718,33 @@ force_control:
   max_velocity_rad_s: 2.00
   max_acceleration_rad_s2: 20.0
 
-  # CONTACT-SHOCK LOW-PASS ON THE WRENCH THE LAW SEES (2026-08-27). Filters FORCE, not
-  # motion; the servo command path keeps its own filters off. The logged/published
-  # wrench stays the RAW measurement; the filtered one is *_fc_wrench_filt_*. Also the
-  # only lever on direction noise at the operating point (a tilted F_hat leaks a little
-  # of the into-contact advance). 0 = raw wrench to the law.
-  wrench_filter_hz: 0.0
+  # CONTACT-BAND LOW-PASS ON THE WRENCH VECTOR THE GATE SEES (2026-08-27, corner moved
+  # 2026-09-15; GATE-ONLY since the same night, see law_filter_hz below). Filters FORCE,
+  # not motion; the servo command path keeps its own
+  # filters off. The logged/published wrench stays the RAW measurement; the filtered one
+  # is *_fc_wrench_filt_*. It is applied to the VECTOR before the magnitude, which is
+  # what makes it work against ringing (a low-pass on |F| would rectify the ringing into
+  # a DC offset instead).
+  # 3 Hz (2026-09-15 evening, operator): the force the sensor reads while the arm MOVES
+  # is the arm's own dynamics, not contact - measured on the 15:57 policy run 68-78 % of
+  # the force-vector energy sat in 15-60 Hz (peaks 16-24 Hz: the 0.8 kg pika on its
+  # 200 mm lever ringing to the executor's 12 m/s^2 re-plans), 0 % below 4 Hz, |F| p50
+  # 20-27 N with nothing touched, and the law + gate answered it as contact (the loop
+  # closed in ~80 ms, 6-12 Hz). Replayed through this filter the same vector reads p50
+  # 4 N / p90 7-11 N (5 Hz: 6 N / 12-17 N). Contact is DC to a few Hz and passes with
+  # ~50 ms of lag, which the gate's own 100 ms close_tau already dwarfs; the impact peak
+  # was never the gate's to catch. 0 = raw wrench (the 2026-09-07 A/B posture).
+  wrench_filter_hz: 3.0
+  # THE LAW'S OWN INPUT (2026-09-15 night). Fed the 3 Hz vector above, the law saw
+  # 2-14 N of a 40-84 N intermittent contact (a few-ms spikes, 22 % of ticks < 2 N) and
+  # never yielded while the preview executor plowed the left tool 40 mm into the objects
+  # position-controlled (servo_log_20260915_161234, 11.0-11.85 s; gate >= 0.87, yield 0).
+  # The yield must answer a real impact within milliseconds, so the law reads its own
+  # pole: 25 Hz is the 2026-08-27 shock filter (takes the single-tick 53.8 N burst out,
+  # ~6 ms lag). What keeps the arm's own 5-15 N ringing out of the yield is rest_force_n
+  # (20 N), not this filter. The loader refuses law_filter_hz below wrench_filter_hz;
+  # 0 = raw wrench to the law.
+  law_filter_hz: 25.0
 
   # OSCILLATION GUARD (2026-08-27 incident, servo_log_20260827_101144.csv): >= 4
   # velocity-direction reversals at >= 35 % of the cap within 0.75 s freezes compliance

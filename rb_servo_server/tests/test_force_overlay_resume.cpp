@@ -1232,9 +1232,12 @@ bool testPreviewExecutionForceTareResume() {
             [](const auto& p){return p.name=="flow_infer_preview";});
         require(selected!=profiles.end(),"preview execution profile absent");
         cfg.cartesian_control.tcp_pose_target_profiles.push_back(*selected);
-        // Explicit synthetic force-filter corner makes a double prepare visible
-        // numerically. Motion caps and the tracked preview profile are unchanged.
+        // Explicit synthetic force-filter corners make a double prepare visible
+        // numerically. Since 2026-09-15 the law and the gate read different poles;
+        // `wrench_filtered_stand` is the LAW's, so probe law_filter_hz (the gate's
+        // corner is set too, so both filters run). Motion caps unchanged.
         cfg.force_control.wrench_filter_hz=8.0;
+        cfg.force_control.law_filter_hz=8.0;
     });
     const auto plain=f.command(ControlMode::Hold,ControlMode::TcpPoseTarget);
     // rest + 0.062 N: the absolute source declines the fold, so ~2.2 mm stands in the overlay.
@@ -1473,7 +1476,7 @@ bool testPreviewExecutionForceTareResume() {
     Wrench6D force;force.fz=10.8;f.right->setWrench(force);pacedTick(preview);
     const auto& fc=f.latest.right_force_control;
     const double dt=1./f.cfg.servo.rate_hz;
-    const double alpha=dt/(1./(2.*M_PI*f.cfg.force_control.wrench_filter_hz)+dt);
+    const double alpha=dt/(1./(2.*M_PI*f.cfg.force_control.law_filter_hz)+dt);
     const Eigen::Vector3d old(prior.fx,prior.fy,prior.fz);
     const Eigen::Vector3d raw(fc.wrench_stand.fx,fc.wrench_stand.fy,fc.wrench_stand.fz);
     const Eigen::Vector3d actual(fc.wrench_filtered_stand.fx,fc.wrench_filtered_stand.fy,fc.wrench_filtered_stand.fz);

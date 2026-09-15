@@ -7397,6 +7397,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             // Unprime the contact-shock filter: a law that resumes minutes later
             // must seed from the live wrench, not ring down from a stale one.
             phys_wrench_filt_primed_[static_cast<std::size_t>(i)] = false;
+            law_wrench_filt_primed_[static_cast<std::size_t>(i)] = false;
             force_source_[static_cast<std::size_t>(i)] = ForceSource{};
             continue;
         }
@@ -10982,6 +10983,7 @@ void DualArmServoLoop::resetForceReferenceForInit(ArmId arm) {
     (left ? left_force_gate_ : right_force_gate_).reset();
     hold_source_pose_[i].reset();
     phys_wrench_filt_primed_[i] = false;
+    law_wrench_filt_primed_[i] = false;
     force_source_[i] = ForceSource{};
     contact_normal_[i].setZero();
     roi_fold_normal_[i].setZero();
@@ -11027,56 +11029,69 @@ void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
     // The law, the gate's magnitude and the contact normal all read this one filtered
     // vector, so they cannot disagree about where the contact is or how hard it is.
     const Wrench6D& nodz = pipe.compStandNoDeadzone();
-    // CONTACT-SHOCK LOW-PASS (force_control.wrench_filter_hz), on the FORCE path
-    // only -- the servo command path keeps its filters off by design. A contact
-    // arrives as a burst, not a step: measured 2026-08-27 the compensated |F|
-    // swung 0 -> 98.6 N and back every few ticks (53.8 N in one 2 ms tick) and
-    // the overlay followed it into 1,501 deg/s^2 of commanded acceleration. One
-    // pole at this corner takes the burst out and leaves the steady contact
-    // force the law regulates against.
-    Wrench6D& filt = phys_wrench_filt_[i];
-    bool& primed = phys_wrench_filt_primed_[i];
-    {
-        const double hz = config_.force_control.wrench_filter_hz;
-        // Nominal period, like AdmittanceOverlay/ForceGate already use: the law's
-        // own dt is fixed, so its input filter must not breathe with loop jitter.
-        const double dt = config_.servo.rate_hz > 0
-            ? 1.0 / static_cast<double>(config_.servo.rate_hz)
-            : 0.002;
-        if (hz > 0.0 && dt > 0.0) {
+    // TWO INPUTS, TWO BANDWIDTHS (2026-09-15 night), both first-order poles on the
+    // VECTOR (a pole on |F| would rectify ringing into a DC offset), both on the FORCE
+    // path only -- the servo command path keeps its filters off by design.
+    //   * THE GATE reads `wrench_filter_hz` (3 Hz live): a plan cut is a sustained
+    //     decision and must not answer the arm's own 15-24 Hz ringing, which carried
+    //     68-78 % of the force energy while the policy moved (15:57 run) and closed
+    //     the gate to 0.05 with nothing touched.
+    //   * THE LAW reads `law_filter_hz` (25 Hz live, the 2026-08-27 shock filter): the
+    //     yield must answer a real impact within milliseconds. Fed the 3 Hz vector it
+    //     saw 2-14 N of a 40-84 N intermittent contact and never yielded while the
+    //     executor plowed the tool 40 mm into the objects (16:12 run). The law's rest
+    //     force (20 N) keeps the 5-15 N ringing out of the yield; the filter only has
+    //     to take the single-tick shock out (53.8 N in one tick, 2026-08-27).
+    // Nominal period, like AdmittanceOverlay/ForceGate already use: the law's own dt
+    // is fixed, so its input filters must not breathe with loop jitter.
+    const double dt_filter = config_.servo.rate_hz > 0
+        ? 1.0 / static_cast<double>(config_.servo.rate_hz)
+        : 0.002;
+    const auto low_pass = [&](Wrench6D& state, bool& primed, double hz) -> const Wrench6D& {
+        if (hz > 0.0 && dt_filter > 0.0) {
             // Seed on the first covered tick (and after any gap) so the law does
             // not start by ramping up from a stale zero.
             if (!primed) {
-                filt = nodz;
+                state = nodz;
                 primed = true;
             } else {
                 const double tau = 1.0 / (2.0 * M_PI * hz);
-                const double a = std::min(1.0, dt / (tau + dt));
-                filt.fx += a * (nodz.fx - filt.fx);
-                filt.fy += a * (nodz.fy - filt.fy);
-                filt.fz += a * (nodz.fz - filt.fz);
-                filt.tx += a * (nodz.tx - filt.tx);
-                filt.ty += a * (nodz.ty - filt.ty);
-                filt.tz += a * (nodz.tz - filt.tz);
+                const double a = std::min(1.0, dt_filter / (tau + dt_filter));
+                state.fx += a * (nodz.fx - state.fx);
+                state.fy += a * (nodz.fy - state.fy);
+                state.fz += a * (nodz.fz - state.fz);
+                state.tx += a * (nodz.tx - state.tx);
+                state.ty += a * (nodz.ty - state.ty);
+                state.tz += a * (nodz.tz - state.tz);
             }
-            tel.wrench_filter_hz = hz;
-        } else {
-            primed = false;
-            filt = nodz;
-            tel.wrench_filter_hz = 0.0;
+            return state;
         }
-        tel.wrench_filtered_stand = filt;
-    }
-    const math::Vector3 f_stand(filt.fx, filt.fy, filt.fz);
-    const math::Vector3 m_stand(filt.tx, filt.ty, filt.tz);
+        primed = false;
+        state = nodz;
+        return state;
+    };
+    const Wrench6D& gate_w = low_pass(phys_wrench_filt_[i], phys_wrench_filt_primed_[i],
+                                      config_.force_control.wrench_filter_hz);
+    const Wrench6D& law_w = low_pass(law_wrench_filt_[i], law_wrench_filt_primed_[i],
+                                     config_.force_control.law_filter_hz);
+    tel.gate_wrench_filtered_stand = gate_w;
+    tel.gate_filter_hz = config_.force_control.wrench_filter_hz;
+    tel.wrench_filtered_stand = law_w;
+    tel.wrench_filter_hz = config_.force_control.law_filter_hz;
+    const math::Vector3 gate_f(gate_w.fx, gate_w.fy, gate_w.fz);
+    const math::Vector3 gate_m(gate_w.tx, gate_w.ty, gate_w.tz);
+    const math::Vector3 f_stand(law_w.fx, law_w.fy, law_w.fz);
+    const math::Vector3 m_stand(law_w.tx, law_w.ty, law_w.tz);
     // THE GATE READS THE SOURCE'S DEMAND, one tick old on the preview path (this
     // preparation runs before the stages there). Two milliseconds of staleness on a
     // quantity that moves in tens of ms, against the alternative of feeding the gate
     // its own output - which reads g = 1 at the operating point and loses the
     // crossing. A Hold's demand is exactly 0 by construction, so a hand push in Hold
     // leaves the gate at 1 (it used to read the Hold's own yield: 0.095 on
-    // 2026-09-15).
-    gate.update(f_stand, m_stand, force_source_[i].demand_m_s);
+    // 2026-09-15). The contact normal every consumer cuts along is the GATE's
+    // (slow) direction: a cut direction that flips with ringing was the 52 Hz
+    // failure of 2026-09-11.
+    gate.update(gate_f, gate_m, force_source_[i].demand_m_s);
     contact_normal_[i] = gate.contactNormal();
     prepared_force_wrench_[i] = {f_stand.x(), f_stand.y(), f_stand.z(),
                                  m_stand.x(), m_stand.y(), m_stand.z()};

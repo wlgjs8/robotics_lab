@@ -87,9 +87,9 @@ std::filesystem::path servoRoot() {
 constexpr const char* kYamlForceControlHead = "force_control:\n  enable: true\n";
 constexpr const char* kYamlLawTranslation  = "    translation: {m: 20.0}\n";
 constexpr const char* kYamlLawRotation     = "    rotation: rigid\n";
-constexpr const char* kYamlGatePeak        = "    peak_force_n:   12.0";
-constexpr const char* kYamlGateRest        = "    rest_force_n:   10.0";
-constexpr const char* kYamlGatePeakVel     = "    peak_vel_mm_s:   4.0";
+constexpr const char* kYamlGatePeak        = "    peak_force_n:   24.0";
+constexpr const char* kYamlGateRest        = "    rest_force_n:   20.0";
+constexpr const char* kYamlGatePeakVel     = "    peak_vel_mm_s:   8.0";
 // What the tracked pair derives: b = (12 - 10) N / 4 mm/s = 500 N*s/m, tau = 20/500.
 constexpr double kShippedLawM = 20.0;
 constexpr double kShippedLawB = 500.0;
@@ -1750,9 +1750,13 @@ bool testOneLawShipsRigidRotationAndTheDerivedDamping() {
         RB_CHECK(cfg.force_control.gate_enable);
         RB_CHECK(near(cfg.force_control.law.m, kShippedLawM));
         RB_CHECK(near(cfg.force_control.law.b, kShippedLawB));
-        RB_CHECK(near(cfg.force_control.gate_peak_force_n, 12.0));
-        RB_CHECK(near(cfg.force_control.gate_rest_force_n, 10.0));
-        RB_CHECK(near(cfg.force_control.gate_peak_vel_mm_s, 4.0));
+        // 24 / 20 / 8 since 2026-09-15 pm (12 / 10 / 4 before): the arm's own 15-24 Hz
+        // ringing sat at 5-15 N on the 15:57 policy run and the curve read it as contact.
+        RB_CHECK(near(cfg.force_control.gate_peak_force_n, 24.0));
+        RB_CHECK(near(cfg.force_control.gate_rest_force_n, 20.0));
+        RB_CHECK(near(cfg.force_control.gate_peak_vel_mm_s, 8.0));
+        RB_CHECK(near(cfg.force_control.wrench_filter_hz, 3.0));    // the GATE's corner
+        RB_CHECK(near(cfg.force_control.law_filter_hz, 25.0));      // the LAW's corner
         // m >= 2*b*dt is the semi-implicit Euler floor the loader enforces (2 kg here).
         RB_CHECK(cfg.force_control.law.m >= 2.0 * cfg.force_control.law.b * 0.002);
         RB_CHECK(cfg.force_torque.right.deadzone_force_n[0] == 3.0);
@@ -1834,7 +1838,7 @@ bool testForceGateConvergencePairContract() {
     //    declared force and the equilibrium is gone.
     {
         std::string body = real;
-        RB_CHECK(replaceOnce(&body, kYamlGateRest, "    rest_force_n:   12.0"));
+        RB_CHECK(replaceOnce(&body, kYamlGateRest, "    rest_force_n:   24.0"));   // == peak (24 since 2026-09-15 pm)
         const std::string path = writeTempConfig("gate-rest-equals-peak", body);
         const bool rejected = loadRejectsContaining(path, "rest_force_n must be < peak_force_n");
         ::unlink(path.c_str());
@@ -1862,9 +1866,9 @@ bool testForceGateConvergencePairContract() {
         RB_CHECK(std::abs(fc.law.b - b_expect) < 1e-9);
         RB_CHECK(std::abs(fc.law.b - kShippedLawB) < 1e-9);
         std::string body = real;
-        RB_CHECK(replaceOnce(&body, kYamlGatePeakVel, "    peak_vel_mm_s:   2.0"));
-        const rb_servo::DualArmConfig halved = loadSiblingOf(stack_real_path, "peak_vel_2", body);
-        RB_CHECK(std::abs(halved.force_control.gate_peak_vel_mm_s - 2.0) < 1e-12);
+        RB_CHECK(replaceOnce(&body, kYamlGatePeakVel, "    peak_vel_mm_s:   4.0"));
+        const rb_servo::DualArmConfig halved = loadSiblingOf(stack_real_path, "peak_vel_4", body);
+        RB_CHECK(std::abs(halved.force_control.gate_peak_vel_mm_s - 4.0) < 1e-12);
         RB_CHECK(std::abs(halved.force_control.law.b - 1000.0) < 1e-9);
         RB_CHECK(std::abs(halved.force_control.law.m - kShippedLawM) < 1e-12);
     }

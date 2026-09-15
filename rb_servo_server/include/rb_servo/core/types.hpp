@@ -924,12 +924,16 @@ struct ForceControlTelemetry {
     // the edge-logger print a WARN every tick.
     int coverage_recover_streak = 0;
     int coverage_recover_needed = 0;
-    // The wrench the LAW actually consumed, after the contact-shock low-pass
-    // (force_control.wrench_filter_hz; 0 = filter off, equals wrench_stand).
-    // wrench_stand above stays the RAW measurement, so the pair shows exactly
-    // what the filter removed.
+    // The wrench the LAW actually consumed, after its shock low-pass
+    // (force_control.law_filter_hz; 0 = raw), and the wrench the GATE judged,
+    // after its contact-band low-pass (force_control.wrench_filter_hz). Two inputs,
+    // two bandwidths (2026-09-15): the law answers impacts, the gate answers
+    // sustained contact. wrench_stand above stays the RAW measurement, so the
+    // three together show exactly what each filter removed.
     Wrench6D wrench_filtered_stand{};
-    double wrench_filter_hz = 0.0;
+    double wrench_filter_hz = 0.0;        // the LAW's corner (law_filter_hz)
+    Wrench6D gate_wrench_filtered_stand{};
+    double gate_filter_hz = 0.0;          // the GATE's corner (wrench_filter_hz)
     double fence_m = 0.0;
     double fence_rad = 0.0;
     // THE GATE: the fraction of the source's advance that survives along the direction

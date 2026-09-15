@@ -2609,15 +2609,30 @@ void validateConfig(const DualArmConfig& cfg) {
                 validatePositiveFinite(fc.oscillation_release_quiet_sec, "force_control.oscillation_release_quiet_sec");
             }
             validateNonNegativeFinite(fc.wrench_filter_hz, "force_control.wrench_filter_hz");
+            validateNonNegativeFinite(fc.law_filter_hz, "force_control.law_filter_hz");
             // Below the Nyquist of the control rate the filter is not a filter, it
             // is a delay line; above ~1/4 of it there is nothing left to remove.
-            if (fc.wrench_filter_hz > 0.0) {
+            {
                 const double nyquist = 0.5 * static_cast<double>(cfg.servo.rate_hz);
-                if (fc.wrench_filter_hz >= nyquist) {
+                if (fc.wrench_filter_hz > 0.0 && fc.wrench_filter_hz >= nyquist) {
                     throw std::runtime_error(
                         "force_control.wrench_filter_hz must stay below the control "
                         "rate's Nyquist frequency");
                 }
+                if (fc.law_filter_hz > 0.0 && fc.law_filter_hz >= nyquist) {
+                    throw std::runtime_error(
+                        "force_control.law_filter_hz must stay below the control "
+                        "rate's Nyquist frequency");
+                }
+            }
+            // THE LAW MAY NOT BE SLOWER THAN THE GATE. The gate's corner is the slow
+            // one by design (a plan cut is a sustained decision); a law filtered below
+            // it would miss the very impacts the gate is too slow for.
+            if (fc.law_filter_hz > 0.0 && fc.wrench_filter_hz > 0.0 &&
+                fc.law_filter_hz < fc.wrench_filter_hz) {
+                throw std::runtime_error(
+                    "force_control.law_filter_hz must be >= wrench_filter_hz (or 0 = raw) - "
+                    "the law answers impacts, the gate answers sustained contact");
             }
             validateNonNegativeFinite(fc.coverage_recover_sec, "force_control.coverage_recover_sec");
             validatePositiveFinite(fc.hold_latch_max_command_gap_m, "force_control.hold_latch_max_command_gap_m");
@@ -4767,7 +4782,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "max_state_age_sec",
             "command_execution_tau_sec", "command_execution_min_rate_dps",
             "command_execution_min_ratio",
-            "wrench_filter_hz",
+            "wrench_filter_hz", "law_filter_hz",
             "oscillation_guard_enable", "oscillation_min_reversals",
             "oscillation_window_sec", "oscillation_min_velocity_frac",
             "oscillation_release_force_n", "oscillation_release_torque_nm",
@@ -4863,6 +4878,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "command_execution_min_rate_dps")) fc.command_execution_min_rate_dps = asDouble(sec["command_execution_min_rate_dps"], "force_control.command_execution_min_rate_dps");
         if (has(sec, "command_execution_min_ratio")) fc.command_execution_min_ratio = asDouble(sec["command_execution_min_ratio"], "force_control.command_execution_min_ratio");
         if (has(sec, "wrench_filter_hz")) fc.wrench_filter_hz = asDouble(sec["wrench_filter_hz"], "force_control.wrench_filter_hz");
+        if (has(sec, "law_filter_hz")) fc.law_filter_hz = asDouble(sec["law_filter_hz"], "force_control.law_filter_hz");
         if (has(sec, "oscillation_guard_enable")) fc.oscillation_guard_enable = asBool(sec["oscillation_guard_enable"], "force_control.oscillation_guard_enable");
         if (has(sec, "oscillation_min_reversals")) fc.oscillation_min_reversals = asInt(sec["oscillation_min_reversals"], "force_control.oscillation_min_reversals");
         if (has(sec, "oscillation_window_sec")) fc.oscillation_window_sec = asDouble(sec["oscillation_window_sec"], "force_control.oscillation_window_sec");
