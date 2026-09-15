@@ -284,8 +284,13 @@ void taredForce(FtTelemetry& ft, ForceControlTelemetry& fc) {
   ft.raw_sensor=w;ft.gravity_sensor=w;ft.comp_sensor_nodz=w;
   ft.comp_sensor=w;ft.comp_tcp=w;ft.comp_stand=w;ft.bias=w;
   fc.enabled=true;fc.covered=true;fc.coverage_reason="covered";
-  fc.law="hold";fc.compose_applied=true;fc.reference_strip_enabled=true;
-  fc.reference_reset_count=1;fc.hold_engaged=true;fc.folded=true;fc.fold_sink="hold_nominal";
+  // 2026-09-15: the SOURCE replaced the law / hold_engaged pair. A Hold is a source
+  // with zero demand; the demand is probed with a 17-digit value so the wire's
+  // precision on the new column is what this fixture stresses.
+  fc.source="hold";fc.source_demand_m_s=5.1234567891234567;
+  fc.contact_normal_stand={0.,0.,1.};
+  fc.compose_applied=true;fc.reference_strip_enabled=true;
+  fc.reference_reset_count=1;fc.folded=true;fc.fold_sink="hold";
   fc.reference_deviation_m={.012345678912345678,-.023456789123456789,.034567891234567891};
   fc.reference_deviation_rad=fc.reference_deviation_m;fc.deviation_m=fc.reference_deviation_m;
   fc.deviation_rad=fc.reference_deviation_m;fc.velocity_m_s=fc.reference_deviation_m;
@@ -295,11 +300,10 @@ void taredForce(FtTelemetry& ft, ForceControlTelemetry& fc) {
   fc.absorbed_norm_m=.045678912345678912;fc.absorbed_norm_rad=.045678912345678912;
   fc.wrench_stand=w;fc.wrench_filtered_stand=w;
   fc.wrench_filter_hz=40.;fc.fence_m=.08;fc.fence_rad=.2;
-  fc.gate_translation=.91234567891234567;fc.gate_rotation=1.;
+  fc.gate_translation=.91234567891234567;
   fc.gate_force_n=3.1234567891234567;fc.gate_torque_nm=.31234567891234567;
   fc.gate_removed_m=.0012345678912345678;fc.gate_removed_rad=.00012345678912345678;
   fc.gate_b_eff=500.;fc.gate_m_eff=20.;fc.gate_cross_speed_m_s=.0039876543219876543;
-  fc.gate_stream_speed_m_s=.09876543219876543;fc.gate_rest_force_n=10.;fc.gate_peak_force_n=12.;
-  fc.hold_force_n=5.1234567891234567;
+  fc.gate_rest_force_n=10.;fc.gate_peak_force_n=12.;
 }
 } // namespace state_publication_fixture

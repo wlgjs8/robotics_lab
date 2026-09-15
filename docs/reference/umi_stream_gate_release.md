@@ -1,5 +1,12 @@
 # UMI stream gate release and diagnostic logging
 
+> **2026-09-15 — historical.** The stream channel, its sustained-contact classifier
+> and every `*_smd_gate_*` CSV column described here were REMOVED with the force
+> unification (one law on the measured force vector; the pose-track SMD now holds
+> its state along the one `<side>_fc_contact_normal_{x,y,z}` the servo loop
+> publishes, `ForceGate::contactNormal`). `umi_stream_gate_replay` no longer
+> reflects the runtime. Kept for the 2026-09-06 evidence and the design argument.
+
 The pose-track SMD consumes the stream channel of `ForceGate`. After its
 sustained-contact classifier disarms, the gate retains the last armed stand-frame
 normal while its existing scalar slew reopens. It clears that normal when fully

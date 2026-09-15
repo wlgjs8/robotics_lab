@@ -83,6 +83,7 @@ bool FtPipeline::step(const FtPipelineInput& in) {
         comp_stand_ = Wrench6D{};
         comp_stand_nodz_ = Wrench6D{};
         gravity_sensor_ = Wrench6D{};
+        inertial_sensor_ = Wrench6D{};
         load_force_n_ = 0.0;
         load_mass_kg_ = 0.0;
         load_settled_ = false;
@@ -114,13 +115,31 @@ bool FtPipeline::step(const FtPipelineInput& in) {
     const math::Vector3 mg = tool_com_m_.cross(fg);
     gravity_sensor_ = wrench(fg, mg);
 
+    // ---- (2b) TOOL INERTIA (2026-09-15) ----------------------------------------
+    // Gravity generalises to m*(g - a): the tool resists its own acceleration with
+    // -m*a on the sensor exactly as it hangs on it with m*g, and the box compensates
+    // neither. Measured on the first policy run under the isotropic law
+    // (servo_log_20260915_153420, 62.8-63.0 s): the compensated |F| tracked the tool's
+    // own TCP acceleration with |F|/(m*|a|) = 1.0 and cos 0.85 on both arms, 12 N at
+    // the policy's 12 m/s^2 start, which the law read as contact. The caller supplies
+    // a_com from the COMMANDED trajectory at the transport lag; no acceleration = no
+    // term, exactly the pre-2026-09-15 pipeline.
+    math::Vector3 fi = math::Vector3::Zero();
+    math::Vector3 mi = math::Vector3::Zero();
+    if (in.inertia_valid && in.com_accel_stand.allFinite()) {
+        const math::Vector3 a_sensor = in.r_stand_flange.transpose() * in.com_accel_stand;
+        fi = -cfg_->tool_mass_kg * a_sensor;
+        mi = tool_com_m_.cross(fi);
+    }
+    inertial_sensor_ = wrench(fi, mi);
+
     // ---- (3) BIAS -----------------------------------------------------------
     // Subtracted in the SENSOR frame, before anything rotates: the bias is a sensor
     // offset, not a pose-dependent quantity.
     const math::Vector3 bias_f = force(bias_);
     const math::Vector3 bias_m = torque(bias_);
-    const math::Vector3 fc = fs - bias_f - fg;
-    const math::Vector3 mc = ms - bias_m - mg;
+    const math::Vector3 fc = fs - bias_f - fg - fi;
+    const math::Vector3 mc = ms - bias_m - mg - mi;
     comp_sensor_nodz_ = wrench(fc, mc);
 
     // ---- (4) REFERENCE-POINT SHIFT -> ROTATE -> DEADZONE --------------------
@@ -176,8 +195,8 @@ void FtPipeline::tareSample() {
     // AVERAGE `raw - gravity`, NEVER `raw`. The box subtracts no payload, so raw
     // still contains the tool's weight: averaging raw would fold the tare pose's
     // gravity into the bias, and then step() would subtract gravity a second time.
-    tare_force_sum_ += force(raw_sensor_) - force(gravity_sensor_);
-    tare_torque_sum_ += torque(raw_sensor_) - torque(gravity_sensor_);
+    tare_force_sum_ += force(raw_sensor_) - force(gravity_sensor_) - force(inertial_sensor_);
+    tare_torque_sum_ += torque(raw_sensor_) - torque(gravity_sensor_) - torque(inertial_sensor_);
     ++tare_count_;
 }
 
@@ -282,6 +301,7 @@ void FtPipeline::fillTelemetry(FtTelemetry* out) const {
     out->liveness_torque_pp_nm = torque_pp_;
     out->raw_sensor = raw_sensor_;
     out->gravity_sensor = gravity_sensor_;
+    out->inertial_sensor = inertial_sensor_;
     out->comp_sensor_nodz = comp_sensor_nodz_;
     out->comp_sensor = comp_sensor_;
     out->comp_tcp = comp_tcp_;

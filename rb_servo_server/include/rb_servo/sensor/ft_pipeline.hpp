@@ -55,6 +55,13 @@ struct FtPipelineInput {
     // transport/servo delay and must not substitute for that measurement.
     math::Matrix3 r_stand_flange = math::Matrix3::Identity();
     bool kinematics_valid = false;
+    // TOOL INERTIA (2026-09-15). The linear acceleration of the tool's centre of mass
+    // in STAND coordinates [m/s^2], taken from the COMMANDED trajectory delayed by the
+    // transport lag (force_torque.inertia_compensation). The tool resists it with -m*a
+    // on the sensor exactly as it hangs on it with m*g, and the box compensates
+    // neither, so gravity generalises to m*(g - a). Invalid = no inertial term.
+    math::Vector3 com_accel_stand = math::Vector3::Zero();
+    bool inertia_valid = false;
 };
 
 class FtPipeline {
@@ -73,6 +80,13 @@ public:
     // ---- the surfaces this tick produced ------------------------------------
     // (1) RAW, axis-mapped. SENSOR frame (flange-aligned), torque about the SRO.
     const Wrench6D& rawSensor() const { return raw_sensor_; }
+    // The tool-inertia term this tick (-m * a_com, SENSOR frame @SRO), zero when the
+    // caller supplied no acceleration. Published beside gravity so the log shows what
+    // was removed for the arm's own motion.
+    const Wrench6D& inertialSensor() const { return inertial_sensor_; }
+    // The tool COM in FLANGE coordinates (SRO offset + the sensor-axes map of the
+    // configured COM): the point whose commanded acceleration the caller feeds back.
+    math::Vector3 toolComInFlange() const { return sensor_offset_m_ + axis_map_ * tool_com_m_; }
     // The tool-gravity term subtracted this tick. SENSOR frame @SRO.
     const Wrench6D& gravitySensor() const { return gravity_sensor_; }
     // (2) COMPENSATED, SENSOR frame @SRO, pre-deadzone / post-deadzone.
@@ -154,6 +168,7 @@ private:
 
     Wrench6D raw_sensor_{};
     Wrench6D gravity_sensor_{};
+    Wrench6D inertial_sensor_{};
     Wrench6D comp_sensor_nodz_{};
     Wrench6D comp_sensor_{};
     Wrench6D comp_tcp_{};

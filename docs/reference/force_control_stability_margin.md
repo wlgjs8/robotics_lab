@@ -149,7 +149,8 @@ Do **not** use `np.angle` for the phase — it wraps, and the root-find silently
 
 The tracked stacks now run CM's live follow shape: `k = 0` on every axis with
 `force_control.fold_deviation: true` (the deviation is booked into the plan every
-tick — see `AGENTS.md` § Force Control). With no spring the loop is
+tick — see `AGENTS.md` § Force Control; the key itself was retired on 2026-09-15,
+the fold is structural now). With no spring the loop is
 `L(s) = k_env / (s·(m·s + b)) · 1/(1 + s/ω_f) · e^(−T_d·s)` and **b is the only knob**.
 `rb_servo_server/tools/force_loop_margin.py` generates every number below.
 
@@ -222,6 +223,9 @@ deadzone and the delay in it (`WallLoop` in `test_force_control.cpp`):
   force for the ~0.1 s before the gate closes. b sets how fast the arm yields (F/b) and
   trims the first-contact transient 15–20 %. Lower b is the right direction for this
   purpose; a *designed* press force needs `max_force_n` or a `ref_force` law.
+  *(2026-09-11: `max_force_n` was deleted for the CM 0049 pair; since 2026-09-15 a
+  streamed contact converges at `peak_force_n` 12 and a stopped one rests at
+  `rest_force_n` 10, in any direction. b stays the yield rate, `(|F| - rest)/b`.)*
 * **The margin is decided by the contact stiffness, not the approach speed.** m 6 / b 500
   is +4.9 / +2.6 dB (18 / 26 ms) against 15 kN/m and −1.3 / −3.6 dB against 30.7 kN/m.
   The pika tips are TPU 95A, so the cell's contacts are expected under 15 kN/m — not yet
@@ -229,9 +233,17 @@ deadzone and the delay in it (`WallLoop` in `test_force_control.cpp`):
   back is m 8 / b 600 (+0.1 dB at 30.7 kN/m, 18 ms).
 
 Rotation is RIGID on both laws and the hold law carries the 5 N / 2 N engagement latch
-(see `stack_real.yaml`); neither changes the translation margins above.
+(see `stack_real.yaml`); neither changes the translation margins above. *(2026-09-15:
+the two laws and the latch are gone — one law on the force vector, rotation still
+rigid; the margins above are unchanged because they depend on m, b and the delay.)*
 
 ### 2026-09-04 — the stream law holds the configured force: a spring under the gate
+
+> **Superseded 2026-09-15.** There is one law on the force vector, `k = 0` by
+> construction (a spring RETURNS the arm; reverted 2026-09-10), and `b` is derived from
+> the gate pair: `(peak_force_n − rest_force_n)/peak_vel_mm_s` = 2 N / 4 mm/s =
+> 500 N·s/m, with `m` 20 kg. The stream/hold distinction below no longer exists. The
+> tables stand as the delay-margin analysis for `b` (`force_loop_margin.py --k 0`).
 
 Requirement (operator): once pressed, the contact holds at the configured N (10 N);
 first-contact peaks are accepted. With `k = 0` the sustained force is the balance of the

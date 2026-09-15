@@ -406,6 +406,38 @@ bool testStatePublisherPreservesForceReferenceWhenUncovered() {
     return true;
 }
 
+// 2026-09-15: the force_control object names the SOURCE that drove the plan (and its
+// demand, and the one contact normal), not a law; the hold_engaged / hold_force_n /
+// gate_wrench_norm_n / gate_rotation / gate_stream_speed_m_s keys left with the split.
+bool testStatePublisherPublishesTheForceSourceNotTheLaw() {
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(9);
+    state_publication_fixture::taredForce(snapshot.left_ft, snapshot.left_force_control);
+    snapshot.right_force_control.source = "chunk_follower";
+    snapshot.right_force_control.source_demand_m_s = 0.031234567891234567;
+    snapshot.right_force_control.contact_normal_stand = {0.6, 0.0, -0.8};
+    snapshot.right_force_control.fold_sink = "declined: chunk follower paused";
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    for (const char* arm : {"left", "right"}) {
+        const auto& fc = json.at(arm).at("force_control");
+        const auto& expected = std::string(arm) == "left"
+            ? snapshot.left_force_control : snapshot.right_force_control;
+        RB_CHECK(fc.at("source").get<std::string>() == expected.source);
+        RB_CHECK(fc.at("source_demand_m_s").get<double>() == expected.source_demand_m_s);
+        RB_CHECK(fc.at("contact_normal_stand").get<std::vector<double>>() ==
+                 std::vector<double>(expected.contact_normal_stand.begin(),
+                                     expected.contact_normal_stand.end()));
+        RB_CHECK(fc.at("fold_sink").get<std::string>() == expected.fold_sink);
+        for (const char* gone : {"law", "hold_engaged", "hold_force_n", "gate_wrench_norm_n",
+                                 "gate_rotation", "gate_stream_speed_m_s"}) {
+            RB_CHECK(!fc.contains(gone));
+        }
+    }
+    RB_CHECK(json.at("left").at("force_control").at("source") == "hold");
+    RB_CHECK(json.at("left").at("force_control").at("source_demand_m_s") == 5.1234567891234567);
+    return true;
+}
+
 bool testStatePublisherSerializesPerPairSelfCollisionBands() {
     // The near list is ordered by RAW clearance, so a consumer cannot tell which pairs
     // are in hard violation unless each pair carries its OWN floor. Measured on the RB5
@@ -694,6 +726,12 @@ bool testFullPrecisionTaredCoreFitsUdp() {
             RB_CHECK(core.at(side).at("force_torque").at("tare_state")=="accepted");
             RB_CHECK(core.at(side).at("force_torque").at("bias_sensor").at(0)==snapshot.left_ft.bias.fx);
             RB_CHECK(core.at(side).at("force_control").at("reference_deviation_stand_m").at(0)==snapshot.left_force_control.reference_deviation_m[0]);
+            // 2026-09-15: the 17-digit probe moved from hold_force_n to source_demand_m_s.
+            RB_CHECK(core.at(side).at("force_control").at("source")=="hold");
+            RB_CHECK(core.at(side).at("force_control").at("source_demand_m_s")==snapshot.left_force_control.source_demand_m_s);
+            RB_CHECK(core.at(side).at("force_control").at("contact_normal_stand")==nlohmann::json({0.,0.,1.}));
+            RB_CHECK(!core.at(side).at("force_control").contains("law"));
+            RB_CHECK(!core.at(side).at("force_control").contains("hold_engaged"));
             RB_CHECK(core.at("preview_execution").at(side).at("enabled")==preview);
             RB_CHECK(core.at("preview_execution").at(side).at("sample_time_ns")==snapshot.loop_start_time_ns);
             RB_CHECK(core.at("preview_execution").at(side).at("diagnostics_detail")=="summary");
@@ -1003,6 +1041,7 @@ int main() {
     if (!testStatePublisherSerializesAsyncStreamingFields()) return 1;
     if (!testStatePublisherKeepsForceTelemetryInsideTheArmObjects()) return 1;
     if (!testStatePublisherPreservesForceReferenceWhenUncovered()) return 1;
+    if (!testStatePublisherPublishesTheForceSourceNotTheLaw()) return 1;
     if (!testStatePublisherSerializesPerPairSelfCollisionBands()) return 1;
     if (!testRealtimeTimingAccumulatorAndSerialization()) return 1;
     return 0;

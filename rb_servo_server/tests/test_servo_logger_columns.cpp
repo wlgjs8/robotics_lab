@@ -201,16 +201,20 @@ int main() {
                 sample.safety_projection.released_q_deg[side][j] = 100 * side + j + .3;
             }
         }
-        sample.left_force_control.smd_gate_sample_valid = true;
         sample.left_state.acquisition_sequence = 9007199254740993ULL;
         sample.left_state.robot_time_ns = 9007199254740995ULL;
         sample.right_state.acquisition_sequence = 9007199254740997ULL;
         sample.right_state.robot_time_ns = 0; // unavailable/raw clock stays explicit
-        sample.left_force_control.smd_gate_releasing = true;
-        sample.left_force_control.smd_gate_translation = .75;
-        sample.left_force_control.smd_gate_normal_stand = {0, 0, 1};
-        sample.left_force_control.smd_gate_measured_force_stand_n = {.1, -.2, .3};
-        sample.left_force_control.smd_gate_removed_velocity_m_s = .04;
+        // 2026-09-15: the force stage logs its SOURCE, the source's demand and the one
+        // contact normal every consumer cuts along; the smd_gate_* block is gone.
+        sample.left_force_control.source = "hold";
+        sample.left_force_control.source_demand_m_s = 0.0;
+        sample.left_force_control.contact_normal_stand = {0, 0, 1};
+        sample.left_force_control.fold_sink = "hold";
+        sample.right_force_control.source = "chunk_follower";
+        sample.right_force_control.source_demand_m_s = .04;
+        sample.right_force_control.contact_normal_stand = {.6, 0, -.8};
+        sample.right_force_control.fold_sink = "chunk_follower";
         // Retained reference displacement must remain visible when coverage is
         // off; it is distinct from the current tick's applied deviation.
         sample.left_force_control.covered = false;
@@ -307,14 +311,17 @@ int main() {
         "projection_ceiling_clamped",
         "projection_min_margin_m",
         "selfcol_verdict_age_ms",
-        // the force fold (force_control.fold_deviation)
+        // the force fold (structural since 2026-09-15) and the source that took it
         "left_fc_folded",
         "left_fc_fold_sink",
         "right_fc_fold_z_m",
         "right_fc_absorbed_norm_m",
         "left_fc_absorbed_norm_rad",
-        "right_fc_hold_engaged",
-        "left_fc_hold_force_n",
+        "left_fc_source",
+        "right_fc_source_demand_m_s",
+        "left_fc_contact_normal_x",
+        "left_fc_contact_normal_y",
+        "left_fc_contact_normal_z",
         // the reach shell (safety.reach_constraint) — no column at all until 2026-09-04
         "left_reach_engaged",
         "left_reach_margin_m",
@@ -328,6 +335,24 @@ int main() {
         if (!contains(header_fields, name)) {
             std::cerr << "missing column: " << name << "\n";
             return 1;
+        }
+    }
+    // 2026-09-15: the hold/stream split's columns must be GONE, not merely empty - an
+    // analysis script that still resolves them by name has to fail loudly.
+    for (const char* side : {"left_", "right_"}) {
+        for (const char* gone : {"fc_law", "fc_hold_engaged", "fc_hold_force_n",
+                                 "fc_gate_wrench_norm_n", "fc_gate_rotation",
+                                 "fc_gate_stream_speed_m_s"}) {
+            if (contains(header_fields, std::string(side) + gone)) {
+                std::cerr << "deleted column still present: " << side << gone << "\n";
+                return 1;
+            }
+        }
+        for (const auto& name : header_fields) {
+            if (name.rfind(std::string(side) + "smd_gate_", 0) == 0) {
+                std::cerr << "deleted smd_gate column still present: " << name << "\n";
+                return 1;
+            }
         }
     }
     auto column = [&](const std::string& name) -> std::string {
@@ -540,16 +565,20 @@ int main() {
         !column("right_follower_sample_velocity_5").empty()) {
         std::cerr << "sampled follower pose/derivative telemetry mismatch\n";return 1;
     }
-    if (column("projection_joint_stage_trace_valid") != "1" ||
-        column("left_smd_gate_sample_valid") != "1" ||
-        column("left_smd_gate_releasing") != "1" ||
-        column("left_smd_gate_armed") != "0" ||
-        column("right_smd_gate_sample_valid") != "0") return 1;
+    if (column("projection_joint_stage_trace_valid") != "1") return 1;
+    if (column("left_fc_source") != "hold" || column("right_fc_source") != "chunk_follower" ||
+        column("left_fc_fold_sink") != "hold" || column("right_fc_fold_sink") != "chunk_follower") {
+        std::cerr << "force source / fold sink columns mismatch\n";
+        return 1;
+    }
     for (const auto& item : std::vector<std::pair<std::string, double>>{
-             {"left_smd_gate_translation", .75}, {"left_smd_gate_normal_z", 1},
-             {"left_smd_gate_measured_fx_n", .1}, {"left_smd_gate_measured_fy_n", -.2},
-             {"left_smd_gate_measured_fz_n", .3}, {"left_smd_gate_removed_velocity_m_s", .04}}) {
-        if (std::abs(std::stod(column(item.first)) - item.second) > 1e-9) return 1;
+             {"left_fc_source_demand_m_s", 0.}, {"right_fc_source_demand_m_s", .04},
+             {"left_fc_contact_normal_x", 0.}, {"left_fc_contact_normal_z", 1.},
+             {"right_fc_contact_normal_x", .6}, {"right_fc_contact_normal_z", -.8}}) {
+        if (std::abs(std::stod(column(item.first)) - item.second) > 1e-9) {
+            std::cerr << "force source column mismatch: " << item.first << '\n';
+            return 1;
+        }
     }
     for (std::size_t side = 0; side < 2; ++side) {
         const std::string prefix = side == 0 ? "left_" : "right_";

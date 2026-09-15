@@ -57,7 +57,13 @@ J3 must remain exactly `[-150 deg, +150 deg]`, matching Rainbow and the URDF.
 ## Force-control ownership
 
 `force_torque:` and `force_control:` are live server config sections in the
-tracked real profile. Their measured sensor/tool parameters and coupled
-gate/spring/fence values must be reviewed as one safety-relevant unit. A client
-command may request `TareForceSensor`; it may not override the force law with a
+tracked real profile. Their measured sensor/tool parameters and the coupled
+gate pair (`force_gate.peak_force_n` / `rest_force_n` / `peak_vel_mm_s`, which
+DERIVES the law's `b`), virtual mass (`law.translation.m`) and fence values must
+be reviewed as one safety-relevant unit. Since 2026-09-15 there is one law
+(`law: {translation: {m: 20.0}, rotation: rigid}`); `stream`, `hold`,
+`hold_compliance`, `hold_engage_force_n`, `hold_release_force_n`,
+`hold_relatch_max_force_n`, `fold_deviation` and a typed
+`law.translation.{b,k,mode,ref_force}` are refused at load. A client command may
+request `TareForceSensor`; it may not override the force law with a
 `force_control` payload.

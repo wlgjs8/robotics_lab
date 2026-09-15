@@ -29,7 +29,9 @@ sent input. The small discrepancy does not explain the reported large oscillatio
 
 - Preserve policy intent, free-space travel, tangential motion and force response.
 - No separate accumulating force displacement, workspace-radius fence or
-  task-specific press-axis gate in the new reference law.
+  task-specific press-axis gate in the new reference law. *(The live law's own
+  declared press axis was removed on 2026-09-15; the live gate now cuts along the
+  measured force vector.)*
 - 10 N is the current test threshold; an excursion may be transient but sustained
   contact must recover below it. The prototype uses an explicit 8 N recovery
   target. This is a development margin, not a hardware-qualified parameter.

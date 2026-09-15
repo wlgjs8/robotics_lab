@@ -97,8 +97,14 @@ public:
 
     void deactivate();
 
-    // Feed one received command pose into the goal delta integrator.
-    void updateGoalFromCommand(const Pose6D& command_pose);
+    // Feed one received command pose into the goal delta integrator. Returns the
+    // translation step [m] actually integrated into the goal this call: 0 when the
+    // call only (re)latched the command reference (first command after activation,
+    // the re-engagement guard) and the raw command's delta otherwise. This is the
+    // absolute-target source's DEMAND for the force gate: the goal-vs-command
+    // distance it replaced carried the engagement offset (a 5 mm standing offset
+    // read as 2.5 m/s), and the gate must never read the law's own yield back.
+    double updateGoalFromCommand(const Pose6D& command_pose);
 
     // Advance the SMD state by dt toward the integrated goal and return the
     // smoothed pose to publish. Requires active().

@@ -203,8 +203,8 @@ void SmdPoseTracker::deactivate() {
     last_min_singular_ = -1.0;
 }
 
-void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
-    if (!active_) return;
+double SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
+    if (!active_) return 0.0;
     // A command during the release brake is the operator pressing again: resume
     // tracking from the braked state. previous_command_ was cleared at the brake
     // start, so this first command only re-latches the reference (no jump).
@@ -214,7 +214,7 @@ void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
         // engagement offset between the commanded pose and the current state
         // cannot inject a jump; deltas integrate from here.
         previous_command_ = command_pose;
-        return;
+        return 0.0;
     }
     const Eigen::Vector3d previous_position = positionOf(*previous_command_);
     const Eigen::Quaterniond previous_rotation = rotationOf(*previous_command_);
@@ -235,7 +235,7 @@ void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
         (config_.reengage_relatch_max_step_rad > 0.0 && ang_step > config_.reengage_relatch_max_step_rad)) {
         previous_command_ = command_pose;  // re-latch reference; do not integrate the jump
         ++reanchor_count_;                 // telemetry: smd_reanchor_count ticks when the guard fires
-        return;
+        return 0.0;
     }
 
     goal_position_ += command_position - previous_position;
@@ -243,6 +243,7 @@ void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
     // delta semantics above.
     goal_rotation_ = (command_rotation * previous_rotation.conjugate() * goal_rotation_).normalized();
     previous_command_ = command_pose;
+    return pos_step;
 }
 
 Pose6D SmdPoseTracker::step(double dt_sec) {

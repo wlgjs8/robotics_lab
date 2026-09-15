@@ -109,7 +109,7 @@ int run(const char* stack,const char* profile,const char* events,const char* con
   json worker_histogram=json::object(),solve_histogram=json::object(),row_status_histogram=json::object();
   auto count=[](json& histogram,const char* name) {histogram[name]=histogram.value(name,std::size_t{0})+1;};
   json summary={{"schema","robotics_lab.live_preview_replay.v1"},{"status","running"},
-    {"scope","Actual asynchronous coordinator, worker, current-contact guard and brake with aligned canonical reference and the same followerPreviewContactAuthority mapping as the production loop. The recorded tick force gate and the DECLARED contact direction are supplied directly (since 2026-09-11 the press axis is declared, so there is no classifier state to reconstruct). Ideal nominal dispatch only; no backend, dynamic plant/force feedback, admittance overlay, IK, final joint safety or gripper. Worker completion uses externally stepped source clock; wall pacing governs delivery opportunities."},
+    {"scope","Actual asynchronous coordinator, worker, current-contact guard and brake with aligned canonical reference and the same followerPreviewContactAuthority mapping as the production loop. The recorded tick force gate and the recorded measured F_hat (ForceGate::contactNormal, the unit physical force in the stand frame) are supplied directly (since 2026-09-15 the contact direction IS the measured force, so there is no classifier state to reconstruct). Ideal nominal dispatch only; no backend, dynamic plant/force feedback, admittance overlay, IK, final joint safety or gripper. Worker completion uses externally stepped source clock; wall pacing governs delivery opportunities."},
     {"wall_pace_sec",wall_pace_sec},{"profile",profile}};
   summary["offline_options"]=options;
   summary["geometry_scope"]=reconstructed_geometry?
@@ -141,10 +141,13 @@ int run(const char* stack,const char* profile,const char* events,const char* con
        (!covered&&(tick_contact_gate!=1||!tick_contact_normal.isZero(0))))
       throw std::runtime_error("invalid contact authority");
     const bool recorded_active=j.at("active").get<bool>();
-    // 2026-09-11: the authority is the one curve's ratio and the DECLARED normal; the
-    // recorded `stream_armed` column only survives as an input-shape counter, because
-    // an axis that is declared needs nothing armed before it can be trusted. A recorded
-    // zero normal still means "no contact on the declared axis".
+    // 2026-09-15: the authority is the one curve's ratio and the recorded measured
+    // F_hat (ForceGate::contactNormal: the unit physical force in the stand frame,
+    // zero below the 0.5 N noise band). The recorded `stream_armed` column only
+    // survives as an input-shape counter, because a direction that is measured needs
+    // nothing armed before it can be trusted (2026-09-11 to 2026-09-15 it was a
+    // DECLARED tool-frame press axis). A recorded zero normal still means "no contact
+    // above the noise band".
     const auto contact=followerPreviewContactAuthority(
         recorded_active&&j.at("reference_strip_enabled").get<bool>(),
         tick_contact_gate,-tick_contact_normal);

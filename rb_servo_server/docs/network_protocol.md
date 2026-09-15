@@ -197,8 +197,13 @@ Each arm also publishes:
 - `force_torque`: raw/gravity/compensated wrench surfaces with named
   axes/reference points, liveness, bias/tare and automatic-tare state, tool
   parameters, and load estimate;
-- `force_control`: coverage/refusal reason, selected law, composed deviation,
-  gate, fence, wrench, and IK-refusal telemetry.
+- `force_control`: coverage/refusal reason, the active `source`
+  (`chunk_follower` / `hold` / `absolute` / `none`) and its `source_demand_m_s`,
+  the `contact_normal_stand` unit vector (the measured force direction every
+  consumer cuts along; zero below 0.5 N), composed deviation, gate, fence, fold,
+  wrench, and IK-refusal telemetry. `law`, `gate_rotation`,
+  `gate_stream_speed_m_s`, `gate_wrench_norm_n`, `hold_engaged` and
+  `hold_force_n` were removed on 2026-09-15 (one law, hold/stream are sources).
 
 J3 state remains raw controller degrees; supported commands and safety limits
 bound it to `[-150 deg, +150 deg]`.

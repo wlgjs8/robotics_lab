@@ -188,7 +188,7 @@ void CartesianChunkFollower::holdAtSentReference(const Pose6D& reference, double
 
 void CartesianChunkFollower::setAdvanceGate(double gate, const Eigen::Vector3d& dir) {
   advance_gate_ = gate < 0.0 ? 0.0 : (gate > 1.0 ? 1.0 : gate);
-  into_contact_dir_ = dir;
+  free_dir_ = dir;
 }
 
 bool CartesianChunkFollower::absorbOffset(const Eigen::Vector3d& dp_stand,
@@ -455,15 +455,16 @@ void CartesianChunkFollower::stepToNextSegment() {
                                      fold_shift_ - Eigen::Vector3d(p0[0], p0[1], p0[2]);
       diag_.demanded_advance_m_s = seg_dt_ > 1e-9 ? demand.norm() / seg_dt_ : 0.0;
     }
-    if (advance_gate_ < 1.0 && into_contact_dir_.squaredNorm() > 1e-18) {
+    if (advance_gate_ < 1.0 && free_dir_.squaredNorm() > 1e-18) {
       const auto& p0 = core_.p0();
       const Eigen::Vector3d advance = positionOf(window_.poseAt(k)) + plan_shift_ +
                                       fold_shift_ - Eigen::Vector3d(p0[0], p0[1], p0[2]);
-      const double proj = advance.dot(into_contact_dir_);
-      // proj < 0 means the advance drives AGAINST the reported force, i.e. deeper
-      // into the contact. Tangential and retreating advances are left alone.
+      const double proj = advance.dot(free_dir_);
+      // proj < 0 means the advance drives AGAINST the free-space direction (the
+      // measured force on the tool), i.e. deeper into the contact. Tangential and
+      // retreating advances are left alone.
       if (proj < 0.0) {
-        Eigen::Vector3d removal = (1.0 - advance_gate_) * proj * into_contact_dir_;
+        Eigen::Vector3d removal = (1.0 - advance_gate_) * proj * free_dir_;
         // Bound the per-segment hold-back to one segment of travel at the linear
         // velocity limit: the plan cannot have been advancing faster than that, so a
         // larger removal encodes stale lag rather than fresh contact.

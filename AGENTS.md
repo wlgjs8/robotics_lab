@@ -120,166 +120,165 @@ remains visible and auditable.
 
 ## Force Control
 
-2026-09-11 development update: the current requirement is transient excursions
-above the 10 N test threshold may occur, but contact must not remain at or above
-10 N. The possible future 20 N setting is not promoted. Historical rest/peak
-declarations below describe the existing law, not acceptance of the new goal.
-The runtime F/T adapter now uses valid, finite **measured joints from the wrench's
-RobotState** for flange rotation and gravity; an in-flight sent target is not the
-sensor pose. Calibration values and the left-handed basis stay intact.
-The new `RB_SERVO_BUILD_FORCE_EXPERIMENTS` option builds an **offline-only** force
-reference candidate. It is not linked to the runtime and failed robustness
-qualification; passing its ideal-model regression is not a promotion criterion.
-See `docs/reference/force_reference_development.md` for evidence and remaining work.
+ONE LAW, ONE STAGE, SINCE 2026-09-15 (operator: "hold / stream 구분 없이, 더 범용적인
+force control"). There is no stream law, no hold law, no declared press axis and no
+hand-guide latch. The law acts on the TRANSLATION VECTOR in the stand frame:
 
-The v1 stack was removed on 2026-08-26. A v2 was then rebuilt against
-`controller-manager` as the calibration and design authority, starting from
-sensor and tool setup, and is LIVE: `force_torque:` and `force_control:` are
-server config sections again, both are declared in `stack_real.yaml`, and the
-overlay has been validated on hardware (2026-08-26: deviation tracked F/k to
-0.97-0.99, rotation 1.85 deg at 55 N, zero fence hits).
+```
+m * v' + b * v = (|F| - rest_force_n)+ * F_hat        k = 0, rotation RIGID
+```
+
+`F` is the compensated, PRE-deadzone physical force at the TCP (low-passed by
+`force_control.wrench_filter_hz`; real 0.0 = raw, sim 25.0). At or below
+`rest_force_n` NOTHING moves, in any direction, so free space is never sought and a
+hand or a stopped press rests there. Above it the arm yields ALONG the measured
+force at `(|F| - rest)/b` (12 N -> 4 mm/s, 20 N -> 20 mm/s) and STAYS where it was
+dragged: the fold books the deviation into the source's plan every tick, so plan ==
+arm (yield-and-stay; a spring that RETURNS the arm was tried 2026-09-04/10 and
+rejected). Per-axis one-sidedness was rejected too: a diagonal 10 N push would read
+5.8 N per axis and never cross a per-axis rest force.
+
+**Config (`stack_real.yaml` / `stack_sim.yaml`):** `force_control.law: { translation:
+{m: 20.0}, rotation: rigid }` and `force_gate: {enable, peak_force_n 12, rest_force_n
+10, peak_vel_mm_s 4, close_tau_s 0.10, open_tau_s 0.40}`. `b` is DERIVED =
+`(peak_force_n - rest_force_n)/peak_vel_mm_s` = 2 N / 4 mm/s = 500 N*s/m and REFUSED
+if typed. Unchanged keys: `max_deviation_m` 0.040 (a dead backstop that only the
+absolute source can reach), the rate caps, `wrench_filter_hz`, the oscillation guard,
+`coverage_recover_sec`, `hold_latch_max_command_gap_m`, `command_execution_*`,
+`max_state_age_sec`. DELETED KEYS ARE REFUSED, NOT IGNORED: `stream`, `hold`,
+`hold_compliance`, `hold_engage_force_n`, `hold_release_force_n`,
+`hold_relatch_max_force_n`, `fold_deviation` fail the load with "was DELETED on
+2026-09-15 ..."; `law.translation.{b,k,mode,ref_force}` fail with "may not be typed
+(2026-09-15)"; `law.rotation` must be the literal `rigid`; the 2026-09-11 deletions
+(`force_gate.max_force_n`, `max_torque_nm`, the `stream_*` channel) stay refused.
+
+**The gate (CM 0049's curve, unchanged):** `g = (v_cross/v_s)^((|F|/peak_force_n)^2)`
+with `v_cross = peak_vel_mm_s`, judged on |F| of the PHYSICAL vector, `v_s` = the
+SOURCE's demanded advance only (never the achieved speed, never the law's own yield),
+direction = `F_hat`. At `peak_force_n` the gate's speed IS the law's yield, so a
+streamed contact converges at 12 N for every demand (closed-loop model: 12.00 N at
+30/60/150 mm/s, 0.00 N p-p). Every consumer — the chunk follower
+(`CartesianChunkFollower::setAdvanceGate`), the pose-track SMD
+(`SmdPoseTracker::constrainTranslation`) and the preview QP
+(`followerPreviewContactAuthority`) — cuts ONLY the into-contact component
+(`advance . F_hat < 0`) along the ONE `contact_normal` the servo loop publishes
+(`ForceGate::contactNormal()`: `F_hat` when |F| > 0.5 N, else zero; `+F_hat` is the
+free-space direction). Force-reducing motion is always free.
+
+**Sources (`ForceSourceKind {None, ChunkFollower, HoldPose, AbsoluteTarget}`), one per
+arm per tick:** `chunk_follower` — demand = plan advance, fold books into the pending
+plan fold; `hold` — a Hold under force control is ALWAYS a zero-demand source: latched
+at the last COMMANDED TCP once the motion generator is at rest, promoted to a
+`compliant_hold` TcpPoseTarget, routed to a hold-source stage that BYPASSES the
+pose-track SMD, the fold moves the hold pose, walled at ROI/floor; `absolute` — UMI
+teleop's absolute TcpPoseTarget: demand = raw target step/dt, fold DECLINED, fence
+live. `DualArmServoLoop::publishAdvanceGate` is the single writer of the follower's
+(gate, direction) slot; the ROI/floor fold owns it at gate 0 while it stands.
+
+**Telemetry.** JSON `force_control`: `source` ("chunk_follower" | "hold" | "absolute" |
+"none"), `source_demand_m_s`, `contact_normal_stand[3]`; REMOVED `law`,
+`gate_rotation`, `gate_stream_speed_m_s`, `gate_wrench_norm_n`, `hold_engaged`,
+`hold_force_n`. CSV: ADDED `<side>_fc_source`, `_fc_source_demand_m_s`,
+`_fc_contact_normal_{x,y,z}`; REMOVED `_fc_law`, `_fc_gate_rotation`,
+`_fc_gate_stream_speed_m_s`, `_fc_gate_wrench_norm_n`, all eleven `_smd_gate_*`,
+`_fc_hold_engaged`, `_fc_hold_force_n`. `_fc_fold_sink` is "chunk_follower", "hold" or
+"declined: ...". Kept: `_fc_gate_translation`, `_fc_gate_force_n` (|F| physical,
+filtered), `_fc_gate_closed`, `_fc_gate_{b_eff,m_eff,cross_speed_m_s,rest_force_n,
+peak_force_n}`, `_fc_dev_*`, `_fc_vel_*`, `_fc_folded`, `_fc_absorbed_*`,
+`_fc_bounded`, `_fc_osc_*`, `_fc_wrench_filt_*`, `_fc_covered`,
+`_fc_coverage_reason`, `_fc_reference_*`.
+
+**Known limit (closed-loop model, kept as a test):** the projective cut leaves the
+advance component perpendicular to `F_hat` alone, so under FRICTION the normal force
+settles above the declaration: mu 0.3 -> ~12.3 N at 30 mm/s, ~15.8 N at 150 mm/s; a
+constant 20 N lateral load at 100 mm/s -> ~26.5 N normal (and the arm yields sideways
+to the 20 N). Deadlock ("gate shut, law at rest") is structurally impossible: the law
+always has a yield direction. The impact PEAK `v*sqrt(k_env*m)` is bounded by nothing
+here (39.5 N measured at a 115 mm/s approach); 10 N is the steady state.
 
 CM is the reference. Sensor axes, tool mass/COM and the TCP offset come from
-`submodules/controller-manager/platforms/monkey/params-presets/` and were
-calibrated by the operator; do not re-derive them from the URDF. The sensor basis
-on this cell is LEFT-HANDED (det = -1) -- that is measured, not a bug.
+`submodules/controller-manager/platforms/monkey/params-presets/` and were calibrated
+by the operator; do not re-derive them from the URDF. The sensor basis on this cell is
+LEFT-HANDED (det = -1) — measured, not a bug. The runtime F/T adapter uses valid,
+finite MEASURED joints from the wrench's RobotState for flange rotation and gravity
+(an in-flight sent target is not the sensor pose). `RB_SERVO_BUILD_FORCE_EXPERIMENTS`
+builds an OFFLINE-only reference candidate that is not linked to the runtime and
+failed robustness qualification (`docs/reference/force_reference_development.md`).
+The requirement of record (2026-09-11): transients above 10 N may occur, sustained
+contact may not stay at or above it; a 20 N setting is not promoted.
 
-Two invariants the hardware taught, both enforced by the loader:
-- THE GATE, THE SPRING AND THE FOLD. `k > 0` with no gate ramps the contact force
-  without bound (961 N in 40 s); the gate with `k = 0` bounds force but not
-  deviation (9.5 m in 300 s) — UNLESS the fold is on. Since 2026-09-03 the tracked
-  stacks run CM's live shape: `k = 0` on every axis (m 12 / b 1000 translation,
-  m 0.3 / b 30 rotation), the 10 N gate, and `force_control.fold_deviation: true`,
-  which hands the deviation to the plan every tick (chunk follower chained state +
-  knots, or the compliant Hold's latched nominal) and drops the overlay's copy
-  while keeping its velocity — a gauge change, legal precisely because `k = 0`
-  (`AdmittanceOverlay::pureDamperTranslation/Rotation`, `DualArmServoLoop::
-  foldForceDeviation`). An absolute-`TcpPoseTarget` source (UMI teleop) declines
-  the fold and keeps its deviation fenced. With `k = 0` the contact force is a
-  by-product (`b * v * g(F)`, ~7.6 N for 50 mm/s at b 1000), not a designed number;
-  a designed force needs a `ref_force` (CM 0039), which is the next step.
-  **2026-09-10 — `k = 0` + the fold on BOTH laws, and the floor bounce is fixed
-  elsewhere.** The spring (`k = 400`) was tried for a few hours the same day because
-  `k = 0` has no force setpoint; it worked as designed (deviation 0.4-10 mm, exact
-  strip/compose) but it RETURNS the arm, and the requirement is yield-and-stay: a
-  force drags the arm by that much, the arm stays, and the policy re-observes and
-  re-plans from there (measured with the spring: pushed 37 mm out, back at
-  238 mm/s). `k = 0` + fold makes plan == where the arm actually is, so no offset
-  accumulates. What the spring was standing in for on the floor is now done by two
-  structural changes: the into-contact hold-back is COMPLETE while a sustained
-  contact stands (it used to leak 5-20 % of the advance and wind the reference
-  3-13 mm past the surface), and the preview plan is leashed against the follower's
-  own output (it used to run 37 mm away and snap back). Both were corrected the same
-  evening: the hold-back's contact DIRECTION now needs a release dwell
-  (`stream_release_dwell_sec`, else a chattering push disarmed it ~30 times a second),
-  and the leash moved OFF THE POSE AND ONTO THE PLAN CLOCK. Two position clamps were
-  built and removed on 2026-09-10 — an accumulating one that sawtoothed the command at
-  the 100 Hz replan rate, then a stateless projection that had no velocity continuity
-  (-17.7 m/s² entering, +9.6 m/s² leaving, and it held a legitimate motion off for
-  380 ms). A clamp also cannot tell a runaway from the tracker's designed anticipation:
-  the reference is the follower rolled 240 ms forward, so the lead is LARGEST when the
-  source is slow (measured max 20 mm at 0-50 mm/s vs 7 mm at 250-350 mm/s), the same
-  scale as the 25-45 mm runaways. The lead is now published
-  (`*_preview_execution_plan_lead_m`) and ramps the follower's knot clock down
-  (`preview_execution.plan_lead_leash_*`, 25 → 50 mm → gate 0.25), which slows the
-  reference and the plan together and can never step the command. **2026-09-11 — THE CONTACT FORCE IS DECLARED, IN TWO NUMBERS.** The gate was CM's
-  pre-0049 shape: a knee-less smoothstep reaching ZERO at `max_force_n`. That bounds the
-  force and converges to 0 N, because the law keeps yielding (`F/b`) exactly where the
-  gate has stopped the plan — measured by hand on the floor
-  (`servo_log_20260911_123239`): 28 N of reaction, then 6.3 mm of retreat and a rest at
-  0.1-1.0 N, with no spring anywhere (`fc_dev_norm_m` ≤ 0.18 mm at 50 N, because the fold
-  books it). A pure damper's only equilibrium IS `F = 0`. Replaced by CM 0049's curve,
-  adopted identically: `g(F) = (v_cross/v_s)^((F/peak_force_n)^q)`, `q = 2` compiled in,
-  `v_cross = (peak_force_n − rest_force_n)/b`, `b` DERIVED from the pair (raise-only,
-  logged at load), and `max_force_n` / `max_torque_nm` / the whole sustained-contact
-  stream channel refused as deleted keys. At `peak_force_n` the curve returns `v_cross`
-  whatever the stream speed is, and that point is on the law's own yield line, so the two
-  cross AT the declaration: verified closed-loop at the measured 4.4 N/mm with 18 ms of
-  delay, 12.00 N at 30 / 60 / 150 mm/s, 0.00 N p-p.
-  `rest_force_n` IS OURS, NOT CM'S, and it is the second half: CM runs rest = 0, which
-  pins the force only while the plan advances faster than `v_cross` — at `v_s → 0` (a hand
-  press, or a policy's own press-and-hold) their equilibrium is `F = 0` again. A ONE-SIDED
-  rest force (`mode: force` on the declared press row) makes `|F| ≤ rest_force_n` a
-  continuum of equilibria: the axis does not move there, so free space can never be sought
-  (the walk CM has to bound with a fence) and a contact RESTS at the declaration. The
-  PRESS AXIS IS DECLARED, not inferred — the law's single `mode: force` translation row in
-  the TOOL triad (re-aimed every tick), with only its SIGN taken from the measurement.
-  That deleted the arm/release Schmitt, the release dwell, the 2 Hz slow-vector direction
-  and the complete hold-back with it: an axis cannot rotate, and the leak a proportional
-  fade used to be blamed for IS the equilibrium now. What this does NOT fix is the impact
-  peak (`v·sqrt(k_env·m)`, 39.5 N at a 115 mm/s approach): 10 N is the steady state, not
-  the transient. THE CONTACT CLAMP IS DELETED (2026-09-11 evening). The executor used to cut the
-  dispatched closing velocity to the follower's gated authority and book the refusal,
-  echoing it as the dispatched state and retiring it on admission. Measured on the day's
-  policy runs, that book-and-retire owned the vibration: 91-100 % of every |command
-  acceleration| > 10 m/s² (up to 78 m/s²) fell within 16 ms of a clamp firing, on both
-  arms of three runs, with the clamp firing on 28-45 % of active ticks and its shift
-  sawtoothing 0 → 1.8-7.3 mm at the 100 Hz replan rate. Contact is carried by the QP's
-  per-knot closing-velocity bound alone (already active on 78-93 % of those ticks); the
-  cost is the 10 ms splice window, ≤2 mm at 200 mm/s, continuous instead of a step.
-  Measured after: 50-250 Hz command content 13.3 → 3.6 mm/s RMS, dispatch acceptance
-  error 1.85 → 0.003 mm, max command acceleration 67 → 12.6 m/s² (the tracker's own
-  limit), backlog 85 → 0 ms, recovery entries 83 → 0, no fault. THE GATE'S RE-OPEN IS
-  NOT A FREE PARAMETER: dropping `open_tau_s` to 0.15 s in the same change doubled the
-  gate's median authority and the commanded speed through a standing contact (68.6 →
-  127.1 mm/s) and grew the 5-15 Hz ripple 50 % — the operator felt MORE vibration. CM's
-  measurement already said below 200 ms the contact loop sustains a limit cycle; the
-  crossing gives the loop an equilibrium but not a margin. Back at CM's shipped 0.40 s.
-  THE GATE IS JUDGED ON THE PRESS-AXIS COMPONENT, NOT |F|. The crossing is an identity
-  between the gate's speed at the declared force and the LAW's yield there, and the law
-  only yields past `rest_force_n` on ONE axis: judged on |F| an off-axis contact shuts
-  the gate for a force nothing yields, and the only equilibrium left is "gate shut, law
-  at rest" — the contact sits at `rest_force_n` with ZERO advance authority, the
-  follower's reference freezes and the executor runs away. Measured
-  (`servo_log_20260911_141234`, fault at 12.53 s): |F| 26-35 N against a press component
-  of 0.3-29 N, lead 25-30 mm, backlog to 86 ms, `braking_expired`, then
-  `accepted_deviation`. Modelled with a 20 N lateral load: judged on |F| the contact
-  converges at 10.0 N with the gate at 0.0000; judged on the component, 12.00 N at every
-  stream speed. `ForceGate::applyTranslation/applyRotation` are gone with the same
-  argument — they projected onto the MEASURED wrench, whose tilt under a lateral load
-  left 36 % of the into-contact advance uncut and moved the crossing to 27.4 N; the live
-  path cuts along the declared normal only.
-  THE DIRECTION MAY NEVER SWITCH AT AN OPERATING FORCE. Withdrawing the declared normal
-  below `rest_force_n` put a hard switch exactly where the design operates: with the
-  normal present the ratio removes 99 % of the advance, with it absent the follower
-  removes NOTHING whatever the ratio says, so a contact sitting at the rest force
-  alternated between 1 % and 100 % authority at the wrench's ripple rate — 52 Hz on both
-  arms for 5.3 s (`servo_log_20260911_134703` 520-525 s: 276/273 transitions, normal
-  present 37 % of ticks, |F| 4-50 N, q_sent 3,216 deg/s², then `accepted_deviation`).
-  Both arms shook because both sat at the threshold, not because they are coupled. The
-  sign band belongs at ZERO (0.5 N of noise floor): the gate is already exactly 1.0 in
-  free space, so a normal with g = 1 removes nothing and never needed withdrawing.
-  ONE-SIDED FORCE AXES ARE FOLDABLE, and they must be: the first hardware
-  run declined the fold on the declared press row (`pureDamperTriad` excluded FORCE mode,
-  an argument written for the two-sided setpoint's free-space walk), so a hand push
-  accumulated its whole yield in the overlay and pinned the 40 mm fence — the arm went
-  rigid there (`servo_log_20260911_133829`: dev 40.0 mm, `bounded` for 3606 ticks).
-  Since the evening of 2026-09-03 rotation is RIGID on both laws and the hold law
-  carries a hand-guide ENGAGEMENT LATCH (`hold_engage_force_n` 5 / `hold_release_force_n`
-  2, judged on the physical pre-deadzone |F|; `control::HoldEngageLatch`), with the
-  F/T deadzone at 3 N: measured on the RB5 right arm, every degree of unwanted
-  rotation came from 1-5 N at the F/T housing (0.18 m lever, cable/resting contact),
-  never from fingertip pushes, and the arm crawled 38 times in 228 s of hand-off time
-  on forces just past the 2 N deadzone. The frame is the TCP; what changed since the
-  CM-era law is the rotational stiffness (250 -> 8 -> 0).
-  2026-09-04: the STREAM law got its spring back (k 400 = 10 N / 25 mm, CM 0028's
-  spring under the gate) because the operator's requirement is "hold the contact at
-  the configured N"; k = 0 settles at a speed-dependent by-product and limit-cycles
-  at the policy's 100+ mm/s (closed-loop model + `test_force_control.cpp`). The gate
-  is judged on the PHYSICAL pre-deadzone |F| (else it closes 3 N late). The fold
-  declines for the spring law, so every plan-side anchor strips the standing
-  deviation first (`DualArmServoLoop::nominalOfEmitted` / `AdmittanceOverlay::strip`).
-  The hold law stays k = 0 + fold (hand-guide). The gate acts on BOTH streaming
-  paths: the chunk follower (plan shift) and the absolute-target pose-track SMD
-  (`SmdPoseTracker::constrainTranslation`: the tracker's state is held, its goal
-  is not, so a released contact leaves no offset).
-  Stability with `k = 0` is a DELAY margin and `b` is the only knob:
-  `rb_servo_server/tools/force_loop_margin.py` and the WallLoop test in
-  `test_force_control.cpp` are the evidence; `docs/reference/
-  force_control_stability_margin.md` has the tables.
-- THE WRENCH REFERENCE POINT AND THE COMPOSE PIVOT MOVE TOGETHER. Both are the
-  TCP. A torque referenced at one point driving rotation about another makes a
-  straight push twist the tool.
+Two loader invariants remain, both taught by hardware, plus one design invariant:
+- THE GATE PAIR IS REQUIRED AND DERIVES b. `peak_force_n`, `rest_force_n` and
+  `peak_vel_mm_s` must all be declared (else "law.b was not derived"); a damper with
+  no gate ramps force with the plan, a gate with no rest point converges to 0 N.
+- `law.translation.m >= 2*b*dt` (dt = 0.002) else REFUSED — the semi-implicit Euler
+  step diverges above it. It used to be a silent raise of m; a number the operator
+  predicts the robot from may not move on its own.
+- (Still true) THE WRENCH REFERENCE POINT AND THE COMPOSE PIVOT MOVE TOGETHER: both
+  are the TCP, or a straight push twists the tool.
+
+**History (measured numbers kept; full text in git before 2026-09-15):**
+- 08-26 v1 wiped; v2 rebuilt on CM: deviation tracked F/k to 0.97-0.99, 1.85 deg
+  at 55 N, zero fence hits. 08-27 wrench low-pass + oscillation guard after a hand
+  push pinned the 40 mm fence and rang ~5.3 Hz to E-stop (98.6 N swings).
+- 09-03 k = 0 + fold like CM (k = 0 without the fold walked 9.5 m; k > 0 without
+  the gate hit 961 N); rotation rigid (every unwanted degree came from 1-5 N at the
+  F/T housing); hand-guide latch 5/2 N (38 crawls in 228 s at the 2 N deadzone).
+- 09-04 stream spring k 400 tried; gate on physical |F|; Hold latched at the
+  COMMAND, not the measured TCP (5-11k deg/s2 pedal kicks).
+- 09-10 spring reverted (it RETURNS the arm: 37 mm out, back at 238 mm/s; the
+  requirement is yield-and-stay); complete hold-back + plan-clock leash; two
+  position clamps built and removed (-17.7/+9.6 m/s2 steps, 380 ms hold-off).
+- 09-11 CM 0049 pair adopted (the old gate faded to ZERO at `max_force_n`, a pure
+  damper's only equilibrium: 28 N -> 0.1 N measured); press axis declared (tool z,
+  `mode: force`); 52 Hz direction switch at the rest threshold fixed (276
+  transitions in 5.3 s, 3,216 deg/s2); gate judged on the press component (on |F|
+  a 20 N lateral load converged at 10 N with gate 0.0000); one-sided row made
+  foldable (a push pinned the fence 3,606 ticks); contact clamp DELETED (91-100 %
+  of |command accel| > 10 m/s2 within 16 ms of a clamp; after: 13.3 -> 3.6 mm/s
+  RMS, max 67 -> 12.6 m/s2); `open_tau_s` 0.15 rang (+50 % ripple) -> 0.40.
+- 09-15 the latch was fed the press component instead of |F| (ba89b399): a
+  20-40 N lateral push staircased, 31 toggles, release kicks 1,000-3,280 deg/s2 ->
+  latch off; the compliant Hold's own yield was read back as stream demand (SMD
+  goal-rate, corr 0.997 with the overlay velocity) and closed the gate to 0.095 in
+  a hand push (`servo_log_20260915_112545`); tool x/y ungated, so a hand on the
+  gripper mid-chunk saw F = b*v_plan (50 N at 100 mm/s); the fold declined on the
+  press row and pinned the fence. -> THE UNIFICATION ABOVE.
+
+**Hardware acceptance (in order; read the columns with
+`rb_servo_server/tools/analyze_force_stage.py LOG --arm both`):**
+1. InitMotion + auto-tare on both arms -> `_fc_covered` 1, `_fc_source` hold,
+   `_fc_gate_translation` 1.00, `_fc_source_demand_m_s` 0, `_fc_vel_*` 0.
+2. Hand-push each arm to the floor and hold: `_fc_gate_force_n` settles 9-11.5 N,
+   `_fc_vel_*` -> 0, `_fc_fold_sink` hold; release -> the arm STAYS (command drift
+   < 1 mm over 5 s), no re-approach.
+3. Lateral and diagonal pushes > 10 N: the arm yields at `(|F| - 10)/500` along
+   `_fc_contact_normal_*` and stays; 5-8 N moves nothing.
+4. Policy run: grab the tool for 1-2 s, twice. The plan must NOT stop
+   (`_fc_source` stays chunk_follower, `_fc_fold_sink` chunk_follower, no
+   `braking_expired` / recovery), the arm yields and stays, `fault_latched` 0,
+   max |`_q_sent_accel_deg_s2_*`| < 1,500, `_fc_bounded` 0.
+
+**2026-09-15 (evening) — TOOL INERTIA IS COMPENSATED, FROM THE COMMANDED TRAJECTORY.**
+The first policy run under the one law (`servo_log_20260915_153420`, hardware steps
+1-3 of the acceptance passed, step 4 faulted in 0.25 s) showed what the press-axis
+design had been hiding: the compensated |F| tracked the tool's OWN acceleration with
+|F| / (m·|a_TCP|) = 1.0 and cos 0.85 on both arms (m 0.81 kg), so the policy's
+12 m/s² start read as 12 N of contact, the law yielded and the gate closed against it
+(0.27-0.36 at 80-218 mm/s demand), the executor answered with more acceleration, and
+the loop ran to 30-100 N, 15,000-18,500 deg/s² and `accepted_deviation`. No hand was
+on either tool (|F| < 1.5 N until the plan moved); the preview QP rejected nothing. The
+box compensates neither weight nor inertia, so gravity now generalises to `m·(g − a)`
+in `FtPipeline` (`force_torque.inertia_compensation`, `*_ft_inertial_sensor_*`
+logged beside gravity). `a` is the COMMANDED tool-COM acceleration — one FK per tick
+into a ring, central second difference read `command_delay_ticks` (14 ≈ 28 ms; the
+lag scan on the same run peaks at 14-16 ticks) back; the measured joints are too noisy
+to differentiate (27 N p99 from a 9-sample fit, 2026-09-11). Above `max_accel_m_s2`
+(30) the term is refused and flagged, and the ring is cleared on every command-chain
+break (init reset, freedrive resync). A model term like gravity, not a rule. Residual
+in the violent regime is still ~half (the box's servo overshoots the commanded
+acceleration ~2× there), but the loop cannot START from a compensated 12 → ~4 N.
+Unverified on hardware at the time of writing.
 
 ### The zero (tare)
 

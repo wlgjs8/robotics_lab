@@ -943,6 +943,26 @@ force_torque:
   # with zero it sees the tool's weight as an external force.
   push_zero_payload_to_box: true
 
+  # ---- TOOL-INERTIA COMPENSATION (2026-09-15) -----------------------------------
+  # The sensor reads the tool's inertial reaction -m*a exactly as it reads its weight
+  # m*g, and the box compensates neither. With the force law isotropic every axis now
+  # sees it. MEASURED on the first policy run under the one law (servo_log_20260915_
+  # 153420, 62.8-63.0 s): the compensated |F| tracked the tool's own TCP acceleration
+  # with |F| / (m*|a|) = 1.0 and cos 0.85 on BOTH arms - 12 N at the policy's 12 m/s^2
+  # start (0.81 kg) - which the law read as contact, yielded and gated against; the
+  # executor answered with more acceleration, 30 N, 15,000 deg/s^2 and
+  # accepted_deviation within 0.25 s. Gravity generalises to m*(g - a).
+  # a is the COMMANDED tool-COM acceleration (the measured joints are too noisy to
+  # differentiate: 27 N p99 from a 9-sample fit, 2026-09-11) read command_delay_ticks
+  # back: the sent command reaches the sensor's flange ~28 ms later on this cell (lag
+  # scan on the same run: cos peaks at 14-16 ticks; 22 ms wire + F/T sample). Above
+  # max_accel_m_s2 the term is zeroed and flagged (*_ft_inertia_valid 0): a hold snap or
+  # a resync jump, never a trajectory. Logged as *_ft_inertial_sensor_* beside gravity.
+  inertia_compensation:
+    enable: true
+    command_delay_ticks: 14
+    max_accel_m_s2: 30.0
+
   # ---- AUTOMATIC TARE ON InitMotion -----------------------------------------
   # Pressing InitMotion re-zeros that arm's sensor. The operator no longer has to
   # remember a separate tare, which is the failure that leaves force control refusing
@@ -1065,268 +1085,102 @@ force_torque:
     applied_force_mm: [0.0, 0.0, 202.642]
 
 # =============================================================================
-# FORCE CONTROL — the admittance overlay on the emitted Cartesian target.
+# FORCE CONTROL - ONE LAW, ONE STAGE, ANY SOURCE (2026-09-15, operator: "hold / stream
+# 구분 없이, 더 범용적인 force control").
 #
-# THE LAW IS controller-manager's FOLLOW path, ported: that is the consumer whose
-# problem matches ours (a streamed Cartesian plan that must yield to contact without
-# abandoning the plan). The numbers are CM's shipped 10 N row, which is ONE SOLVE —
-# k, b and the gate threshold are not independent, and mixing a b from one row with a
-# k from another is not a tuning, it is a different system.
+#     m*v' + b*v = (|F| - rest_force_n)+ * F_hat      translation VECTOR, stand frame, k = 0
 #
-#   k = max_force_n / d_max          10 N / 25 mm = 400 N/m
-#   b = 2*zeta*sqrt(m*(k + k_env))   zeta = 0.25, k_env = 5e4 (hard plastic)
-#   m = 15 kg                        owner constraint 10..15
+# F is the compensated, PRE-deadzone physical force at the TCP (low-passed by
+# wrench_filter_hz), F_hat its direction. |F| <= rest_force_n: nothing moves, in ANY
+# direction (free space is never sought). Above it the arm yields ALONG the measured
+# force at (|F| - rest)/b whatever the direction - 12 N -> 4 mm/s, 20 N -> 20 mm/s - and
+# STAYS where it was dragged: every tick the deviation is folded into the source's
+# plan (plan == arm, no standing offset, no spring-back). Rotation is RIGID.
 #
-# WHY zeta = 0.25 AND NOT 1.0: critical damping is WORSE here, measured. A large b
-# physically RESISTS the offset's retreat at the moment of impact and raises the peak
-# (65.4 N at zeta 1.0 against 47.2 N at zeta 0.25), while the gate already stabilises
-# the loop.
+# WHO DRIVES THE PLAN IS A SOURCE OF THIS STAGE, NOT A LAW:
+#   chunk_follower  a policy plan; demand = its advance, the fold moves the plan.
+#   hold            a Hold under force control is ALWAYS a zero-demand source: it yields
+#                   to a hand above rest_force_n, stays, and its pose is walled at the
+#                   ROI/floor. No latch, no relatch guard, no separate law.
+#   absolute        an absolute TcpPoseTarget (UMI teleop): demand = the raw target's
+#                   step rate, the fold is declined (the source re-issues its target)
+#                   and max_deviation_m below is its dead backstop.
 #
-# THE IMPACT PEAK IS NOT max_force_n. First contact at speed spikes far above it
-# because the impact resolves in 30-50 ms while the gate needs ~70 ms to arrive. The
-# gate regulates the SUSTAINED force; it cannot catch the transient. The two levers
-# are approach speed and m — not this threshold.
+# THE GATE (CM 0049) cuts only the SOURCE's advance INTO F_hat, judged on |F|:
+#   g = (v_cross/v_s)^((|F|/peak_force_n)^2), v_cross = (peak - rest)/b = peak_vel_mm_s,
+# so the gate's speed at peak_force_n IS the law's yield there and a streamed contact
+# converges at peak_force_n for every demand (verified 12.00 N at 30/60/150 mm/s in the
+# closed-loop model, test_force_control). A Hold has demand 0 -> g = 1 by construction.
+#
+# KNOWN LIMIT: the projective cut leaves the advance perpendicular to F_hat alone, so
+# under FRICTION the normal force settles above the declaration (mu 0.3: ~12.3 N at
+# 30 mm/s, ~15.8 N at 150 mm/s). A deadlock ("gate shut, law at rest") is impossible:
+# the law always has a yield direction. The impact PEAK is v*sqrt(k_env*m) and is not
+# bounded by any number here (39.5 N measured at a 115 mm/s approach).
+#
+# WHAT WAS HERE BEFORE (a `stream` law + a `hold` law, per-axis {m,b,k,mode} triads,
+# one declared tool-z press axis, the 5/2 N hand-guide latch, the 5 N relatch guard,
+# `hold_compliance`, `fold_deviation`) is refused by the loader with a dated message.
+# The measured history that justified each of those keys lives in git
+# (rb_servo_server/config/stack_real.yaml before 2026-09-15) and in AGENTS.md.
 # =============================================================================
-
 force_control:
   enable: true
 
-  # *** TWO CONSUMERS, TWO LAWS - AND RIGHT NOW THEY CARRY THE SAME NUMBERS. ***
-  # That is a DECISION (operator, 2026-08-26 and again 2026-09-03), not duplication:
-  # the split stays because the two problems are different and the numbers may
-  # diverge again.
-  #
-  # ============================================================================
-  # 2026-09-03: SPRING 0, LIKE controller-manager. k = 0 ON EVERY AXIS + THE FOLD.
-  # ============================================================================
-  # Until today this block was CM's 10 N ROW (m 15 / b 434.7 / k 400, gate 10 N):
-  # "F converges to the gate's number, d converges to F/k = 25 mm". The operator
-  # decided to follow CM's live configuration instead (platforms/*/params-tasks/
-  # follow.yaml since 2026-08-25: m 12 / b 1000 / k 0, gate 30 N), with the one
-  # mechanism that makes k = 0 workable: THE FOLD (force_control.fold_deviation).
-  #
-  # WHAT k = 0 CHANGES, STATED PLAINLY:
-  #   * There is no spring, so the deviation is a bare integrator with no
-  #     equilibrium but w == 0. Under a streamed plan the GATE stops the advance at
-  #     max_force_n and the DAMPER then retreats at F/b until the wrench is inside
-  #     the F/T deadzone (2 N). A sustained streamed contact therefore rests in the
-  #     2..10 N band, not AT a designed number - CM measured its k = 0 force as
-  #     b*v_cmd, a by-product of the stream speed (wiki/decisions/0028 SS2). A
-  #     designed converged force needs a ref_force (CM 0039's one law, HANDOFF item
-  #     4); that is the NEXT step, not this one.
-  #   * Without the fold the deviation walks without bound (CM: 9.5 m in 300 s;
-  #     resting bias 2.4 N -> 4.7 mm/s; the 40 mm fence pinned 2657 times in a run
-  #     and the arm went rigid there; on 2026-08-26 a singularity guard stopped both
-  #     arms on a nominal chain 97 mm from a healthy emitted pose). The fold hands
-  #     the deviation to the plan EVERY TICK - the chunk follower's chained state and
-  #     knots, or the compliant Hold's latched nominal - and the overlay drops its
-  #     copy while keeping its velocity. Emitted pose unchanged: a change of
-  #     variables, legal precisely because k == 0 (AdmittanceOverlay::
-  #     pureDamperTranslation). The plan and the command are ONE chain again.
-  #   * The fence is UNREACHABLE on a fold path. What still bounds free-space drift
-  #     under a standing wrench: the F/T deadzone (a tare is a precondition, not a
-  #     nicety), the deviation RATE caps below, and the ROI / collision / joint
-  #     layers downstream. The fence stays as a dead backstop for the paths that
-  #     DECLINE the fold (an absolute TcpPoseTarget source - UMI teleop - keeps its
-  #     deviation in the overlay because it re-issues its target every tick).
-  #
-  # WITH k = 0 THE ONLY STABILITY KNOB IS b, AND THE BINDING CONSTRAINT IS PHASE
-  # MARGIN AGAINST TRANSPORT DELAY, NOT ZETA (docs/reference/
-  # force_control_stability_margin.md; the model reproduces CM's measured ring to
-  # 4 % and our own 2026-08-27 incident to 6 %). L(s) = k_env/(s(ms+b)) * LPF(25 Hz)
-  # * exp(-s T_d). Gain margin [dB] against a rigid surface, k_env 30.7 kN/m (CM's
-  # 08-27 jig) / 44.4 kN/m (CM's 08-26 jig), translation (tools/force_loop_margin.py):
-  #
-  #     m      b   | T_d 12 ms        | T_d 18 ms        | T_d 26 ms
-  #    15  434.7   |  -1.3  / -4.5    |  -3.7  / -6.9    |  -6.0  / -9.2   <- the OLD row at k=0: rings
-  #    12    700   |  +3.5  / +0.3    |  +1.2  / -2.1    |  -1.1  / -4.4
-  #    12   1000   |  +7.1  / +3.9    |  +4.7  / +1.5    |  +2.4  / -0.8   <- CM's pick (LIVE until the evening of 09-03; see the m 6 / b 500 block below)
-  #    12   1500   | +11.1  / +7.9    |  +8.7  / +5.5    |  +6.3  / +3.1      (CM ran it; "sluggish")
-  #
-  # THE LINEAR MARGIN IS NECESSARY, NOT SUFFICIENT: the gate is a second loop and a
-  # nonlinear one. Closed offline through a rigid wall (test_force_control.cpp
-  # WallLoop, 50 mm/s stream, 25 Hz filter, force_gate.open_tau_s 1.0):
-  #     b 1000: 18 ms / 30.7 kN/m settles flat; 18 ms / 44 kN/m and 26 ms / 30.7 kN/m
-  #             still ring 12 N p-p; a 200 mm/s approach rings everywhere.
-  #     b 1500: halves those amplitudes; a hand (1 kN/m) and wood (15 kN/m) are
-  #             quiet at every delay with either b.
-  # So against a RIGID surface at this cell's delay b = 1000 is marginal, exactly as
-  # CM found on its jig (+0.6 dB), and the lever that actually buys margin is the
-  # DELAY (CM: "at T_d = 13 ms a 6 dB margin needs only b = 717"). The oscillation
-  # guard below is the backstop while that is worked on; b = 1500 is the fallback
-  # if a ring shows up on hardware.
-  #
-  # T_d ON THIS CELL IS NOT SETTLED: 12 ms is what the RB3 / fw 8.7.3 ring implied,
-  # and CM measured the command->reference echo at 18 ms on fw 8.9.1 (26090101),
-  # the firmware these boxes run since 2026-09-02. Read the 18 ms column until it
-  # is re-measured. b = 1000 is +4.7 dB there against the softer jig and +1.5 dB
-  # against the harder one - on the right side of unity, not comfortably.
-  #
-  # WHAT b COSTS, IN BOTH DIRECTIONS: a hand pushing the arm at v feels F = b*v,
-  # so 30 mm/s costs 30 N at b = 1000 (13 N at the old 434.7; CM's operator called
-  # 1500 = 45 N sluggish within a session). AGAINST A WALL under a stream the
-  # sustained force before the gate closes is b*v_cmd - b and stream speed trade
-  # 1:1. And the bias walk (a wrench above the deadzone that is not contact) runs at
-  # w/b: 2.4 N -> 2.4 mm/s here.
-  #
-  # THE DISCRETE LIMIT is untouched: the loader refuses b >= m/dt = 6000; 1000 is
-  # 17 % of it.
-  #
-  # THE IMPACT PEAK IS NOT max_force_n, and no b here changes that: the impact
-  # resolves in 30-50 ms while the gate needs its own close time to arrive. The
-  # peak is v * sqrt(k_env * m); the parameter that governs it is
-  # force_gate.close_tau_s and the approach speed, not the law.
-  # ---- m 6 / b 500 (2026-09-03 evening, operator) -----------------------------------
-  # The task is dual-arm pick & place and this law exists to keep the tool from being
-  # pressed into the table, not to survive fast rigid impacts. With k = 0 the SUSTAINED
-  # contact force is set by force_gate.max_force_n (the closed-loop model, gate + 3 N
-  # deadzone + delay, settles at 8-10 N for EVERY b), so b only decides how fast the
-  # arm yields (F/b: 10 N -> 20 mm/s here, was 10 mm/s) and the first-contact
-  # transient (15-20 % lower than at m 12 / b 1000). Both favour a lower b for this
-  # purpose. What a lower b costs is delay margin, and that is decided by the CONTACT
-  # STIFFNESS, not by the approach speed (tools/force_loop_margin.py, 25 Hz filter):
-  #
-  #     m / b    | k_env  5 kN/m | 10 kN/m | 15 kN/m | 30.7 kN/m      (T_d 18 ms / 26 ms)
-  #     6 / 500  | +14.4 / +12.1 | +8.4/+6.1 | +4.9/+2.6 | -1.3 / -3.6   <- LIVE
-  #     8 / 600  | +15.9 / +13.6 | +9.9/+7.5 | +6.3/+4.0 | +0.1 / -2.2      fallback
-  #    12 / 1000 | +20.4 / +18.1 |+14.4/+12.1|+10.9/+8.6 | +4.7 / +2.4      CM's row
-  #
-  # The pika fingertips are TPU 95A, so the contact this cell makes is expected well
-  # under 15 kN/m (stable by 2.6 dB or more), and the tip's own give absorbs part of
-  # the 0.5-2 mm the model shows the tool yielding. NOT MEASURED YET: if a press shows
-  # a 5-8 Hz ring on *_fc_gate_force_n, that contact is ~30 kN/m and the row to step
-  # back to is 8 / 600. The oscillation guard stays as the backstop either way.
-  # Hand cost (hold law shares these numbers): 15 N at 30 mm/s, was 30 N.
-  # ---- 2026-09-04: THE STREAM LAW GETS ITS SPRING BACK - k = 400 = 10 N / 25 mm ----------
-  # The operator's requirement is "hold the contact at the configured N once pressed"
-  # (first-contact peaks are accepted). With k = 0 that is not what happens: the
-  # sustained force is the balance between the gate's creep and the damper's retreat,
-  # a by-product of speed and b, and at the policy's 100-135 mm/s it limit-cycles
-  # (closed-loop model, 15 kN/m, 26 ms: 8.6 +/- 5.9 N at 100 mm/s, 9.6 +/- 7.6 at 135).
-  # CM 0028's shape - a spring UNDER the gate - is what converges: F -> max_force_n
-  # exactly, d -> max_force_n / k, at every speed (CM measured 14.95-14.99 N for a 15 N
-  # threshold from 10 to 50 mm/s). Same model, this row, gate 10 N judged on the
-  # PHYSICAL force (see force_gate below), 15 kN/m, T_d 26 ms:
-  #     v 20 mm/s 9.4 N | 50 mm/s 9.7 | 100 mm/s 9.9 | 135 mm/s 11.4   (k 600 drifts to 14.7)
-  # and the contact still releases within ~50 ms when the plan lifts. k = 400 is CM's
-  # 10 N row (10 N / 25 mm); the 40 mm fence is 1.6x away, as it was in August.
-  #
-  # WHAT THIS COSTS AND WHERE IT IS PAID: with k > 0 the FOLD DECLINES for this law
-  # (AdmittanceOverlay::pureDamperTranslation is false), so the deflection stands in the
-  # overlay - up to 25 mm at 10 N - and springs back. Every plan-side anchor (the chunk
-  # follower's seed / re-anchor / lead guard, the pose-track SMD's reseed) now strips
-  # it first (DualArmServoLoop::nominalOfEmitted), otherwise a contact would read as
-  # 25 mm of plan lead against the 35 mm budget and a re-anchor would compose it twice.
-  # The hold law keeps k = 0 + fold (a hand-guide has no force to converge to).
-  # Delay margin is unchanged by k (tools/force_loop_margin.py --k 400).
-  stream:
-    # THE SAME LAW AS stack_real.yaml (2026-09-11): tool-frame triad, k = 0 on all three,
-    # TOOL Z declared as the press axis. The spring this file used to carry (k 400) was
-    # withdrawn on 2026-09-10 - it holds a force by RETURNING the arm, and the
-    # requirement is yield-and-stay - and the two laws must now be identical anyway.
-    translation:
-      - {m: 20.0, b: 500.0, k: 0.0}     # tool x
-      - {m: 20.0, b: 500.0, k: 0.0}     # tool y
-      - {m: 20.0, b: 500.0, k: 0.0, mode: force}   # tool z  the press axis
-    # ROTATION: CM ships m 0.3 / b 10 / k 0 (derived for its 140 mm lever). On the
-    # pika's 202.642 mm lever the rotational environment stiffness is k_env * L^2 =
-    # 2.1x CM's, and CM's row reads -6.2 dB at T_d 12 ms / -8.6 dB at 18 ms against
-    # 30.7 kN/m - unstable against any rigid contact, and rotation is the channel
-    # that saturated J6 on 2026-08-27. Same model, same table (tools/
-    # force_loop_margin.py --rotation):
-    #     m      b   | 12 ms          | 18 ms          | 26 ms
-    #   0.3     10   | -6.2 / -9.4    | -8.6 / -11.8   | -10.9 / -14.1   <- CM's row on OUR lever
-    #   0.3     20   | +0.5 / -2.7    | -1.8 / -5.0    |  -4.1 / -7.3
-    #   0.3     30   | +4.6 / +1.4    | +2.2 / -1.0    |  -0.1 / -3.4    <- LIVE
-    # b_r = 30 is the smallest round number on the right side of unity at 18 ms. A
-    # hand turning the tool at 0.2 rad/s (~11 deg/s) feels b_r*w = 6 Nm.
-    # ROTATION IS RIGID (2026-09-03, operator). With k_r = 0 every torque about the TCP
-    # turns the tool at M/b_r for as long as it stands, and on this cell the torques
-    # that stand are NOT the task's: the F/T housing sits 202.6 mm behind the TCP, so
-    # any force at the wrist - a cable pull, a hand resting on the gripper body, the
-    # gravity model's residual - arrives with a 0.18 m lever. Measured
-    # (servo_log_20260903_205241, right arm): the 14 fingertip pushes (4-16 N along the
-    # tool axis) carried ZERO torque and turned nothing; all 11.7 deg of that run's
-    # rotation came from 1-5 N at the housing, 7.4 deg of it in 18 s with the hand off.
-    # The same 0.9 Nm was 0.2 deg under CM's k_r 250, 6.4 deg under the 08-26 k_r 8,
-    # and unbounded here - which is the "rotation since last week" timeline exactly.
-    # The frame is the TCP and the torque transfer is right; the stiffness is what
-    # changed. A rotational compliance worth having needs a ref_force design (CM 0039);
-    # until then the tool holds its orientation. The rotation GATE still throttles a
-    # plan's rotational advance into a torque; that is a different mechanism.
-    # To restore: {m: 0.3, b: 30.0, k: 0.0} per axis (the 2026-09-03 morning row).
-    rotation:
-      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # rx  RIGID
-      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # ry
-      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # rz
+  law:
+    # [kg] the virtual mass; tau = m/b = 40 ms. b is NOT typed - it is DERIVED below.
+    # 20 kg since 2026-09-11 (m = 2*b*dt is the loader's floor at this b: 2 kg).
+    translation: {m: 20.0}
+    rotation: rigid
 
-  # ---- the HOLD law: an operator pushing the arm by hand -----------------------
-  # THE SAME NUMBERS AS `stream` ABOVE, by operator decision. With k = 0 and the fold
-  # a compliant Hold is a HAND-GUIDE: the arm moves at F/b while pushed and STAYS
-  # where it is released - the latched nominal is moved along with every fold, so
-  # there is no spring-back and nothing pins the fence. Release it where you want it.
-  # The gate does not act here (no plan advance to attenuate); the F/T deadzone and
-  # the rate caps are what stop it drifting when nobody is pushing.
-  hold:
-    # IDENTICAL TO `stream`, and the loader refuses any difference.
-    translation:
-      - {m: 20.0, b: 500.0, k: 0.0}     # tool x
-      - {m: 20.0, b: 500.0, k: 0.0}     # tool y
-      - {m: 20.0, b: 500.0, k: 0.0, mode: force}   # tool z  the press axis
-    # RIGID, same reason as the stream law above: the hand-guide is a TRANSLATION
-    # stage. Push anywhere on the tool and the TCP translates along the force; nothing
-    # you do by hand turns it. (Orientation changes are a TcpLinearMove / policy job.)
-    rotation:
-      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # rx  RIGID
-      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # ry
-      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # rz
-
-  # THE GATE. With k = 0 it is the ONLY thing that stops a streamed plan from
-  # driving into a contact (the damper yields, it does not hold the plan back), so
-  # the loader keeps refusing k = 0 + gate WITHOUT the fold (nothing would bound the
-  # deviation) and k > 0 without the gate (the spring ramps the force forever, CM
-  # measured 961 N in 40 s). 10 N is this cell's threshold (operator, 2026-07-24,
-  # the pure 10 N reflex decision); CM's follow ships 30 N.
+  # THE CONVERGENCE PAIR (CM wiki/decisions/0049, adopted 2026-09-11).
+  #   peak_force_n   the force a STREAMED contact converges to, at any demand.
+  #   rest_force_n   the law's rest point: at or below it nothing moves, in any
+  #                  direction; a hand or a stopped press rests here. OURS, not CM's
+  #                  (CM runs rest = 0 and accepts F -> 0 when the plan stops).
+  #   peak_vel_mm_s  the yield speed AT peak_force_n. It DERIVES the law's b:
+  #                  b = (peak - rest)/peak_vel = 2 N / 4 mm/s = 500 N*s/m.
+  # 10 N is this cell's threshold (operator, 2026-07-24); 20 N is a possible later
+  # operating value, not promoted. b is the only delay-margin knob
+  # (docs/reference/force_control_stability_margin.md): at b 500 the loop is stable
+  # against contacts below ~15 kN/m (the TPU fingertips), marginal against a rigid
+  # jig. To raise b, lower peak_vel_mm_s.
   force_gate:
     enable: true
-    # The same convergence pair as stack_real.yaml, where the rationale and the
-    # measurements live (CM 0049 + the 2026-09-11 rest_force_n decision). b is DERIVED
-    # from (peak - rest)/peak_vel = 500 N*s/m, raise-only, logged at load.
     peak_force_n:   12.0
     rest_force_n:   10.0
     peak_vel_mm_s:   4.0
-    close_tau_s: 0.10
+    close_tau_s: 0.10       # fast to close - protective
+    # 0.40 s = CM's shipped value and 2x their measured ringing boundary (below 200 ms
+    # the contact loop sustains a limit cycle). 0.15 s was tried on 2026-09-11 and rang:
+    # the gate's median authority doubled and the 5-15 Hz ripple grew 50 %. Slower only
+    # rectifies (1.0 s: 5.5x below the curve's own value).
     open_tau_s:  0.40
 
-  # A DEAD BACKSTOP, not an operating limit. On a fold path the deviation is booked
-  # into the plan every tick and never accumulates here; on a declined path (an
-  # absolute TcpPoseTarget source) this is what bounds a k = 0 walk. It exists
-  # because the fold depends on the wrench being right - a fresh port has not yet
-  # earned the right to assume that.
+  # A DEAD BACKSTOP, not an operating limit: on a fold path (chunk_follower, hold) the
+  # deviation is booked into the plan every tick and never accumulates here; only the
+  # absolute-target source (fold declined) can reach it.
   max_deviation_m: 0.040
   max_deviation_rad: 0.2617993878     # 15 deg
 
-  # How FAST the deviation may grow. NOT the fence: deleting these would not be "no
-  # limit", it would be an unbounded per-tick jump.
+  # How FAST the deviation may grow (norm caps on the vector law). NOT the fence:
+  # deleting these would not be "no limit", it would be an unbounded per-tick jump.
   max_velocity_m_s: 0.50
   max_acceleration_m_s2: 5.0
   max_velocity_rad_s: 2.00
   max_acceleration_rad_s2: 20.0
 
-  # CONTACT-SHOCK LOW-PASS ON THE WRENCH THE LAW SEES. Same as stack_real.yaml (see
-  # its block for the 2026-08-27 measurement); kept equal so the rehearsal's
-  # admittance loop has the same phase lag as the real one.
+  # CONTACT-SHOCK LOW-PASS ON THE WRENCH THE LAW SEES (2026-08-27). Filters FORCE, not
+  # motion; the servo command path keeps its own filters off. The logged/published
+  # wrench stays the RAW measurement; the filtered one is *_fc_wrench_filt_*. Also the
+  # only lever on direction noise at the operating point (a tilted F_hat leaks a little
+  # of the into-contact advance). 0 = raw wrench to the law.
   wrench_filter_hz: 25.0
 
-  # OSCILLATION GUARD (2026-08-27 incident, servo_log_20260827_101144.csv). A hand
-  # push pinned the 40 mm translation fence, then a ~5.3 Hz coupled oscillation
-  # (F/T dynamic feedback through the ~12 ms pipeline delay) grew INSIDE the
-  # 2 rad/s rotation cap until wrist IK amplification saturated every joint at
-  # dq_max (321 deg/s commanded on J6, 283 deg/s measured, 318 N on the sensor)
-  # and the operator hit E-stop. The rate caps bound amplitude per tick; they
-  # cannot see a limit cycle. This can: >= min_reversals velocity-direction flips
-  # at >= min_velocity_frac of the cap within window_sec freezes compliance until
-  # the wrench stays below the release thresholds for release_quiet_sec.
+  # OSCILLATION GUARD (2026-08-27 incident, servo_log_20260827_101144.csv): >= 4
+  # velocity-direction reversals at >= 35 % of the cap within 0.75 s freezes compliance
+  # until the PHYSICAL wrench stays below the release thresholds for 0.5 s. The rate
+  # caps bound amplitude per tick; they cannot see a limit cycle. This can.
   oscillation_guard_enable: true
   oscillation_min_reversals: 4
   oscillation_window_sec: 0.75
@@ -1334,71 +1188,26 @@ force_control:
   oscillation_release_force_n: 5.0
   oscillation_release_torque_nm: 0.5
   oscillation_release_quiet_sec: 0.5
-  # Same incident, phase 6: a coverage freeze decays the command rate, which
-  # un-trips the rate check that froze it - 226 freeze<->covered transitions in
-  # 10 s (~23 Hz), re-latching the Hold nominal at the pushed pose each time. The
-  # raw verdict must now hold for coverage_recover_sec before re-covering, and a
-  # Hold nominal is never latched while |F| > hold_relatch_max_force_n (the Hold
-  # stays rigid until the hand releases).
+
+  # Coverage flap hysteresis (2026-08-27): after ANY uncovered tick the raw verdict
+  # must hold this long before compliance re-covers (measured 226 flaps in 10 s
+  # against E-stopped boxes without it).
   coverage_recover_sec: 0.5
-  hold_relatch_max_force_n: 5.0
-  # 2026-09-04: the compliant Hold's nominal is latched at the last COMMANDED TCP
-  # (FK of the previous sent joints, overlay deviation stripped) instead of the
-  # measured TCP, which trails the stream by the box's ~22 ms and re-targeted the arm
-  # backwards on every pedal release (5-11k deg/s^2 kicks, every UMI release, four
-  # runs). Above this command/measured gap the measured pose is latched instead.
+  # The Hold source's pose is latched at the last COMMANDED TCP (FK of the previous
+  # sent joints, deviation stripped), not the measured TCP, which trails the stream by
+  # the box's ~22 ms and re-targeted the arm backwards on every pedal release
+  # (2026-09-04). Above this command/measured gap the measured pose is latched instead.
   hold_latch_max_command_gap_m: 0.020
 
-  # ---- THE HAND-GUIDE ENGAGEMENT LATCH (2026-09-03) -------------------------------
-  # A Schmitt trigger on the PHYSICAL |F| (compensated, BEFORE the deadzone - the push
-  # the operator feels) for the hold law: the arm starts yielding only at >= engage,
-  # keeps yielding down to <= release, and is FROZEN in between. With k = 0 there is
-  # no other stop for a parasitic wrist force. MEASURED (servo_log_20260903_205241,
-  # right arm, 228 s with the hand off): the compensated force cleared the 2 N
-  # deadzone on 7.6 % of ticks and the arm crawled 38 times on its own - 0.2-2.1 mm
-  # per event, up to 2.3 mm/s, one 18 s crawl of 7 mm along a steady 1-3 N pull at the
-  # F/T housing (a cable or a resting hand; the teleop mux was idle, no gripper command,
-  # no mode change). That is what "vibration without pushing" was. A hand that means it
-  # pushes past 5 N without noticing; at b = 1000 the arm answers at 5 mm/s from there.
-  hold_engage_force_n: 5.0
-  hold_release_force_n: 2.0
+  # THE OVERLAY MAY NOT INTEGRATE AGAINST A COMMAND THAT IS NOT REACHING THE ROBOT
+  # (2026-08-26: a queue-sync deadlock wound the command 54 deg out). The test is
+  # RATE, not distance: the box's own reference must advance at >= min_ratio x our
+  # rate while we move faster than min_rate_dps. 0.05 is three times below the
+  # measured healthy floor (0.156) and far above a dead link (0.000).
+  command_execution_tau_sec: 0.20
+  command_execution_min_rate_dps: 5.0
+  command_execution_min_ratio: 0.05
 
-  # Make a plain Hold compliant by latching its measured TCP as the nominal. This is
-  # what lets an operator push the arm by hand and watch it yield and spring back
-  # without a policy running. Turn it OFF once a policy owns the arm: a compliant Hold
-  # is an arm that moves when something leans on it.
-  hold_compliance: true
-
-  # THE FOLD (2026-09-03, controller-manager's k = 0 hand-off - wiki/findings/
-  # k-zero-follow-stops-on-the-nominal-chain.md, Arm::absorb_overlay_offset). Every
-  # tick, on a law whose axes are all pure mass-dampers, the deviation is handed to
-  # the plan that produced the nominal and the overlay drops its copy (velocity
-  # kept). Emitted pose unchanged. REQUIRED by the loader for k = 0 + gate and for a
-  # spring-less compliant Hold. Sinks: the chunk follower (delta_preview rollouts)
-  # and the compliant Hold's latched nominal; an absolute TcpPoseTarget source (UMI
-  # teleop) declines and keeps its deviation fenced in the overlay. Logged as
-  # *_fc_folded / *_fc_fold_sink / *_fc_absorbed_*.
-  fold_deviation: true
-
-  # *** IS THE COMMAND ACTUALLY REACHING THE ROBOT? ***
-  # The overlay is an open-loop integrator on the measured wrench: if its output never
-  # lands, the wrench never answers and it winds until something else stops it. On
-  # 2026-08-26 a queue-sync deadlock put the command 54 deg out this way.
-  #
-  # THE TEST IS RATE, NOT DISTANCE, and that is the whole point. Comparing how far the
-  # box's own reference TRAILS the last sent joints froze compliance on a healthy link:
-  # at 334 deg/s it legitimately trails 8.6 deg (the queue alone is 5 ticks) while the
-  # same run's median was 0.02 deg. No fixed distance separates "behind" from
-  # "stopped". A rate does, because a fast move drags the box's reference along with it
-  # and a dead link leaves it exactly where it was.
-  #
-  # THE RATIO IS MEASURED, NOT PICKED. Across the six runs of 2026-08-26 the healthy
-  # minimum was 0.156 and every dead-link run read 0.000, so 0.05 sits three times
-  # below the healthy floor and far above the dead one.
-  command_execution_tau_sec: 0.20         # the comparison window (rate low-pass)
-  command_execution_min_rate_dps: 5.0     # below this we are not moving; say nothing
-  command_execution_min_ratio: 0.05       # ref rate must be >= this x our rate
-
-  # Refuse to compose onto a nominal older than this — a deviation composed onto a
+  # Refuse to compose onto a nominal older than this - a deviation composed onto a
   # stale pose is a command nobody authored.
   max_state_age_sec: 0.05

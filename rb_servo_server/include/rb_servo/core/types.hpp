@@ -827,6 +827,14 @@ struct FtTelemetry {
     // still CONTAINS gravity and a tare that averaged raw would fold the tare pose's
     // gravity into the bias. The tare averages `raw_sensor - gravity` instead.
     Wrench6D gravity_sensor;
+    // The tool-INERTIA term this tick, SENSOR frame @SRO: -m * a_com, a_com being the
+    // COMMANDED trajectory's acceleration of the tool COM read command_delay_ticks back
+    // (force_torque.inertia_compensation, 2026-09-15). Zero when the compensation is
+    // off, the command history is too short, or the commanded acceleration was refused
+    // as a jump. `com_accel_stand_m_s2` is that acceleration, stand frame.
+    Wrench6D inertial_sensor;
+    std::array<double, 3> com_accel_stand_m_s2{};
+    bool inertia_valid = false;
     // (2) COMPENSATED (-bias -gravity), SENSOR frame @SRO, BEFORE the deadzone.
     Wrench6D comp_sensor_nodz;
     // (2') the same after the deadzone.
@@ -875,11 +883,18 @@ struct ForceControlTelemetry {
     bool enabled = false;              // force_control.enable
     bool covered = false;              // the overlay ran this tick
     std::string coverage_reason;       // why it did or did not
-    // WHICH LAW RAN. "stream" (a plan driven into contact, soft, gate-bounded) or
-    // "hold" (an operator pushing by hand, stiff, spring-bounded). They differ by 5x
-    // in the rotation/translation stiffness RATIO, so an unlabelled deviation cannot
-    // be judged against either.
-    std::string law;
+    // WHO DROVE THE PLAN THIS TICK (2026-09-15, one law for every source):
+    // "chunk_follower" (a policy plan; demand = its advance), "hold" (a Hold made a
+    // zero-demand source: yields to a hand and stays), "absolute" (an absolute
+    // TcpPoseTarget - UMI teleop; demand = the raw target's step rate) or "none".
+    std::string source = "none";
+    // The source's DEMANDED advance speed [m/s] the gate's curve was fed. Exactly 0
+    // for a Hold: its own yield is never read back as demand.
+    double source_demand_m_s = 0.0;
+    // The contact normal every consumer of the gate was handed this tick, stand
+    // frame: the unit measured physical force (+ = the free-space direction), or
+    // zero below the 0.5 N noise band where the gate is 1 anyway.
+    std::array<double, 3> contact_normal_stand{};
     bool compose_applied = false;      // the deviation reached the commanded target
     // Tick-entry overlay state, including a frozen deviation while uncovered.
     // Unlike deviation_m/rad below, these are populated even when the law cannot run.
@@ -917,41 +932,24 @@ struct ForceControlTelemetry {
     double wrench_filter_hz = 0.0;
     double fence_m = 0.0;
     double fence_rad = 0.0;
-    // THE GATE: the fraction of the plan advance that survives along the direction
-    // pushing INTO the measured wrench. 1 = free space, 0 = fully held.
+    // THE GATE: the fraction of the source's advance that survives along the direction
+    // pushing INTO the measured force. 1 = free space, 0 = fully held.
     double gate_translation = 1.0;
-    double gate_rotation = 1.0;
-    double gate_force_n = 0.0;         // |F| the gate judged: PHYSICAL (pre-deadzone), filtered (2026-09-04)
+    double gate_force_n = 0.0;         // |F| the gate judged: PHYSICAL (pre-deadzone), filtered
     double gate_torque_nm = 0.0;
-    bool gate_closed = false;          // < 0.02 on either channel
+    bool gate_closed = false;          // < 0.02
     // How much plan advance the gate actually removed this tick [m] / [rad].
     double gate_removed_m = 0.0;
     double gate_removed_rad = 0.0;
-    // THE STREAM CHANNEL (absolute-target path, 2026-09-04): the slow |F| it is
-    // judged on, whether the sustained-contact trigger is armed, and its fade.
-    // CM 0049's five columns: the two derived law numbers, the crossing speed the
-    // curve is pinned to, and the demand it was fed. No deviation-POSITION column on
-    // purpose - on a fold path the deviation is booked into the plan every tick, so it
-    // reads ~0 and would say "force did nothing"; the VELOCITY survives the fold.
+    // CM 0049's columns: the law's two numbers (b derived, m typed), the crossing
+    // speed the curve is pinned to, and the two declared forces. No deviation-POSITION
+    // column on purpose - on a fold path the deviation is booked into the plan every
+    // tick, so it reads ~0 and would say "force did nothing"; the VELOCITY survives.
     double gate_b_eff = 0.0;
     double gate_m_eff = 0.0;
     double gate_cross_speed_m_s = 0.0;
-    double gate_stream_speed_m_s = 0.0;
     double gate_rest_force_n = 0.0;
     double gate_peak_force_n = 0.0;
-    // |F| beside the press-axis component the gate judged (gate_force_n). They diverge
-    // exactly when a contact is off the declared axis, which is the one case the
-    // crossing cannot answer for.
-    double gate_wrench_norm_n = 0.0;
-    // CSV-only: exact gate snapshot consumed by pose-track SMD, BEFORE this
-    // tick's force update. The legacy fields above describe the updated gate.
-    bool smd_gate_sample_valid = false;
-    bool smd_gate_armed = false;
-    bool smd_gate_releasing = false;
-    double smd_gate_translation = 1.0;
-    std::array<double, 3> smd_gate_normal_stand{};
-    std::array<double, 3> smd_gate_measured_force_stand_n{};
-    double smd_gate_removed_velocity_m_s = 0.0;
     // The wrench that drove the law, STAND frame @TCP — the same numbers as
     // FtTelemetry::comp_stand, repeated here so one row explains one decision.
     Wrench6D wrench_stand;
@@ -961,8 +959,8 @@ struct ForceControlTelemetry {
     bool ik_refused = false;
     std::uint64_t ik_refused_total = 0;
     std::uint32_t ik_refused_streak = 0;
-    // THE FOLD (force_control.fold_deviation). `folded` = this tick's deviation was
-    // handed to the plan; `fold_sink` names where ("chunk_follower", "hold_nominal")
+    // THE FOLD (structural since 2026-09-15). `folded` = this tick's deviation was
+    // handed to the source's plan; `fold_sink` names where ("chunk_follower", "hold")
     // or why not ("declined: ..."); `fold_m/rad` is what moved THIS tick and
     // `absorbed_*` the running total for the run, i.e. how far force has moved the
     // plan away from where the source asked it to be.
@@ -973,10 +971,6 @@ struct ForceControlTelemetry {
     std::array<double, 3> absorbed_m{};
     double absorbed_norm_m = 0.0;
     double absorbed_norm_rad = 0.0;
-    // THE HAND-GUIDE LATCH (force_control.hold_engage_force_n): whether the hold law
-    // integrated this tick, and the physical (pre-deadzone) |F| it judged.
-    bool hold_engaged = true;
-    double hold_force_n = 0.0;
 };
 
 struct SafetyTrackingTelemetry {
@@ -1055,10 +1049,12 @@ struct ArmCommand {
     // when the corresponding array was present and had the expected size.
     bool has_joint_target = false;
     bool has_tcp_target = false;
-    // Server-authored: a compliant Hold promoted to a TcpPoseTarget at its latched
-    // nominal (force_control.hold_compliance). The follower stages treat it as a
-    // Hold for the chunk plan's lifecycle (pause / bounded resume, never engage)
-    // and only the pose-track SMD tracks the nominal (2026-09-06).
+    // Server-authored: a Hold under force control, promoted to a TcpPoseTarget at
+    // the Hold SOURCE's pose (the last commanded TCP, moved along by the fold). The
+    // follower stages treat it as a Hold for the chunk plan's lifecycle (pause /
+    // bounded resume, never engage) and route it to the Hold source stage, which
+    // bypasses the pose-track SMD: a constant pose has nothing to smooth, and the
+    // SMD's goal rate used to read the Hold's own yield back as demand (2026-09-15).
     bool compliant_hold = false;
     bool has_linear_move_duration = false;
     bool has_linear_move_linear_speed = false;

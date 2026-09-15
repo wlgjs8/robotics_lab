@@ -166,24 +166,39 @@ from controller-manager's calibration and design contracts after v1 was
 removed. The hardware validation on 2026-08-26 measured deviation/F/k ratios
 of 0.97–0.99, 1.85 deg rotation at 55 N, and zero deviation-fence events.
 
-Two loader-enforced invariants are indivisible:
+Since 2026-09-15 there is ONE law on the translation force vector (stand frame,
+`m*v' + b*v = (|F| - rest_force_n)+ * F_hat`, `k = 0`, rotation rigid) and the
+hold / chunk-follower / absolute paths are SOURCES of that one stage, not laws.
+Loader-enforced invariants:
 
-- **Gate and spring ship together — or the fold does.** A nonzero stiffness
-  without the gate can ramp contact force without bound; a gate with zero
-  stiffness bounds force but not deviation, so `k = 0` under the gate requires
-  `force_control.fold_deviation`, which hands the deviation to the plan every
-  tick (the tracked configuration since 2026-09-03). Telemetry: `force_control.
-  folded / fold_sink / absorbed_*` per arm, logged as `<side>_fc_folded`,
-  `<side>_fc_fold_sink`, `<side>_fc_fold_{x,y,z}_m`, `<side>_fc_absorbed_*`.
+- **The gate pair is required and derives `b`.** `force_gate.peak_force_n`,
+  `rest_force_n` and `peak_vel_mm_s` must all be declared; `b = (peak - rest) /
+  peak_vel` and may not be typed. `law.translation.m >= 2*b*dt` or the load is
+  refused. The fold is STRUCTURAL (k = 0 by construction): the deviation is
+  handed to the source's plan every tick, so `force_control.fold_deviation` is a
+  DELETED key (2026-09-15) and is refused, as are `stream`, `hold`,
+  `hold_compliance`, `hold_engage_force_n`, `hold_release_force_n`,
+  `hold_relatch_max_force_n`. Telemetry: `force_control.folded / fold_sink /
+  absorbed_*` per arm, logged as `<side>_fc_folded`, `<side>_fc_fold_sink`
+  ("chunk_follower", "hold", or "declined: ..."), `<side>_fc_fold_{x,y,z}_m`,
+  `<side>_fc_absorbed_*`.
 - **Wrench reference and compose pivot move together.** Both are the TCP. A
   wrench shifted to one point must not drive rotation about another.
 
 The force pipeline exposes, per arm, raw sensor axes at the sensing reference
 origin, gravity, compensated sensor/TCP/stand wrenches, bias status, sensor
 liveness, load estimate, tare status, and automatic-tare stage. The force law
-consumes the compensated stand-axis wrench at the TCP. `force_control`
-telemetry exposes coverage and refusal reason, selected `stream`/`hold` law,
-deviation/velocity, gate state, fence saturation, and IK refusal counters.
+consumes the compensated PRE-deadzone stand-axis wrench at the TCP (low-passed
+by `wrench_filter_hz`). `force_control` telemetry exposes coverage and refusal
+reason, the active `source` (`chunk_follower` / `hold` / `absolute` / `none`)
+with its `source_demand_m_s`, the one `contact_normal_stand` unit vector every
+consumer cuts along (`ForceGate::contactNormal`: F_hat above 0.5 N, else zero),
+deviation/velocity, gate state, fence saturation, fold, and IK refusal counters.
+Removed on 2026-09-15: `law`, `gate_rotation`, `gate_stream_speed_m_s`,
+`gate_wrench_norm_n`, `hold_engaged`, `hold_force_n` (CSV: `<side>_fc_law`,
+`_fc_gate_rotation`, `_fc_gate_stream_speed_m_s`, `_fc_gate_wrench_norm_n`,
+`_fc_hold_engaged`, `_fc_hold_force_n`, all `_smd_gate_*`; added `_fc_source`,
+`_fc_source_demand_m_s`, `_fc_contact_normal_{x,y,z}`).
 
 ### Tare contract
 
@@ -319,14 +334,17 @@ reference from the sensor reference origin to the TCP, applies the deadzone,
 and rotates the final value into tool/stand axes. Every published wrench key
 names both its axes and reference point.
 
-For pose-track SMD, CSV-only `*_smd_gate_*` fields record the gate snapshot
-actually consumed, before that tick's force update. The stream gate retains its
-last armed normal through scalar release while continuing to classify new
-contacts. `projection_joint_stage_trace_valid` and the per-arm
-`*_projection_{requested,solved,released}_q_deg_0..5` arrays separate geometric
-projection from its subsequent slew without changing either. Invalid joint-stage
-arrays are empty; invalid SMD-gate snapshots reset to defaults and must be ignored.
-See [UMI release behavior and diagnostic timing](reference/umi_stream_gate_release.md).
+The CSV-only `*_smd_gate_*` fields (the pose-track SMD's consumed gate snapshot
+and the stream classifier's retained normal) were REMOVED on 2026-09-15 with the
+classifier itself: there is one contact direction per arm, the measured force
+direction `<side>_fc_contact_normal_{x,y,z}` (stand frame, `ForceGate::
+contactNormal`), and the chunk follower, the pose-track SMD and the preview QP
+all cut along it; `<side>_fc_source` / `<side>_fc_source_demand_m_s` name the
+source whose advance is being cut. `projection_joint_stage_trace_valid` and the
+per-arm `*_projection_{requested,solved,released}_q_deg_0..5` arrays separate
+geometric projection from its subsequent slew without changing either. Invalid
+joint-stage arrays are empty. The retained-normal design is kept as history in
+[UMI release behavior and diagnostic timing](reference/umi_stream_gate_release.md).
 
 The v2 calibration and law authority is `controller-manager`, specifically the
 operator-calibrated sensor/tool presets under

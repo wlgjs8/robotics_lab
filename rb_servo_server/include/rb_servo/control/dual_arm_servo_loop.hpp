@@ -242,15 +242,16 @@ private:
     void recordPreviewCompose(ArmId arm, const Pose6D& composed);
     void prepareForceOverlayInput(ArmId arm);
     std::array<std::uint64_t,2> prepared_force_tick_{};
+    // The compensated, PRE-deadzone physical stand wrench after the contact-shock
+    // low-pass: the ONE wrench the law, the gate's magnitude and the contact normal
+    // all read, so `rest_force_n` means the force a sensor reads rather than that
+    // force plus the deadzone.
     std::array<Vec6,2> prepared_force_wrench_{};
-    // The compensated, PRE-deadzone stand wrench: what a FORCE-mode axis and the
-    // declared contact normal are judged on, so `rest_force_n` means the force a
-    // sensor reads rather than that force plus the deadzone.
-    std::array<Vec6,2> prepared_force_physical_{};
-    // The PRESS-AXIS component the gate is judged on, and |F| beside it so the pair
-    // stays auditable in one log (they diverge exactly when a contact is off-axis).
-    std::array<double,2> prepared_force_magnitude_{};
-    std::array<double,2> prepared_force_norm_{};
+    // Publish this tick's (gate, free direction) pair to the chunk follower's single
+    // advance-gate slot - the ONLY live writer of setAdvanceGate. While the ROI/floor
+    // fold clamps the plan, the geometric face owns the slot (gate 0 along the face's
+    // inward normal); otherwise the force pair does (the curve's ratio along F_hat).
+    void publishAdvanceGate(ArmId arm);
     ServoTarget computeServoTarget(
         const RobotState& left_state,
         const RobotState& right_state,
@@ -855,13 +856,13 @@ private:
     uint64_t right_roi_fold_started_ns_ = 0;
     uint64_t left_roi_fold_last_log_ns_ = 0;
     uint64_t right_roi_fold_last_log_ns_ = 0;
-    // The Hold force-fold sink's wall (foldForceDeviation): what the ROI/floor clamp
-    // refused to bank into the latched nominal, for the throttled log. Reset to 0 on
-    // the first tick nothing is refused.
-    double left_hold_fold_refused_total_m_ = 0.0;
-    double right_hold_fold_refused_total_m_ = 0.0;
-    uint64_t left_hold_fold_refused_log_ns_ = 0;
-    uint64_t right_hold_fold_refused_log_ns_ = 0;
+    // The Hold SOURCE's wall (foldForceDeviation): what the ROI/floor clamp refused
+    // to bank into the hold source pose, for the throttled log. Reset to 0 on the
+    // first tick nothing is refused.
+    double left_hold_source_wall_refused_total_m_ = 0.0;
+    double right_hold_source_wall_refused_total_m_ = 0.0;
+    uint64_t left_hold_source_wall_refused_log_ns_ = 0;
+    uint64_t right_hold_source_wall_refused_log_ns_ = 0;
     // THE COLLISION YIELD FOLD (2026-09-04): whatever the self-collision rows took
     // out of an arm's step this tick (the blocked mover's approach, or the idle
     // arm's yield) is booked into that arm's chunk-follower plan on the NEXT tick
@@ -1037,16 +1038,12 @@ private:
     FtTelemetry right_ft_telemetry_{};
     ForceControlTelemetry left_force_control_telemetry_{};
     ForceControlTelemetry right_force_control_telemetry_{};
-    // The pose the overlay deviates FROM while a plain Hold is being made compliant.
-    // Latched once on entry: re-reading the measured pose every tick would make the
-    // nominal follow the deviation, and the spring would have nothing to pull back to.
-    std::optional<Pose6D> left_hold_compliance_nominal_;
-    std::optional<Pose6D> right_hold_compliance_nominal_;
-    // The hand-guide engagement latch (force_control.hold_engage_force_n), hold law only.
-    control::HoldEngageLatch left_hold_engage_;
-    control::HoldEngageLatch right_hold_engage_;
-    uint64_t left_hold_engage_log_ns_ = 0;
-    uint64_t right_hold_engage_log_ns_ = 0;
+    // THE HOLD SOURCE'S POSE (2026-09-15): a Hold under force control is a source with
+    // zero demand, and this is the pose it asks for - latched at the last COMMANDED
+    // TCP on entry (motion generator at rest, deviation stripped) and moved along by
+    // the fold every tick, walled at the ROI/floor. Not a law and not a spring anchor:
+    // it is where the arm was last commanded to be, so plan == arm by construction.
+    std::array<std::optional<Pose6D>, 2> hold_source_pose_{};
     // The COLD sensor-presence window: liveness samples are folded until this many
     // ticks have passed, then the verdict latches for the run.
     std::uint32_t left_ft_liveness_ticks_ = 0;
@@ -1081,20 +1078,13 @@ private:
     // decision struct, so a dip that is never printed is a dip nobody can read.
     uint64_t left_qsync_dips_logged_ = 0;
     uint64_t right_qsync_dips_logged_ = 0;
-    // Contact-shock low-pass state for the wrench the FORCE LAW consumes
-    // (force_control.wrench_filter_hz). Not on the servo command path. Unprimed
-    // while the arm is uncovered, so a resumed law seeds from the live wrench
-    // instead of ramping up from a stale one.
-    Wrench6D left_wrench_filter_{};
-    Wrench6D right_wrench_filter_{};
-    bool left_wrench_filter_primed_ = false;
-    bool right_wrench_filter_primed_ = false;
-    // The PHYSICAL (pre-deadzone) |F| / |M| the gate is judged on, low-passed with
-    // the same corner as the wrench filter. Primed together with it.
-    double left_gate_force_filt_n_ = 0.0;
-    double right_gate_force_filt_n_ = 0.0;
-    double left_gate_torque_filt_nm_ = 0.0;
-    double right_gate_torque_filt_nm_ = 0.0;
+    // Contact-shock low-pass state for the PHYSICAL wrench the force stage consumes
+    // (force_control.wrench_filter_hz): one filter, one vector, three readers (the
+    // law, the gate's magnitude, the contact normal). Not on the servo command path.
+    // Unprimed while the arm is uncovered, so a resumed law seeds from the live
+    // wrench instead of ramping up from a stale one.
+    std::array<Wrench6D, 2> phys_wrench_filt_{};
+    std::array<bool, 2> phys_wrench_filt_primed_{};
     // Deactivated-box gate debounce (loop thread only).
     int left_box_deactivated_ticks_ = 0;
     int right_box_deactivated_ticks_ = 0;
@@ -1106,30 +1096,27 @@ private:
     bool right_overlay_bounded_prev_ = false;
     bool left_gate_closed_prev_ = false;
     bool right_gate_closed_prev_ = false;
-    // Chunk-follower contact DIRECTION Schmitt state (2026-09-10): armed as soon as
-    // the gate's slow force vector stands over gate_stream_arm_force_n (arming is
-    // never delayed - holding back sooner is the safe side), released only after it
-    // has stayed below gate_stream_release_force_n for gate_stream_release_dwell_sec.
-    // The release timer is what stops a violently varying push from toggling the
-    // dispatched contact direction at ~30 Hz.
-    // The DECLARED press axis: the index of the law's single mode:force translation
-    // row (-1 = none declared), fixed at configure(). The axis itself is that column
-    // of the overlay's tool-frame rotation, re-aimed every tick.
-    int press_axis_index_ = -1;
-    // The SIGN band on the press-axis component [N]. A noise floor, deliberately far
-    // below the F/T deadzone (3 N) and below rest_force_n: the sign is only undefined
-    // near ZERO, and there the gate is ~1 so the choice cannot matter. Putting this band
-    // at rest_force_n instead switched the advance authority between 1 % and 100 % at
-    // the wrench's ripple rate (52 Hz on both arms, servo_log_20260911_134703).
-    static constexpr double kContactNormalSignDeadbandN = 0.5;
-    // This tick's declared contact normal per arm, stand frame. Zero = the measured
-    // component along the press axis is inside rest_force_n, i.e. no contact there.
-    std::array<math::Vector3, 2> declared_contact_normal_{math::Vector3::Zero(),
-                                                          math::Vector3::Zero()};
-    // The plan's DEMANDED advance speed per arm [m/s], pre-gate - what the gate's
-    // curve is a function of. Written by whichever stage drives the arm this tick.
-    std::array<double, 2> force_stream_speed_m_s_{0.0, 0.0};
-    // The FOLD's running total (force_control.fold_deviation): how far force has
+    // WHO DRIVES THE PLAN (2026-09-15): the force stage's source for each arm and the
+    // advance speed that source DEMANDS [m/s], pre-gate - what the gate's curve is a
+    // function of. Written by the stage that emitted the pose (source and demand
+    // together, always), read one tick later by the preview path's early prepare.
+    // A Hold is a source with demand exactly 0: its own yield is never read back.
+    enum class ForceSourceKind : std::uint8_t { None, ChunkFollower, HoldPose, AbsoluteTarget };
+    struct ForceSource {
+        ForceSourceKind kind = ForceSourceKind::None;
+        double demand_m_s = 0.0;
+    };
+    static const char* forceSourceName(ForceSourceKind kind);
+    std::array<ForceSource, 2> force_source_{};
+    // THE ONE CONTACT NORMAL per arm, stand frame (ForceGate::contactNormal): the unit
+    // measured physical force = the free-space direction, zero below the noise band.
+    // Handed unchanged to the chunk follower's cut, the pose-track stage's hold and
+    // the preview QP, so the three see exactly one direction.
+    std::array<math::Vector3, 2> contact_normal_{math::Vector3::Zero(), math::Vector3::Zero()};
+    // The ROI/floor fold's free-space normal (face -> box) while that fold clamps the
+    // plan; it owns the advance-gate slot for as long as it stands.
+    std::array<math::Vector3, 2> roi_fold_normal_{math::Vector3::Zero(), math::Vector3::Zero()};
+    // The FOLD's running total (the fold is structural since 2026-09-15): how far force has
     // moved each arm's plan this run, stand frame. Telemetry only - the overlay's
     // own deviation is ~0 on a fold path, so this is the number that says what the
     // contact actually did to the command.
@@ -1420,6 +1407,19 @@ private:
     // Run one arm's F/T pipeline for this tick. Folds the COLD liveness window and
     // any pending tare. Returns true when a trustworthy compensated wrench exists.
     bool stepFtPipeline(ArmId arm, const RobotState& state);
+    // TOOL-INERTIA COMPENSATION (force_torque.inertia_compensation, 2026-09-15): one
+    // stand-frame sample per tick of each arm's tool COM position from the COMMANDED
+    // joints, so the acceleration the sensor's tool experienced can be read
+    // command_delay_ticks back with a central second difference. Cleared whenever the
+    // command chain breaks (init reset, freedrive resync, a non-finite command), because
+    // a second difference across a jump is a fabricated force.
+    static constexpr std::size_t kToolComRing = 64;
+    struct ToolComHistory {
+        std::array<math::Vector3, kToolComRing> p{};
+        std::size_t head = 0;
+        std::size_t count = 0;
+    };
+    std::array<ToolComHistory, 2> tool_com_history_{};
     // Low-pass this arm's command rate and the box's own reference rate, which the
     // force guard compares. Rates, not distances: see forceControlCovered.
     void updateCommandExecutionRates(ArmId arm, const RobotState& state);
@@ -1431,10 +1431,6 @@ private:
     // Step the law and compose its deviation onto `target` (a stand-frame TCP pose),
     // in place. `nominal` is the pose the deviation is measured FROM. Returns true
     // when the composed pose differs from the nominal.
-    // The DECLARED contact normal for this arm, stand frame: the press axis (the law's
-    // force-mode row in the tool triad) signed by the measured component, or zero when
-    // that component is inside rest_force_n. Recomputed in prepareForceOverlayInput.
-    math::Vector3 declaredContactNormal(ArmId arm) const;
     bool applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target);
     // A valid Cartesian target uses the same eligibility for inverse reference
     // conversion and downstream compose. Frozen state alone is not eligibility.
@@ -1444,13 +1440,14 @@ private:
     // Explicit new joint authority: discard only the selected arm's old Cartesian
     // and force reference. Preserve sent joints/velocity and joint brake state.
     void resetForceReferenceForInit(ArmId arm);
-    // THE FOLD (force_control.fold_deviation): hand this tick's overlay deviation to
-    // the plan that produced the nominal, then drop the overlay's copy. Runs AFTER
-    // applyForceOverlay composed the target, so the emitted pose is unchanged -
-    // only where the displacement is BOOKED changes. `follower_drove` = the chunk
-    // follower produced this tick's nominal (the pose-track SMD path declines).
-    void foldForceDeviation(ArmId arm, control::CartesianChunkFollower& follower,
-                            control::FollowerOutputSmd& output_smd, bool follower_drove,
+    // THE FOLD (structural since 2026-09-15): hand this tick's overlay deviation to
+    // the SOURCE's plan, then drop the overlay's copy. Runs AFTER applyForceOverlay
+    // composed the target, so the emitted pose is unchanged - only where the
+    // displacement is BOOKED changes. ChunkFollower books it into the pending plan
+    // fold; HoldPose moves the hold source pose (ROI/floor walled); AbsoluteTarget
+    // declines (the source re-issues its target; the fence bounds the deviation).
+    void foldForceDeviation(ArmId arm, ForceSourceKind source,
+                            control::CartesianChunkFollower& follower,
                             ForceControlTelemetry& tel);
     // Attenuate one plan advance along the direction pushing INTO the measured
     // wrench. Tangential and retreating components pass at full authority.

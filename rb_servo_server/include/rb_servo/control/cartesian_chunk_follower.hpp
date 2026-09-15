@@ -134,9 +134,14 @@ class CartesianChunkFollower {
 
   // THE FORCE GATE ON THE PLAN ADVANCE (ported from controller-manager's follow
   // path). As the contact force rises, the fraction of each segment's advance that
-  // survives ALONG THE DIRECTION PUSHING INTO THE WRENCH falls toward zero; the
+  // survives ALONG THE DIRECTION PUSHING INTO THE CONTACT falls toward zero; the
   // tangential and retreating components pass at FULL authority, so sliding along a
   // contact and backing out of it are never throttled.
+  //
+  // `free_dir_stand` is the FREE-SPACE direction: +F_hat, the measured force ON the
+  // tool (the wall pushes the tool away from itself), or the ROI/floor face's inward
+  // normal while the geometric fold owns the slot. An advance with a NEGATIVE
+  // projection on it drives into the contact and is what gets cut. Zero = no contact.
   //
   // *** THIS IS WHAT BOUNDS THE CONTACT FORCE UNDER A STREAMING PLAN. *** A spring
   // (k > 0) alone does not: |d| <= F/k holds only at a true static equilibrium, and
@@ -148,12 +153,12 @@ class CartesianChunkFollower {
   // the chained core state stays continuous, the plan is not rewritten, and contact
   // release causes no snap-back. `gate` outside [0,1] is clamped; gate >= 1 with any
   // direction is a strict no-op.
-  void setAdvanceGate(double gate, const Eigen::Vector3d& into_contact_dir_stand);
+  void setAdvanceGate(double gate, const Eigen::Vector3d& free_dir_stand);
 
   // The accumulated plan shift [m] — how far the gate has held this plan back.
   double planShift() const { return plan_shift_.norm(); }
   double advanceGate() const { return advance_gate_; }
-  const Eigen::Vector3d& advanceDirection() const { return into_contact_dir_; }
+  const Eigen::Vector3d& advanceDirection() const { return free_dir_; }
 
   // THE FORCE OVERLAY'S FOLD (ported from controller-manager's
   // `ITask::absorb_force_offset` / `Arm::absorb_overlay_offset`). Take the
@@ -288,7 +293,7 @@ class CartesianChunkFollower {
 
   // The force gate on the plan advance (see setAdvanceGate).
   double advance_gate_{1.0};
-  Eigen::Vector3d into_contact_dir_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d free_dir_{Eigen::Vector3d::Zero()};
   Eigen::Vector3d plan_shift_{Eigen::Vector3d::Zero()};
   // The force overlay's fold on the window knots (see absorbOffset): translation
   // added to every knot position, rotation left-composed onto every knot

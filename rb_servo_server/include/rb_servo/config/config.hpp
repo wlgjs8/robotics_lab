@@ -1707,6 +1707,27 @@ struct FtAutoTareConfig {
     bool invalidate_on_request = true;
 };
 
+// TOOL-INERTIA COMPENSATION (2026-09-15). The sensor reads the tool's inertial
+// reaction -m*a exactly as it reads its weight m*g, and the box compensates neither.
+// Under the isotropic force law every axis sees it: the first policy run under that
+// law read 12 N of its own 12 m/s^2 start acceleration as contact, yielded and gated
+// against it, and the executor answered with more acceleration (30 N, 15,000 deg/s^2,
+// accepted_deviation within 0.25 s - servo_log_20260915_153420). a is taken from the
+// COMMANDED trajectory (the measured joints are too noisy to differentiate: 27 N p99
+// from a 9-sample fit, 2026-09-11) delayed by the transport lag, so it is a model term
+// like gravity, not a rule.
+struct FtInertiaCompensationConfig {
+    bool enable = false;
+    // The command sample the sensor reading corresponds to: this many ticks ago. The
+    // sent command reaches the sensor's flange ~28 ms later on this cell (lag scan on
+    // the 2026-09-15 run: cos(F, -m*a_cmd) peaks at 14-16 ticks).
+    int command_delay_ticks = 0;
+    // A commanded acceleration above this is a hold snap or a resync jump, never a
+    // trajectory (the tracker's own limit is 12.6 m/s^2): the term is zeroed and the
+    // tick is flagged in telemetry rather than subtracting a fabricated 100 N.
+    double max_accel_m_s2 = 30.0;
+};
+
 struct FtConfig {
     bool enable = false;
     // The box is told a ZERO payload at init so it subtracts NOTHING, and this
@@ -1720,82 +1741,72 @@ struct FtConfig {
     bool push_zero_payload_to_box = true;
     // Tare on InitMotion, collected once the arm is parked and still.
     FtAutoTareConfig auto_tare_after_init_motion;
+    FtInertiaCompensationConfig inertia_compensation;
     FtArmConfig left;
     FtArmConfig right;
 };
 
-// One axis of the per-axis hybrid law.
-enum class ForceAxisMode {
-    Compliance,   // m*dd + b*d' + k*d = w                 springs back to the nominal
-    Force,        // m*dd + b*d'       = (|w|-ref)+ * sgn w  ONE-SIDED: rests at ref
-    Rigid,        // does not deviate at all
-};
-
-struct ForceAxisConfig {
-    ForceAxisMode mode = ForceAxisMode::Compliance;
-    double m = 0.0;        // <= 0 -> RIGID
-    double b = 0.0;        // <  0 -> RIGID
-    double k = 0.0;
-    // FORCE mode only [N] or [Nm]. NOT typed per row: the loader writes
-    // force_gate.rest_force_n here so the gate's crossing and the law's rest point
-    // are ONE number (a row that types its own value is refused). The axis is judged
-    // on the PHYSICAL, pre-deadzone component - the declared number is the force a
-    // sensor reads, not that force plus whatever the deadzone happens to be.
-    double ref_force = 0.0;
-};
-
 // ---- force control ----------------------------------------------------------
-// The admittance overlay on the emitted Cartesian target, ported from
-// controller-manager's shared overlay (arm/motions/AdmittanceOverlay.h).
+// ONE LAW, ONE STAGE, ANY SOURCE (2026-09-15, operator: "hold / stream 구분 없이, 더
+// 범용적인 force control"). The admittance overlay on the emitted Cartesian target was
+// ported from controller-manager's shared overlay (arm/motions/AdmittanceOverlay.h);
+// until 2026-09-15 this block carried a `stream` law (a plan driven into contact) and a
+// `hold` law (an operator pushing by hand), each a per-axis {m,b,k,mode} triad in the
+// tool frame with ONE declared press axis. The loader had forced the two identical since
+// 2026-09-11, so the split was code paths only - and every incident of that week lived
+// in one of them: a hand-guide latch fed the press-axis component instead of |F| and
+// staircased a lateral push (2026-09-15), the fold declined on the press row and pinned
+// the fence (2026-09-11), a Hold's own yield was reported as stream demand and closed
+// the gate to 0.095 during a hand push (2026-09-15). And a single press axis left tool
+// x/y ungated: a hand holding the gripper mid-chunk saw F = b * v_plan (50 N at 100 mm/s).
 //
-// *** TWO CONSUMERS, TWO LAWS, AND THEY ARE NOT INTERCHANGEABLE. *** This is the
-// mistake this file exists to prevent, and it was made once already: the streaming
-// law was applied to an operator hand-push and the arm rotated ~9 deg where CM
-// rotates ~0.3 deg for the same push. controller-manager keeps them apart too
-// (`Arm::overlay_apply` selects the surface per tick), and the numbers differ by a
-// factor of five in the RATIO that matters:
+// Now there is ONE law on the translation VECTOR, in the stand frame:
 //
-//                        k_t [N/m]   k_r [Nm/rad]   k_r/k_t [m^2]
-//   hold  (CM admittance)    2500          250          0.100
-//   stream(CM follow)         400            8          0.020
+//     m * v' + b * v = (|F| - rest_force_n)+ * F_hat                          k = 0
 //
-// The stream law is deliberately soft: it yields to a contact the PLAN is driving
-// into, and its force is bounded by the GATE holding the plan back. The hold law has
-// no advancing plan to gate, so its stiffness is the only thing bounding the force -
-// which is why it is stiff, and why "just use one law" is not available.
+// F is the compensated, PRE-deadzone physical force at the TCP (low-passed by
+// wrench_filter_hz), F_hat its direction. |F| <= rest_force_n is an equilibrium in
+// EVERY direction - nothing moves, free space is never sought. Above it the arm yields
+// ALONG THE MEASURED FORCE at (|F| - rest)/b whatever the direction and stays where it
+// was dragged (the fold, below). Per-axis one-sidedness is the wrong shape for this: a
+// diagonal 10 N push would read 5.8 N per axis and never move. Rotation is RIGID.
+//
+// Who drives the plan is a SOURCE of this stage, not a law: the chunk follower
+// (demand = its plan advance, deviation folded into the plan), a Hold (demand 0: it
+// yields to a hand above rest_force_n and stays, ROI/floor walled), or an absolute
+// TcpPoseTarget (UMI teleop: demand = the raw target's step rate; it declines the fold
+// and keeps its deviation fenced). The gate cuts only the source's advance into F_hat.
+//
+// KNOWN LIMIT, measured in the closed-loop model (test_force_control): the projective
+// cut leaves the part of the advance perpendicular to F_hat alone, so under FRICTION the
+// normal force settles above the declaration - mu 0.3: 12.3 N at 30 mm/s, 15.8 N at
+// 150 mm/s (m 20 / b 500 / rest 10 / peak 12). A deadlock ("gate shut, law at rest") is
+// structurally impossible: the law always has a yield direction. Cutting the WHOLE
+// into-contact advance would fix the number and kill sliding along a surface; not taken.
 struct ForceLawConfig {
-    // m*d'' + b*d' + k*d = wrench, per axis, in the TOOL frame (re-aimed every tick
-    // onto the command's tool axes). A steady force deflects F/k and b decides how it
-    // gets there.
-    std::array<ForceAxisConfig, 3> translation{};   // x y z  [kg] [N*s/m] [N/m]
-    std::array<ForceAxisConfig, 3> rotation{};      // rx ry rz [kg*m^2] [Nm*s/rad] [Nm/rad]
+    // [kg] the virtual mass. TYPED. tau = m/b is the law's time constant (40 ms live).
+    double m = 0.0;
+    // [N*s/m] the damping. DERIVED by the loader from the gate pair and REFUSED if typed:
+    //     b = (force_gate.peak_force_n - force_gate.rest_force_n) / force_gate.peak_vel_mm_s
+    // It is the same b the gate computes its crossing speed from; two copies of one
+    // number is how a crossing drifts. b is the only delay-margin knob (docs/reference/
+    // force_control_stability_margin.md): raise it through peak_vel_mm_s.
+    double b = 0.0;
 };
 
 struct ForceControlConfig {
     bool enable = false;
-
-    // The law for a plan the server is STREAMING into contact (chunk follower /
-    // TcpPoseTarget). Soft, because the gate below is what bounds the force.
-    ForceLawConfig stream{};
-    // The law for a compliant Hold - an operator pushing the arm by hand. Stiff,
-    // because there is no advancing plan for the gate to hold back and the spring is
-    // the only bound on the force.
-    ForceLawConfig hold{};
+    ForceLawConfig law{};
 
     // ---- the gate ----------------------------------------------------------
-    // The PLAN advance's reflection ratio falls as the contact force rises, applied
-    // PROJECTIVELY: only the component driving INTO the measured wrench is
-    // attenuated, so sliding along a contact and backing out of it keep full
-    // authority. `max_force_n` IS the force a sustained streamed contact converges to.
-    //
-    // IT ONLY ACTS ON THE STREAM LAW. A compliant Hold has no plan advance to
-    // attenuate, so the gate is structurally inert there — do not read a configured
-    // gate as a bound on what a hand can push the arm to.
-    //
-    // *** THE GATE AND A STREAM STIFFNESS MAY NOT SHIP APART. *** Measured by CM on
-    // hardware: k > 0 with no gate ramps the streamed contact force forever (961 N in
-    // 40 s); the gate with k = 0 bounds the force but not the deviation (9.5 m of
-    // offset in 300 s). The loader refuses either half.
+    // The SOURCE's advance is attenuated along the direction pushing INTO the measured
+    // force, PROJECTIVELY: only the component driving into F_hat is cut, so sliding along
+    // a contact and backing out of it keep full authority. Its curve is a function of
+    // the source's DEMAND: a Hold has demand 0 and reads g = 1 by construction; the
+    // chunk follower reports its plan advance; an absolute target its raw step rate.
+    // With k = 0 the gate is the only thing that stops a plan from driving into a
+    // contact (the damper yields, it does not hold the plan back), and the fold is
+    // what bounds the deviation - both are structural now, neither is a key.
     bool gate_enable = false;
     // THE CONVERGENCE PAIR (CM wiki/decisions/0049, adopted here 2026-09-11). The gate
     // used to be a knee-less smoothstep that reached ZERO at a declared `max_force_n`.
@@ -1851,48 +1862,27 @@ struct ForceControlConfig {
     double max_acceleration_rad_s2 = 20.0;
 
     // ---- the fold (2026-09-03, controller-manager's k = 0 hand-off) --------
-    // With k = 0 the deviation is a bare integrator with no equilibrium but w == 0:
-    // a standing wrench walks it without bound, the nominal chain separates from the
-    // pose the arm is in (CM measured 9.5 m of offset in 300 s, and on 2026-08-26 a
-    // singularity guard stopped both arms on a nominal chain ~97 mm from a healthy
-    // emitted pose). The fold removes that class of failure: every tick, on a law
-    // whose axes are all pure mass-dampers (k == 0, no ref_force -
-    // AdmittanceOverlay::pureDamperTranslation/Rotation), the deviation is handed
-    // to the plan that produced the nominal (the chunk follower's chained state and
-    // knots, or the compliant Hold's latched nominal) and the overlay drops its copy
-    // while KEEPING its velocity. The emitted pose is unchanged by the transfer - it
-    // is a change of variables, not a correction - so the plan and the command are
-    // ONE chain again and nothing can drift between them.
+    // STRUCTURAL SINCE 2026-09-15 - there is no key. With k = 0 the deviation is a
+    // bare integrator with no equilibrium of its own, so every tick it is handed to
+    // the plan that produced the nominal (the chunk follower's chained state and
+    // knots, or the Hold source's pose) and the overlay drops its copy while KEEPING
+    // its velocity. The emitted pose is unchanged by the transfer - a change of
+    // variables, not a correction - so the plan and the command are ONE chain and
+    // nothing can drift between them (CM measured 9.5 m of offset in 300 s without
+    // it). What it costs: on a fold path the deviation fence is unreachable, so
+    // free-space drift under a standing wrench (a bad tare, a load in the gripper) is
+    // bounded only by rest_force_n, the deviation RATE caps and the ROI / collision /
+    // joint layers downstream. Re-tare before trusting it.
     //
-    // WHAT IT COSTS, STATED PLAINLY: on a fold path the deviation fence is
-    // unreachable, so free-space drift under a standing wrench (a bad tare, a load in
-    // the gripper) is bounded only by the F/T deadzone, the deviation RATE caps, and
-    // the ROI / collision / joint layers downstream. Re-tare before trusting it.
+    // A producer that re-issues an ABSOLUTE target every tick (UMI teleop) DECLINES
+    // the fold - folding into a reference the source overwrites next tick is a square
+    // wave, not a transfer - and keeps its deviation in the overlay, fenced.
     //
-    // A producer that re-issues an ABSOLUTE target every tick (UMI teleop / a policy
-    // sending absolute TcpPoseTarget setpoints through the pose-track SMD) DECLINES
-    // the fold - folding into a reference the source overwrites next tick is a
-    // square wave, not a transfer - and keeps its deviation in the overlay, fenced.
-    //
-    // The loader ties this to the gate rule: `force_gate.enable` with every stream
-    // k = 0 is legal ONLY with the fold on, and a compliant Hold with every hold k = 0
-    // (a hand-guide, the arm stays where it is pushed) likewise.
-    //
-    // HOW THE CHUNK-FOLLOWER SINK TAKES IT (2026-09-07): the deviation is BOOKED
-    // into the one pending plan fold applySafety keeps per arm (with the geometry
-    // shortfall when a row/collision/IK throttle held the plan, alone otherwise)
-    // and applied next tick as one rigid transport of the follower, the output SMD
-    // and the preview executor. It is never an authority break: with the plan
-    // following what was sent, force control cannot produce a tracking error,
-    // only a plan-frame drift bounded by the gate and the rate caps.
-    bool fold_deviation = false;
+    // HOW THE CHUNK-FOLLOWER SINK TAKES IT (2026-09-07): the deviation is BOOKED into
+    // the one pending plan fold applySafety keeps per arm and applied next tick as one
+    // rigid transport of the follower, the output SMD and the preview executor.
 
     // ---- coverage ----------------------------------------------------------
-    // A plain Hold has no Cartesian nominal to deviate from. With this set, the first
-    // covered Hold tick LATCHES the measured TCP and holds it as the nominal, which
-    // is what makes a hand-push test possible without running a policy. It selects
-    // the `hold` law above.
-    bool hold_compliance = false;
     // Refuse to compose while the arm's own state is not trustworthy: a deviation
     // composed onto a stale nominal is a command nobody authored.
     double max_state_age_sec = 0.05;
@@ -1972,11 +1962,6 @@ struct ForceControlConfig {
     // every re-entry. Re-covering after ANY uncovered tick now requires the raw
     // verdict to hold for this long first.
     double coverage_recover_sec = 0.5;
-    // A Hold nominal latched while a hand is still pushing anchors the spring at
-    // the pushed pose (no restoring force, and under the flap above the anchor
-    // FOLLOWED the hand). Refuse to latch while the measured force exceeds this;
-    // the Hold stays rigid until the hand releases.
-    double hold_relatch_max_force_n = 5.0;
     // The compliant Hold's nominal is latched at the last COMMANDED TCP (FK of the
     // previous sent joints, the overlay's standing deviation stripped), not at the
     // measured TCP: while a stream is running the measured pose trails the command
@@ -1986,18 +1971,6 @@ struct ForceControlConfig {
     // pose disagree by more than this (a real tracking failure, not lag), the
     // measured pose is latched instead, fail-closed, with a log line.
     double hold_latch_max_command_gap_m = 0.020;
-
-    // ---- hand-guide engagement (2026-09-03) ---------------------------------
-    // A Schmitt trigger on the PHYSICAL (pre-deadzone) force magnitude for the HOLD
-    // law: the hand-guide starts yielding only once |F| >= hold_engage_force_n and
-    // keeps yielding until |F| <= hold_release_force_n, below which the overlay is
-    // frozen. With k = 0 nothing else stops a parasitic wrist force (a cable, a
-    // resting hand, the gravity model's residual) from walking the arm: measured
-    // 2026-09-03, 38 unprompted crawls in 228 s of hand-off time, one of them 18 s
-    // long along a 1-3 N cable pull that also turned the tool 7 deg. 0 = off
-    // (always engaged). See control::HoldEngageLatch.
-    double hold_engage_force_n = 0.0;
-    double hold_release_force_n = 0.0;
 };
 
 struct LinearMoveConfig {

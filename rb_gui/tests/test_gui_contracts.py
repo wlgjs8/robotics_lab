@@ -8134,41 +8134,59 @@ class FtMonitorRenderTest(unittest.TestCase):
         )
         self.assertEqual("0.204~", self._cells(html, "load [kg]")[0])
 
-    def test_shows_what_the_law_did_with_it(self):
+    def test_shows_what_the_force_stage_did_with_it(self):
+        """ONE LAW SINCE 2026-09-15, so the cell no longer names a law. It names the
+        state that explains the rows under it: a gate below 1 is a CONTACT being cut
+        along the measured force whatever the source; an open gate names the source."""
         html = _render_ft_monitor_rows(
             self._state(
                 dict(self._TARED, comp_stand_axes_at_tcp=[0.0, 0.0, 10.0, 0.0, 0.0, 0.0]),
-                left_fc={"enabled": True, "covered": True, "law": "stream",
+                left_fc={"enabled": True, "covered": True, "source": "chunk_follower",
                          "deviation_norm_m": 0.025, "deviation_norm_rad": 0.0524,
                          "gate_translation": 0.31},
+                right_fc={"enabled": True, "covered": True, "source": "hold",
+                          "deviation_norm_m": 0.0, "deviation_norm_rad": 0.0,
+                          "gate_translation": 1.0},
             ),
             stale=False,
         )
-        # WHICH LAW: the stream law and the hold law differ by 5x in the ratio that
-        # decides how much of a push turns the tool rather than moving it, so a
-        # deviation cannot be judged without knowing which one produced it.
-        self.assertEqual("stream", self._cells(html, "law")[0])
-        self.assertEqual("25.0", self._cells(html, "dev [mm]")[0])   # 10 N / 400 N/m
+        self.assertEqual(("contact", "hold"), self._cells(html, "force"))
+        self.assertEqual("25.0", self._cells(html, "dev [mm]")[0])
         self.assertEqual("3.0", self._cells(html, "dev [deg]")[0])
         self.assertEqual("0.31", self._cells(html, "gate")[0])
 
+    def test_a_legacy_law_payload_is_still_readable(self):
+        """A server from before 2026-09-15 publishes `law` and no `source`; the card
+        must not go blank against it."""
+        html = _render_ft_monitor_rows(
+            self._state(
+                dict(self._TARED),
+                left_fc={"enabled": True, "covered": True, "law": "stream",
+                         "gate_translation": 1.0},
+            ),
+            stale=False,
+        )
+        self.assertEqual("stream", self._cells(html, "force")[0])
+
     def test_the_fence_is_visible(self):
-        """Past the fence the law HOLDS the bound instead of tracking, so the arm
-        feels stiff for no visible reason unless the card says so."""
+        """Past the fence the stage HOLDS the bound instead of tracking, so the arm
+        feels stiff for no visible reason unless the card says so. The fence outranks
+        the source and the gate: it is the only one of the three that stops the yield."""
         html = _render_ft_monitor_rows(
             self._state(
                 dict(self._TARED, comp_stand_axes_at_tcp=[0.0, 0.0, 40.0, 0.0, 0.0, 0.0]),
-                left_fc={"enabled": True, "covered": True, "bounded": True, "law": "stream",
+                left_fc={"enabled": True, "covered": True, "bounded": True,
+                         "source": "absolute",
                          "deviation_norm_m": 0.040, "deviation_norm_rad": 0.2618,
                          "gate_translation": 1.0},
             ),
             stale=False,
         )
-        self.assertEqual("fence", self._cells(html, "law")[0])
+        self.assertEqual("fence", self._cells(html, "force")[0])
         self.assertEqual("40.0", self._cells(html, "dev [mm]")[0])   # the 40 mm fence
         self.assertEqual("15.0", self._cells(html, "dev [deg]")[0])  # the 15 deg fence
 
-    def test_a_law_that_is_on_but_not_covering_is_idle_not_absent(self):
+    def test_a_stage_that_is_on_but_not_covering_is_idle_not_absent(self):
         html = _render_ft_monitor_rows(
             self._state(
                 dict(self._TARED),
@@ -8178,9 +8196,9 @@ class FtMonitorRenderTest(unittest.TestCase):
             ),
             stale=False,
         )
-        self.assertEqual(("idle", "off"), self._cells(html, "law"))
-        # The deviation rows belong to a law that is actually running. Three more rows
-        # of "--" is exactly the bloat this card was rewritten to lose.
+        self.assertEqual(("idle", "off"), self._cells(html, "force"))
+        # The deviation rows belong to a stage that is actually running. Three more
+        # rows of "--" is exactly the bloat this card was rewritten to lose.
         labels = [row[0] for row in self._rows(html)]
         self.assertNotIn("dev [mm]", labels)
 
@@ -8226,10 +8244,10 @@ class FtMonitorRenderTest(unittest.TestCase):
                      load_mass_kg=0.204, load_settled=True),
                 dict(self._TARED, comp_stand_axes_at_tcp=[10.0, 0.0, 0.0, 0.0, 2.0, 0.0],
                      load_mass_kg=0.204, load_settled=True),
-                left_fc={"enabled": True, "covered": True, "law": "stream",
+                left_fc={"enabled": True, "covered": True, "source": "chunk_follower",
                          "deviation_norm_m": 0.01, "deviation_norm_rad": 0.01,
                          "gate_translation": 1.0},
-                right_fc={"enabled": True, "covered": True, "law": "hold",
+                right_fc={"enabled": True, "covered": True, "source": "hold",
                           "deviation_norm_m": 0.01, "deviation_norm_rad": 0.01,
                           "gate_translation": 1.0},
             ),
@@ -8284,6 +8302,22 @@ class FtTelemetryAbsentVsDisabledTest(unittest.TestCase):
         html = _render_ft_monitor_rows(state, stale=False)
         self.assertIn("disabled in config", html)
         self.assertNotIn("no force_torque in the state stream", html)
+
+    def test_status_line_names_the_source_not_a_law(self):
+        """Since 2026-09-15 there is one law; the per-arm status line names the
+        SOURCE driving the plan and says nothing when the stage reports "none"."""
+        payload = sample_state()
+        payload["left"]["force_control"] = {
+            "enabled": True, "covered": True, "source": "hold",
+            "deviation_norm_m": 0.0012, "gate_translation": 1.0}
+        payload["right"]["force_control"] = {
+            "enabled": True, "covered": True, "source": "none",
+            "deviation_norm_m": 0.0, "gate_translation": 0.42, "gate_closed": False}
+        state = StateSnapshot.parse(payload, received_monotonic=time.monotonic())
+        line = _format_force_control_status(state, stale=False)
+        self.assertIn("left compliant, hold, dev 1.2 mm, gate 1.00", line)
+        self.assertIn("right compliant, dev 0.0 mm, gate 0.42", line)
+        self.assertNotIn("none", line)
 
 
 class FtMonitorTrackingErrorsTest(unittest.TestCase):

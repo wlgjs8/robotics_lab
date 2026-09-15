@@ -165,9 +165,11 @@ def _arm_force_control_summary(arm: Any) -> str:
     if not fc.get("covered"):
         return f"NOT COVERED ({fc.get('coverage_reason') or 'unknown'})"
     bits = []
-    law = fc.get("law")
-    if law:
-        bits.append(str(law))
+    # Since 2026-09-15 there is one law; what varies per tick is the SOURCE driving
+    # the plan ("chunk_follower" / "hold" / "absolute"). "none" says nothing.
+    source = fc.get("source")
+    if source and str(source) != "none":
+        bits.append(str(source))
     try:
         bits.append(f"dev {float(fc.get('deviation_norm_m', 0.0)) * 1e3:.1f} mm")
     except (TypeError, ValueError):

@@ -297,14 +297,16 @@ ArmCommand applyPoseTrackSmd(
     // Stand-frame twist to seed the tracker with when THIS call activates it (the
     // chunk follower's state velocity at a fallback). Null = seed at rest (legacy).
     const Vec6* seed_stand_twist = nullptr,
-    ForceControlTelemetry* gate_trace = nullptr,
-    // The DECLARED contact normal, stand frame (see DualArmServoLoop::
-    // declaredContactNormal). Null or zero = no contact on the declared axis.
+    // THE contact normal, stand frame (ForceGate::contactNormal: the unit measured
+    // physical force = the free-space direction). Null or zero = no contact.
     const math::Vector3* contact_normal_stand = nullptr,
-    // Out: this tick's GOAL rate [m/s] - the demand the force gate's curve reads on
-    // this path. Taken from the goal, which the gate never touches (it holds the
-    // tracker's STATE), so it can never become a function of the gate's own output.
-    double* stream_demand_m_s = nullptr
+    // Out: this tick's DEMAND [m/s] - the translation step the raw command integrated
+    // into the goal, over dt. The gate never touches the goal (it holds the tracker's
+    // STATE) and the fold is declined on this path, so this can never become a
+    // function of the gate's own output or of the law's yield. 0 when the call only
+    // (re)latched the command reference. The goal-vs-command distance it replaces
+    // carried the engagement offset (a 5 mm standing offset read as 2.5 m/s).
+    double* source_demand_m_s = nullptr
 ) {
     if (!tracker) return command;
     // PROFILE BINDING (2026-09-06): an ACTIVE tracker's own profile decides whether it
@@ -414,27 +416,14 @@ ArmCommand applyPoseTrackSmd(
         held.tcp_target_stand = reference;
         return held;
     }
-    if (stream_demand_m_s != nullptr && dt_sec > 0.0) {
-        const Pose6D previous_goal = tracker->goalPose();
-        *stream_demand_m_s = math::positionDistance(previous_goal, command.tcp_target_stand) / dt_sec;
+    const double goal_step_m = tracker->updateGoalFromCommand(command.tcp_target_stand);
+    if (source_demand_m_s != nullptr) {
+        *source_demand_m_s = dt_sec > 0.0 ? goal_step_m / dt_sec : 0.0;
     }
-    tracker->updateGoalFromCommand(command.tcp_target_stand);
-    // THE DECLARED CONTACT NORMAL (2026-09-11). The press axis is the law's
-    // force-mode row in the TOOL triad, mapped to stand and signed by the measured
-    // component; the servo loop computes it once per tick and hands it here. Zero
-    // means "no contact on the declared axis" and the gate is not applied at all.
+    // THE CONTACT NORMAL is the servo loop's one per-tick F_hat (2026-09-15); zero
+    // means no contact above the noise band and the gate is not applied at all.
     const math::Vector3 normal =
         contact_normal_stand != nullptr ? *contact_normal_stand : math::Vector3::Zero();
-    if (gate != nullptr && gate_trace != nullptr) {
-        gate_trace->smd_gate_sample_valid = true;
-        gate_trace->smd_gate_armed = normal.squaredNorm() > 0.5;
-        gate_trace->smd_gate_releasing = false;
-        gate_trace->smd_gate_translation = gate->translation();
-        gate_trace->smd_gate_normal_stand = {normal.x(), normal.y(), normal.z()};
-        const auto& f = gate->forceDirection();
-        gate_trace->smd_gate_measured_force_stand_n =
-            {f.x() * gate->forceN(), f.y() * gate->forceN(), f.z() * gate->forceN()};
-    }
     ArmCommand smoothed = command;
     const Pose6D before = tracker->currentPose();
     smoothed.tcp_target_stand = tracker->step(dt_sec);
@@ -446,14 +435,13 @@ ArmCommand applyPoseTrackSmd(
     // contact is cut); the difference is where the cut is booked: the tracker's STATE
     // is held here (constrainTranslation), the goal is left alone.
     //
-    // JUDGED ON THE ONE CURVE, ALONG THE DECLARED AXIS (2026-09-11). This used to run
-    // a second "stream channel" of the gate - a 2 Hz filtered force vector with its
-    // own arm/release Schmitt - because the tick-judged fade fed the tool's own 8-30 Hz
-    // motion vibration (3-5 N RMS while moving) back into the tracker as a sign-
-    // flipping cut. The curve is judged on the same filtered physical magnitude but it
-    // no longer fades to zero, and the DIRECTION is declared rather than inferred, so
-    // the vibration has nothing to flip: both halves of that failure are gone and the
-    // second channel with them.
+    // JUDGED ON THE ONE CURVE, ALONG THE MEASURED F_hat (2026-09-15). This used to run
+    // a second "stream channel" of the gate (a 2 Hz filtered force vector with its own
+    // arm/release Schmitt, to 2026-09-11) and then a DECLARED tool axis (to
+    // 2026-09-15). The curve no longer fades to zero, so a sign flip of the direction at
+    // low force removes nothing (g ~ 1 there), and the law yields along the same F_hat
+    // the cut is taken along, so there is no lateral force the gate could close for
+    // that nothing yields against.
     if (gate != nullptr && gate->translation() < 1.0 && normal.squaredNorm() > 0.5) {
         const math::Vector3 p0(before.x, before.y, before.z);
         const math::Vector3 p1(smoothed.tcp_target_stand.x, smoothed.tcp_target_stand.y,
@@ -469,8 +457,6 @@ ArmCommand applyPoseTrackSmd(
             smoothed.tcp_target_stand.y = held.y();
             smoothed.tcp_target_stand.z = held.z();
             if (gate_removed_m != nullptr) *gate_removed_m = removed;
-            if (gate_trace != nullptr && dt_sec > 0.0)
-                gate_trace->smd_gate_removed_velocity_m_s = removed / dt_sec;
         }
     }
     return smoothed;
@@ -2127,17 +2113,6 @@ DualArmServoLoop::DualArmServoLoop(
     right_overlay_.configure(config.force_control, control_period_sec);
     left_force_gate_.configure(config.force_control, control_period_sec);
     right_force_gate_.configure(config.force_control, control_period_sec);
-    // THE PRESS AXIS, fixed here. The loader has already refused anything but exactly
-    // one mode:force translation row (and refused a stream/hold disagreement), so this
-    // single index is the declared contact axis for both laws and both arms.
-    press_axis_index_ = -1;
-    for (int i = 0; i < 3; ++i)
-        if (config.force_control.stream.translation[i].mode == ForceAxisMode::Force)
-            press_axis_index_ = i;
-    left_hold_engage_.configure(config.force_control.hold_engage_force_n,
-                                config.force_control.hold_release_force_n);
-    right_hold_engage_.configure(config.force_control.hold_engage_force_n,
-                                 config.force_control.hold_release_force_n);
     // PRINT THE AXIS TRIAD AT BOOT. The loader already refuses a DEGENERATE triad, but a
     // well-formed WRONG one is silent -- and that is the failure that actually happens.
     // controller-manager ran its RB5 cell on the datasheet nominal for 18 days
@@ -2182,94 +2157,43 @@ DualArmServoLoop::DualArmServoLoop(
     }
     if (config.force_control.enable) {
         // Print the LIVE law at boot. A force law that only exists in a yaml nobody
-        // opened is a law nobody can check against what the arm actually did.
-        const auto axis_line = [](const char* name, const ForceAxisConfig& a) {
-            std::cerr << "[INFO]   " << name << " m=" << a.m << " b=" << a.b << " k=" << a.k
-                      << " mode=" << (a.mode == ForceAxisMode::Force      ? "force"
-                                      : a.mode == ForceAxisMode::Rigid    ? "rigid"
-                                                                          : "compliance");
-            if (a.mode == ForceAxisMode::Force) std::cerr << " ref=" << a.ref_force;
-            std::cerr << "\n";
+        // opened is a law nobody can check against what the arm actually did. This is
+        // the banner an operator predicts the robot from, so it prints the derived b,
+        // the two declared forces, the crossing they pin and the yield they buy.
+        const ForceControlConfig& f = config.force_control;
+        const double b = f.law.b;
+        const double v_cross = (b > 0.0 && f.gate_peak_force_n > f.gate_rest_force_n)
+            ? (f.gate_peak_force_n - f.gate_rest_force_n) / b : 0.0;
+        const auto yield_mm_s = [&](double force_n) {
+            return b > 0.0 ? std::max(0.0, force_n - f.gate_rest_force_n) / b * 1e3 : 0.0;
         };
-        std::cerr << "[INFO] force_control ENABLED\n";
-        const char* tnames[3] = {"x ", "y ", "z "};
-        const char* rnames[3] = {"rx", "ry", "rz"};
-        // BOTH LAWS, LABELLED. They are different laws for different problems and the
-        // one that surprised an operator once was the one nobody printed.
-        std::cerr << "[INFO]   stream law (a plan driven into contact):\n";
-        for (int i = 0; i < 3; ++i) axis_line(tnames[i], config.force_control.stream.translation[i]);
-        for (int i = 0; i < 3; ++i) axis_line(rnames[i], config.force_control.stream.rotation[i]);
-        std::cerr << "[INFO]   hold law (an operator pushing by hand):\n";
-        for (int i = 0; i < 3; ++i) axis_line(tnames[i], config.force_control.hold.translation[i]);
-        for (int i = 0; i < 3; ++i) axis_line(rnames[i], config.force_control.hold.rotation[i]);
-        // THE BANNER IS WHAT AN OPERATOR PREDICTS THE ROBOT FROM, so it prints the
-        // two forces, the crossing they pin, and the b that was actually installed
-        // after the raise-only derivation - not the numbers as typed.
-        {
-            const ForceControlConfig& f = config.force_control;
-            double b_eff = 0.0;
-            for (const ForceAxisConfig& ax : f.stream.translation)
-                if (ax.mode != ForceAxisMode::Rigid && ax.m > 0.0 && ax.b > b_eff) b_eff = ax.b;
-            const double v_cross = (b_eff > 0.0 && f.gate_peak_force_n > f.gate_rest_force_n)
-                ? (f.gate_peak_force_n - f.gate_rest_force_n) / b_eff : 0.0;
-            std::cerr << "[INFO]   gate " << (f.gate_enable ? "ON" : "OFF")
-                      << ": a STREAMED contact converges at " << f.gate_peak_force_n
-                      << " N for every stream speed (crossing " << v_cross * 1e3
-                      << " mm/s, b_eff " << b_eff << " N*s/m, q "
-                      << ForceControlConfig::kGateCurveExponent << ", close "
-                      << f.gate_close_tau_s << " s, open " << f.gate_open_tau_s << " s)\n";
-            std::cerr << "[INFO]   an EXTERNAL contact (a hand, or a press the plan has "
-                         "stopped driving) rests at rest_force_n = " << f.gate_rest_force_n
-                      << " N: below that the declared press axis does not move at all, so "
-                         "free space is never sought\n";
-            std::cerr << "[INFO]   fence " << f.max_deviation_m * 1e3 << " mm / "
-                      << f.max_deviation_rad * 180.0 / M_PI << " deg"
-                      << (f.hold_compliance ? ", Hold is COMPLIANT" : "") << "\n";
-            int press = -1;
-            for (int i = 0; i < 3; ++i)
-                if (f.stream.translation[i].mode == ForceAxisMode::Force) press = i;
-            if (press >= 0) {
-                std::cerr << "[INFO]   press axis: TOOL " << tnames[press]
-                          << "(re-aimed every tick); the other two translations stay "
-                             "compliant and rotation is rigid\n";
-            } else {
-                std::cerr << "[INFO]   NO press axis declared: every translation row is "
-                             "plain compliance, so a contact retreats to 0 N (the pure "
-                             "damper's only equilibrium)\n";
-            }
-        }
-        std::cerr << "[INFO]   fold_deviation "
-                  << (config.force_control.fold_deviation ? "ON" : "OFF")
-                  << (config.force_control.fold_deviation
-                          ? " (k = 0 hand-off: the deviation is booked into the plan every tick; "
-                            "the fence is a dead backstop on fold paths)"
-                          : "")
-                  << "\n";
-        // What a hand push actually buys, since that is the number an operator checks
-        // against the arm with a ruler and the gate has nothing to do with it.
-        const double kh = config.force_control.hold.translation[2].k;
-        const double khr = config.force_control.hold.rotation[2].k;
-        if (config.force_control.hold_compliance && kh > 0.0 && khr > 0.0) {
-            std::cerr << "[INFO]   compliant Hold: 10 N -> " << 10.0 / kh * 1e3
-                      << " mm, 1 Nm -> " << 1.0 / khr * 180.0 / M_PI
-                      << " deg (the gate does NOT act here)\n";
-        } else if (config.force_control.hold_compliance) {
-            const double bh = config.force_control.hold.translation[2].b;
-            const ForceAxisConfig& hr = config.force_control.hold.rotation[2];
-            const bool hr_rigid = hr.mode == ForceAxisMode::Rigid || !(hr.m > 0.0);
-            std::cerr << "[INFO]   compliant Hold is a HAND-GUIDE (k = 0): 10 N moves the arm at "
-                      << (bh > 0.0 ? 10.0 / bh * 1e3 : 0.0)
-                      << " mm/s and it STAYS where it is pushed (no spring-back); rotation "
-                      << (hr_rigid ? "RIGID" : "compliant") << "\n";
-            if (config.force_control.hold_engage_force_n > 0.0) {
-                std::cerr << "[INFO]   hand-guide latch: engages at |F| >= "
-                          << config.force_control.hold_engage_force_n << " N, releases at <= "
-                          << config.force_control.hold_release_force_n
-                          << " N (physical, pre-deadzone); frozen in between\n";
-            } else {
-                std::cerr << "[INFO]   hand-guide latch OFF: any force past the deadzone moves the arm\n";
-            }
-        }
+        std::cerr << "[INFO] force_control ENABLED: ONE law, any source (2026-09-15)\n";
+        std::cerr << "[INFO]   translation  m*v' + b*v = (|F| - rest)+ * F_hat   m " << f.law.m
+                  << " kg, b " << b << " N*s/m (DERIVED: (" << f.gate_peak_force_n << " - "
+                  << f.gate_rest_force_n << ") N / " << f.gate_peak_vel_mm_s << " mm/s), tau "
+                  << (b > 0.0 ? f.law.m / b * 1e3 : 0.0) << " ms\n";
+        std::cerr << "[INFO]   rest " << f.gate_rest_force_n
+                  << " N: at or below it nothing moves, in any direction. Above it the arm yields "
+                     "ALONG the measured force: " << yield_mm_s(f.gate_peak_force_n) << " mm/s at "
+                  << f.gate_peak_force_n << " N, " << yield_mm_s(20.0)
+                  << " mm/s at 20 N. Rotation RIGID\n";
+        std::cerr << "[INFO]   gate " << (f.gate_enable ? "ON" : "OFF")
+                  << ": a streamed contact converges at " << f.gate_peak_force_n
+                  << " N for every demand (crossing " << v_cross * 1e3 << " mm/s, q "
+                  << ForceControlConfig::kGateCurveExponent << ", close " << f.gate_close_tau_s
+                  << " s, open " << f.gate_open_tau_s
+                  << " s); it cuts only the SOURCE's advance into F_hat, judged on |F|\n";
+        std::cerr << "[INFO]   sources: chunk_follower (fold -> plan) | hold (demand 0, fold -> hold "
+                     "pose, ROI/floor walled) | absolute (fold declined, fence "
+                  << f.max_deviation_m * 1e3 << " mm / " << f.max_deviation_rad * 180.0 / M_PI
+                  << " deg)\n";
+        std::cerr << "[INFO]   a Hold under force control ALWAYS yields to a hand above "
+                  << f.gate_rest_force_n << " N and STAYS where it was dragged (no spring-back)\n";
+        std::cerr << "[INFO]   wrench filter " << f.wrench_filter_hz << " Hz | oscillation guard "
+                  << (f.oscillation_guard_enable ? "ON" : "OFF") << " | rate caps "
+                  << f.max_velocity_m_s * 1e3 << " mm/s, " << f.max_acceleration_m_s2 << " m/s^2\n";
+        std::cerr << "[INFO]   known limit: under friction the normal force settles above the "
+                     "declaration (mu 0.3: ~12.3 N at 30 mm/s, ~15.8 N at 150 mm/s)\n";
     }
     left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
@@ -6073,24 +5997,51 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                   << (!transition_reason.empty() ? " (" : "") << transition_reason
                   << (!transition_reason.empty() ? ")" : "") << "\n";
     };
+    const std::size_t fi = arm_id == ArmId::Left ? 0 : 1;
     const auto smd_fallback = [&]() {
         resetPreviewExecution(arm_id,"follower_fallback");
         output_smd->deactivate();
         log_transition();
         carryPoseTrackerAcrossOverlayFrame(arm_id, smd_tracker);
+        ForceControlTelemetry& ftel =
+            fi == 0 ? left_force_control_telemetry_ : right_force_control_telemetry_;
+        double demand_m_s = 0.0;
         ArmCommand out = applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
             forceOverlayForReference(arm_id),
-            arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
-            &(arm_id == ArmId::Left ? left_force_control_telemetry_
-                                    : right_force_control_telemetry_).gate_removed_m,
+            // An uncovered arm must never be cut by a stale gate.
+            ftel.reference_strip_enabled ? (fi == 0 ? &left_force_gate_ : &right_force_gate_) : nullptr,
+            &ftel.gate_removed_m,
             handoff_velocity ? &*handoff_velocity : nullptr,
-            &(arm_id == ArmId::Left ? left_force_control_telemetry_ : right_force_control_telemetry_),
-            &declared_contact_normal_[arm_id == ArmId::Left ? 0 : 1],
-            &force_stream_speed_m_s_[arm_id == ArmId::Left ? 0 : 1]);
+            &contact_normal_[fi],
+            &demand_m_s);
+        // AN ABSOLUTE TARGET IS A SOURCE (2026-09-15): its demand is the raw target's
+        // step rate, never the tracker's own motion. A raw Hold braking here is no
+        // source at all.
+        force_source_[fi] = command.mode == ControlMode::TcpPoseTarget
+            ? ForceSource{ForceSourceKind::AbsoluteTarget, demand_m_s}
+            : ForceSource{};
         applyPoseTrackWallFold(arm_id, smd_tracker, dt_sec, &out);
         return with_stage_telemetry(out);
+    };
+    // THE HOLD SOURCE STAGE (2026-09-15). A Hold under force control is a source with
+    // ZERO demand: the pose it asks for is the hold source pose the coverage block
+    // promoted (the last commanded TCP, moved along by the fold), and it BYPASSES the
+    // pose-track SMD - a constant pose has nothing to smooth, and the SMD's goal rate
+    // used to read the Hold's own yield back as stream demand (corr 0.997 with the
+    // overlay velocity; the gate closed to 0.095 during a hand push,
+    // servo_log_20260915_112545). The admittance law's own tau = m/b and the rate caps
+    // are the only dynamics; the ROI/floor wall is applied to the hold pose in
+    // foldForceDeviation.
+    const auto hold_source_stage = [&]() {
+        resetPreviewExecution(arm_id, "hold_source");
+        output_smd->deactivate();
+        smd_tracker->deactivate();
+        resetChunkFollowerEngageWait(arm_id);
+        log_transition();
+        force_source_[fi] = ForceSource{ForceSourceKind::HoldPose, 0.0};
+        return with_stage_telemetry(command);
     };
     if (rf.enable && chunk_frame_receiver_ &&
         (command.mode == ControlMode::Hold || command.compliant_hold) && follower->active()) {
@@ -6132,20 +6083,19 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         output_smd->deactivate();
         follower->expireHoldPause(now_sec, rf.hold_bounce_resume_sec);
         resetChunkFollowerEngageWait(arm_id);
-        if (command.compliant_hold || smd_tracker->active()) {
-            // The SMD brakes the raw Hold (release brake) or tracks the compliant
-            // nominal; the chunk plan stays paused and expires on its own clock.
+        if (command.compliant_hold) return hold_source_stage();
+        if (smd_tracker->active()) {
+            // The SMD brakes the raw Hold (release brake); the chunk plan stays
+            // paused and expires on its own clock.
             return smd_fallback();
         }
         return with_stage_telemetry(command);
     }
     if (command.compliant_hold) {
-        // A compliant Hold never engages or waits on the chunk plan (the follower is
-        // inactive here; an active one was paused above): the SMD tracks the nominal.
-        transition_reason = "compliant hold";
-        output_smd->deactivate();
-        resetChunkFollowerEngageWait(arm_id);
-        return smd_fallback();
+        // A Hold under force control never engages or waits on the chunk plan (the
+        // follower is inactive here; an active one was paused above).
+        transition_reason = "hold source";
+        return hold_source_stage();
     }
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
         !command.has_tcp_target || !kinematics_) {
@@ -6542,30 +6492,12 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     }
 #endif
     follower->setPlanRateGate(executor_waits ? 0.0 : std::min(safety_plan_gate, leash_gate));
-    if(rf.preview_execution.enable) {
-        const bool left=arm_id==ArmId::Left;
-        const auto& force=left?left_force_control_telemetry_:right_force_control_telemetry_;
-        const bool roi_owns=left?left_roi_fold_active_:right_roi_fold_active_;
-        if(force.reference_strip_enabled && !roi_owns) {
-            // ONE CURVE, ONE DECLARED AXIS (2026-09-11). The gate's ratio attenuates the
-            // plan's advance INTO the declared press axis; it no longer fades to zero, so
-            // there is no "complete hold-back" and no arming to decide when to apply one.
-            // What that replaces, and why:
-            //   * the 2 Hz slow-vector direction with its arm/release Schmitt and release
-            //     dwell - the axis is declared now, so nothing has to be inferred from a
-            //     ringing wrench (it turned > 45 deg on 18 % of ticks, and the all-or-
-            //     nothing hold-back it fed flipped the whole advance at ~30 Hz,
-            //     servo_log_20260910_183004);
-            //   * the hold-back itself - the reference used to wind 3-13 mm past a surface
-            //     because a proportional fade leaked 5-20 % of the advance, and the answer
-            //     was to remove ALL of it. With a crossing at peak_force_n the leak IS the
-            //     equilibrium: the advance that survives is exactly the law's yield, so
-            //     the reference stands still at the declared force instead of winding.
-            const auto& gate=left?left_force_gate_:right_force_gate_;
-            follower->setAdvanceGate(gate.translation(),
-                                     declared_contact_normal_[left?0:1]);
-        }
-    }
+    // THE (gate, direction) PAIR THE FOLLOWER CUTS ALONG, published from ONE place
+    // (publishAdvanceGate): the curve's ratio along this tick's measured F_hat, or the
+    // ROI/floor face's normal at gate 0 while that fold owns the slot. On the preview
+    // path the force input was prepared before this stage, so the cut at this tick's
+    // segment boundary sees this tick's gate; on the legacy path it is one tick old.
+    publishAdvanceGate(arm_id);
     // Contact-aware following is gone with the F/T stack: no external reaction
     // is supplied, which is the follower's own blind-mode behaviour.
     const Pose6D pre_filter = follower->tick(dt_sec);
@@ -6635,7 +6567,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     const control::FollowerDiag& diag = follower->diag();
     // THE GATE'S CURVE READS THE DEMAND (2026-09-11). Updated once per segment by the
     // follower, before its own attenuation - see FollowerDiag::demanded_advance_m_s.
-    force_stream_speed_m_s_[arm_id == ArmId::Left ? 0 : 1] = diag.demanded_advance_m_s;
+    force_source_[fi] = ForceSource{ForceSourceKind::ChunkFollower, diag.demanded_advance_m_s};
     abc.follower_projection_error_m = diag.projection_error_m;
     abc.follower_projection_error_rad = diag.projection_error_rad;
     abc.follower_projection_error_count = diag.consecutive_projection_errors;
@@ -6978,23 +6910,38 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     const auto smd_fallback = [&]() {
         log_transition();
         carryPoseTrackerAcrossOverlayFrame(arm_id, smd_tracker);
+        const std::size_t fi = arm_id == ArmId::Left ? 0 : 1;
+        ForceControlTelemetry& ftel =
+            fi == 0 ? left_force_control_telemetry_ : right_force_control_telemetry_;
+        double demand_m_s = 0.0;
         ArmCommand out = applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
             forceOverlayForReference(arm_id),
-            arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
-            &(arm_id == ArmId::Left ? left_force_control_telemetry_
-                                    : right_force_control_telemetry_).gate_removed_m,
+            ftel.reference_strip_enabled ? (fi == 0 ? &left_force_gate_ : &right_force_gate_) : nullptr,
+            &ftel.gate_removed_m,
             nullptr,
-            &(arm_id == ArmId::Left ? left_force_control_telemetry_ : right_force_control_telemetry_),
-            &declared_contact_normal_[arm_id == ArmId::Left ? 0 : 1],
-            &force_stream_speed_m_s_[arm_id == ArmId::Left ? 0 : 1]);
+            &contact_normal_[fi],
+            &demand_m_s);
+        force_source_[fi] = command.mode == ControlMode::TcpPoseTarget
+            ? ForceSource{ForceSourceKind::AbsoluteTarget, demand_m_s}
+            : ForceSource{};
         applyPoseTrackWallFold(arm_id, smd_tracker, dt_sec, &out);
         return with_stage_telemetry(out);
     };
+    if (command.compliant_hold) {
+        // THE HOLD SOURCE (2026-09-15): zero demand, no SMD - see the Ruckig stage.
+        transition_reason = "hold source";
+        follower->deactivate();
+        smd_tracker->deactivate();
+        resetChunkFollowerEngageWait(arm_id);
+        log_transition();
+        force_source_[arm_id == ArmId::Left ? 0 : 1] = ForceSource{ForceSourceKind::HoldPose, 0.0};
+        return with_stage_telemetry(command);
+    }
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
-        !command.has_tcp_target || !kinematics_ || command.compliant_hold) {
-        transition_reason = command.compliant_hold ? "compliant hold" : "mode/enable";
+        !command.has_tcp_target || !kinematics_) {
+        transition_reason = "mode/enable";
         follower->deactivate();
         resetChunkFollowerEngageWait(arm_id);
         return smd_fallback();
@@ -7346,8 +7293,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         ForceControlTelemetry& tel =
             fc_left ? left_force_control_telemetry_ : right_force_control_telemetry_;
         control::AdmittanceOverlay& overlay = fc_left ? left_overlay_ : right_overlay_;
-        std::optional<Pose6D>& hold_nominal =
-            fc_left ? left_hold_compliance_nominal_ : right_hold_compliance_nominal_;
+        std::optional<Pose6D>& hold_nominal = hold_source_pose_[static_cast<std::size_t>(i)];
 
         tel = ForceControlTelemetry{};
         tel.enabled = config_.force_control.enable;
@@ -7356,6 +7302,19 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         tel.reference_deviation_m = {reference_dp.x(), reference_dp.y(), reference_dp.z()};
         tel.reference_deviation_rad = {reference_er.x(), reference_er.y(), reference_er.z()};
         tel.reference_reset_count = force_reference_reset_count_[static_cast<std::size_t>(i)];
+        {
+            // THE RUNNING TOTALS ARE PUBLISHED EVERY TICK, covered or not (2026-09-15):
+            // written only inside foldForceDeviation they read 0 on any tick the fold
+            // did not run (uncovered, no target, a recovery brake) and then jumped back,
+            // which made "how far has force moved this plan" a sawtooth in the CSV.
+            const math::Vector3& absorbed = fc_left ? left_fc_absorbed_m_ : right_fc_absorbed_m_;
+            const Eigen::Quaterniond& absorbed_r = fc_left ? left_fc_absorbed_r_ : right_fc_absorbed_r_;
+            tel.absorbed_m = {absorbed.x(), absorbed.y(), absorbed.z()};
+            tel.absorbed_norm_m = absorbed.norm();
+            tel.absorbed_norm_rad = Eigen::AngleAxisd(absorbed_r).angle();
+            tel.source = forceSourceName(force_source_[static_cast<std::size_t>(i)].kind);
+            tel.source_demand_m_s = force_source_[static_cast<std::size_t>(i)].demand_m_s;
+        }
 
         std::string reason;
         bool covered = forceControlCovered(fc_arm, eff, fc_state, &reason);
@@ -7435,32 +7394,22 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             // retiring would command the tool the whole deviation deeper.
             overlay.freeze();
             hold_nominal.reset();
-            (fc_left ? left_hold_engage_ : right_hold_engage_).reset();
             // Unprime the contact-shock filter: a law that resumes minutes later
             // must seed from the live wrench, not ring down from a stale one.
-            (fc_left ? left_wrench_filter_primed_ : right_wrench_filter_primed_) = false;
-            (fc_left ? left_gate_force_filt_n_ : right_gate_force_filt_n_) = 0.0;
-            (fc_left ? left_gate_torque_filt_nm_ : right_gate_torque_filt_nm_) = 0.0;
+            phys_wrench_filt_primed_[static_cast<std::size_t>(i)] = false;
+            force_source_[static_cast<std::size_t>(i)] = ForceSource{};
             continue;
         }
         if (eff.mode != ControlMode::Hold) {
-            // A PLAN IS BEING STREAMED INTO CONTACT. Soft law: the GATE holding the
-            // plan back is what bounds the force, so the spring does not have to.
-            overlay.setLaw(config_.force_control.stream);
-            tel.law = "stream";
+            // A PLAN (or an absolute target) is being streamed: that stage is the
+            // source and writes its own demand. Nothing to promote here.
             hold_nominal.reset();
-            (fc_left ? left_hold_engage_ : right_hold_engage_).reset();
             continue;
         }
-        // AN OPERATOR IS PUSHING BY HAND. Stiff law: there is no advancing plan for
-        // the gate to hold back, so the spring is the ONLY bound on how far a push
-        // takes the arm - and on how much a torque about the TCP turns it.
-        overlay.setLaw(config_.force_control.hold);
-        tel.law = "hold";
-        // A plain Hold has no Cartesian nominal to deviate FROM, so LATCH one on
-        // entry. Re-reading the measured pose every tick would make the nominal
-        // follow the deviation and leave the spring nothing to pull back to - the arm
-        // would simply stay wherever it was pushed.
+        // A HOLD UNDER FORCE CONTROL IS A SOURCE WITH ZERO DEMAND (2026-09-15). Same
+        // law as every other source; what it asks for is the pose the arm was last
+        // commanded to, latched ONCE on entry and moved along by the fold every tick
+        // (re-reading it every tick would make the source chase its own yield).
         if (!hold_nominal.has_value()) {
             // THE LATCH WAITS FOR THE MOTION GENERATOR TO REST (2026-09-06). Latching
             // while the pose-track SMD / chunk follower still carried velocity turned
@@ -7471,31 +7420,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             // brought the arm to rest; the nominal then latches where it stopped.
             if (motionGeneratorInFlight(fc_arm)) {
                 overlay.freeze();
+                // No source while the brake owns the arm: a stale plan demand must not
+                // keep the gate closed into the Hold that follows.
+                force_source_[static_cast<std::size_t>(i)] = ForceSource{};
                 tel.coverage_reason =
                     "covered, but Hold waits for the motion generator to brake to rest";
                 continue;
             }
-            // NEVER LATCH THE NOMINAL UNDER LOAD (2026-08-27). A nominal latched
-            // while a hand is still pushing anchors the spring at the pushed
-            // pose: no restoring force, and under a coverage flap the anchor
-            // FOLLOWED the hand. Until the measured force drops below the
-            // relatch limit, the Hold stays RIGID (plain joint hold) — which is
-            // also the correct posture against a push with no reference.
-            const sensor::FtPipeline& relatch_pipe =
-                fc_left ? left_ft_pipeline_ : right_ft_pipeline_;
-            const Wrench6D& rw = relatch_pipe.compStand();
-            const double f_now =
-                std::sqrt(rw.fx * rw.fx + rw.fy * rw.fy + rw.fz * rw.fz);
-            if (f_now > config_.force_control.hold_relatch_max_force_n) {
-                overlay.freeze();
-                char buf[128];
-                std::snprintf(buf, sizeof(buf),
-                              "covered, but Hold stays RIGID until the hand releases "
-                              "(|F|=%.1f N > relatch limit %.1f N)",
-                              f_now, config_.force_control.hold_relatch_max_force_n);
-                tel.coverage_reason = buf;
-                continue;
-            }
+            // LATCHING UNDER LOAD IS FINE (2026-09-15). The old relatch guard kept a
+            // SPRING from being anchored at the pushed pose; with k = 0 there is no
+            // spring, the latch is at the COMMAND (no step), and the law yields from
+            // wherever it latched. A hand already pushing simply starts to move the arm.
             // LATCH AT THE COMMAND, NOT THE MEASUREMENT (2026-09-04). The measured
             // TCP trails the streamed command by the box's delay, so latching it
             // re-targeted the arm backwards by that lag on every pedal release
@@ -7536,7 +7471,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             }
             hold_nominal = latched;
             std::cerr << "[INFO] force overlay " << toString(fc_arm)
-                      << ": Hold made compliant, nominal latched at the " << latched_from << " ["
+                      << ": Hold is a force source, pose latched at the " << latched_from << " ["
                       << hold_nominal->x << ", " << hold_nominal->y << ", "
                       << hold_nominal->z << "] m\n";
             // A COMPLIANT HOLD IS A MOTION COMMAND THE SERVER AUTHORED, so it arms the
@@ -7887,8 +7822,9 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 ctx.chunk_follower.active() && !ctx.chunk_follower.holdPaused();
             if (!eligible) {
                 if (fold_active) {
-                    ctx.chunk_follower.setAdvanceGate(1.0, math::Vector3::Zero());
                     fold_active = false;
+                    roi_fold_normal_[static_cast<std::size_t>(i)].setZero();
+                    publishAdvanceGate(ctx.arm);
                 }
                 continue;
             }
@@ -7907,8 +7843,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 }
                 track.tcp_target_stand = clamped;
                 // `dp` points from the face into the box: the free-space direction,
-                // the same convention as the reported contact force in the force gate.
-                ctx.chunk_follower.setAdvanceGate(0.0, math::Vector3(dp / dist));
+                // the same convention as the measured contact force (+F_hat).
+                roi_fold_normal_[static_cast<std::size_t>(i)] = math::Vector3(dp / dist);
                 uint64_t& count = left_arm ? left_roi_fold_count_ : right_roi_fold_count_;
                 double& total = left_arm ? left_roi_fold_total_m_ : right_roi_fold_total_m_;
                 uint64_t& started = left_arm ? left_roi_fold_started_ns_ : right_roi_fold_started_ns_;
@@ -7925,6 +7861,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                     last_log = now_ns;
                 }
                 total += dist;
+                publishAdvanceGate(ctx.arm);
                 if (now_ns - last_log > 1'000'000'000ULL) {
                     last_log = now_ns;
                     std::cerr << "[INFO] roi_fold " << toString(ctx.arm) << " holding: "
@@ -7933,7 +7870,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 }
             } else if (fold_active) {
                 fold_active = false;
-                ctx.chunk_follower.setAdvanceGate(1.0, math::Vector3::Zero());
+                roi_fold_normal_[static_cast<std::size_t>(i)].setZero();
+                publishAdvanceGate(ctx.arm);
                 const uint64_t started = left_arm ? left_roi_fold_started_ns_ : right_roi_fold_started_ns_;
                 const double total = left_arm ? left_roi_fold_total_m_ : right_roi_fold_total_m_;
                 std::cerr << "[INFO] roi_fold " << toString(ctx.arm) << " released after "
@@ -8073,26 +8011,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             track.tcp_target_stand = target;
             // THE FOLD: the composed target above is final for this tick; what moves
             // here is only where the deviation is BOOKED for the next one.
-            foldForceDeviation(arm_id, arm_ctx[i].chunk_follower, arm_ctx[i].follower_output_smd,
-                               arm_ctx[i].abc_telemetry.follower_active, tel);
-            // FEED THE GATE TO THE PLAN, not just to the law. The overlay makes the
-            // arm YIELD; only the gate stops the PLAN from walking further into what
-            // it is yielding to. Without this the spring's deviation grows for as long
-            // as the stream keeps advancing, and the contact force with it.
-            control::ForceGate& gate = left_arm ? left_force_gate_ : right_force_gate_;
-            const Wrench6D& gw = tel.wrench_stand;
-            const math::Vector3 f_stand(gw.fx, gw.fy, gw.fz);
-            const double fn = f_stand.norm();
-            // The advance gate is one (gate, direction) pair. While the ROI/floor fold
-            // above holds the plan off a face, that geometric gate (0 along the face
-            // normal) owns it; the overlay still yields to the contact through its law.
-            const bool roi_fold_owns_gate =
-                left_arm ? left_roi_fold_active_ : right_roi_fold_active_;
-            if (!roi_fold_owns_gate) {
-                arm_ctx[i].chunk_follower.setAdvanceGate(
-                    gate.translation(),
-                    fn > 1e-9 ? math::Vector3(f_stand / fn) : math::Vector3::Zero());
-            }
+            foldForceDeviation(arm_id, force_source_[static_cast<std::size_t>(i)].kind,
+                               arm_ctx[i].chunk_follower, tel);
+            // FEED THE GATE TO THE PLAN, not just to the law: the overlay makes the arm
+            // YIELD; only the gate stops the PLAN from walking further into what it is
+            // yielding to. One publisher, one (gate, direction) pair, so the legacy
+            // path and the preview path can no longer disagree about the direction.
+            publishAdvanceGate(arm_id);
         }
         if (latchChunkFollowerFaultRequests(left_state, right_state) && command_verdict) {
             *command_verdict = SafetyVerdict::ChunkFollowerFault;
@@ -10763,6 +10688,49 @@ bool DualArmServoLoop::stepFtPipeline(ArmId arm, const RobotState& state) {
             in.kinematics_valid = true;
         }
     }
+    // ---- tool inertia from the COMMANDED trajectory (2026-09-15) ----------------
+    // The sensor reads -m*a_com beside m*g and the box compensates neither. The
+    // commanded chain is smooth and known; the measured joints are not (27 N p99 of
+    // noise from a 9-sample fit, 2026-09-11). One FK per tick pushes the tool COM's
+    // stand position into a ring; the central second difference centred
+    // command_delay_ticks back is the acceleration the sensor's flange is executing
+    // NOW (measured lag ~14 ticks: sent -> box reference -> arm -> F/T sample).
+    {
+        const FtInertiaCompensationConfig& ic = config_.force_torque.inertia_compensation;
+        ToolComHistory& hist = tool_com_history_[left ? 0 : 1];
+        const JointArray& q_cmd = left ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_;
+        bool pushed = false;
+        if (ic.enable && kinematics_ != nullptr && finiteJointArray(q_cmd)) {
+            const ArmMountConfig& mount = left ? config_.left_mount : config_.right_mount;
+            const std::optional<Pose6D> fl = kinematics_->computeFlangeStand(arm, q_cmd, mount);
+            if (fl.has_value()) {
+                const math::Matrix3 r = math::rotationFromPose(*fl);
+                const math::Vector3 p_flange(fl->x, fl->y, fl->z);
+                hist.p[hist.head] = p_flange + r * pipe.toolComInFlange();
+                hist.head = (hist.head + 1) % kToolComRing;
+                if (hist.count < kToolComRing) ++hist.count;
+                pushed = true;
+            }
+        }
+        if (!pushed) hist = ToolComHistory{};   // a gap in the command chain: nothing to differentiate
+        tel.inertia_valid = false;
+        tel.com_accel_stand_m_s2 = {0.0, 0.0, 0.0};
+        // Centre index c ticks back (c >= 1 so the stencil is central); needs c + 2 samples.
+        const std::size_t c = static_cast<std::size_t>(std::max(1, ic.command_delay_ticks));
+        if (pushed && hist.count >= c + 2 && c + 2 <= kToolComRing) {
+            const auto at = [&](std::size_t back) {
+                return hist.p[(hist.head + kToolComRing - 1 - back) % kToolComRing];
+            };
+            const double dt = 1.0 / std::max(1, config_.servo.rate_hz);
+            const math::Vector3 a = (at(c - 1) - 2.0 * at(c) + at(c + 1)) / (dt * dt);
+            if (a.allFinite() && a.norm() <= ic.max_accel_m_s2) {
+                in.com_accel_stand = a;
+                in.inertia_valid = true;
+                tel.inertia_valid = true;
+                tel.com_accel_stand_m_s2 = {a.x(), a.y(), a.z()};
+            }
+        }
+    }
     const bool ok = pipe.step(in);
 
     // ---- a pending tare ------------------------------------------------------
@@ -10799,7 +10767,14 @@ bool DualArmServoLoop::stepFtPipeline(ArmId arm, const RobotState& state) {
         }
     }
 
-    pipe.fillTelemetry(&tel);
+    {
+        // fillTelemetry does not know the acceleration; keep this tick's decision.
+        const bool inertia_valid = tel.inertia_valid;
+        const std::array<double, 3> a = tel.com_accel_stand_m_s2;
+        pipe.fillTelemetry(&tel);
+        tel.inertia_valid = inertia_valid;
+        tel.com_accel_stand_m_s2 = a;
+    }
     return ok;
 }
 
@@ -10931,12 +10906,10 @@ bool DualArmServoLoop::forceControlCovered(
         case ControlMode::TcpPoseTarget:
             return true;
         case ControlMode::Hold:
-            // A plain Hold has no Cartesian nominal to deviate FROM. With
-            // hold_compliance the first covered tick latches the measured TCP and
-            // holds it as the nominal, which is what makes a hand-push test possible
-            // without a policy running.
-            if (config_.force_control.hold_compliance) return true;
-            return no("Hold is not compliant (set force_control.hold_compliance)");
+            // A Hold under force control is ALWAYS a source (demand 0): the coverage
+            // block latches the last commanded TCP as its pose and promotes it, which
+            // is what makes a hand-push test possible without a policy running.
+            return true;
         default:
             break;
     }
@@ -11007,11 +10980,12 @@ void DualArmServoLoop::resetForceReferenceForInit(ArmId arm) {
     // on no-op completion, or after tare/coverage recovery at the new joint pose.
     (left ? left_overlay_ : right_overlay_).reset();
     (left ? left_force_gate_ : right_force_gate_).reset();
-    (left ? left_hold_compliance_nominal_ : right_hold_compliance_nominal_).reset();
-    (left ? left_hold_engage_ : right_hold_engage_).reset();
-    (left ? left_wrench_filter_primed_ : right_wrench_filter_primed_) = false;
-    (left ? left_gate_force_filt_n_ : right_gate_force_filt_n_) = 0.0;
-    (left ? left_gate_torque_filt_nm_ : right_gate_torque_filt_nm_) = 0.0;
+    hold_source_pose_[i].reset();
+    phys_wrench_filt_primed_[i] = false;
+    force_source_[i] = ForceSource{};
+    contact_normal_[i].setZero();
+    roi_fold_normal_[i].setZero();
+    tool_com_history_[i] = ToolComHistory{};
     clearLatchedCartesianTarget(arm);
     auto ctx = armContext(arm);
     ctx.chunk_follower.deactivate();
@@ -11034,24 +11008,25 @@ void DualArmServoLoop::resetForceReferenceForInit(ArmId arm) {
 }
 
 void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
-    const int i=arm==ArmId::Left?0:1;
-    if (last_loop_start_ns_!=0 && prepared_force_tick_[i]==last_loop_start_ns_) return;
-    const bool left=arm==ArmId::Left;
-    sensor::FtPipeline& pipe=left?left_ft_pipeline_:right_ft_pipeline_;
-    control::AdmittanceOverlay& overlay=left?left_overlay_:right_overlay_;
-    control::ForceGate& gate=left?left_force_gate_:right_force_gate_;
-    ForceControlTelemetry& tel=left?left_force_control_telemetry_:right_force_control_telemetry_;
+    const std::size_t i = arm == ArmId::Left ? 0 : 1;
+    if (last_loop_start_ns_ != 0 && prepared_force_tick_[i] == last_loop_start_ns_) return;
+    const bool left = arm == ArmId::Left;
+    sensor::FtPipeline& pipe = left ? left_ft_pipeline_ : right_ft_pipeline_;
+    control::ForceGate& gate = left ? left_force_gate_ : right_force_gate_;
+    ForceControlTelemetry& tel = left ? left_force_control_telemetry_ : right_force_control_telemetry_;
     // ---- the wrench, carried to the STAND frame -----------------------------
     // The pipeline's TCP surface is in TOOL axes; the overlay integrates in stand.
     // The wrench source and the compose pivot are BOTH the TCP, which is what keeps
     // a straight push from twisting the tool.
-    const Wrench6D& w = pipe.compStand();
-    // TELEMETRY KEEPS THE RAW MEASUREMENT. The filter below shapes only what the
-    // LAW consumes, so the published/logged wrench still answers "what did the
-    // sensor say", which is the question an operator asks of it.
-    tel.wrench_stand = w;
-    math::Vector3 f_stand(w.fx, w.fy, w.fz);
-    math::Vector3 m_stand(w.tx, w.ty, w.tz);
+    // TELEMETRY KEEPS THE RAW (deadzoned) MEASUREMENT, so the published/logged wrench
+    // still answers "what did the sensor say".
+    tel.wrench_stand = pipe.compStand();
+    // THE ONE WRENCH FORCE CONTROL READS (2026-09-15): compensated, BEFORE the
+    // deadzone. rest_force_n is then the force a sensor reads, not that force plus the
+    // deadzone (judged on the deadzoned wrench the gate arrived 3 N late, 2026-09-04).
+    // The law, the gate's magnitude and the contact normal all read this one filtered
+    // vector, so they cannot disagree about where the contact is or how hard it is.
+    const Wrench6D& nodz = pipe.compStandNoDeadzone();
     // CONTACT-SHOCK LOW-PASS (force_control.wrench_filter_hz), on the FORCE path
     // only -- the servo command path keeps its filters off by design. A contact
     // arrives as a burst, not a step: measured 2026-08-27 the compensated |F|
@@ -11059,6 +11034,8 @@ void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
     // the overlay followed it into 1,501 deg/s^2 of commanded acceleration. One
     // pole at this corner takes the burst out and leaves the steady contact
     // force the law regulates against.
+    Wrench6D& filt = phys_wrench_filt_[i];
+    bool& primed = phys_wrench_filt_primed_[i];
     {
         const double hz = config_.force_control.wrench_filter_hz;
         // Nominal period, like AdmittanceOverlay/ForceGate already use: the law's
@@ -11066,144 +11043,84 @@ void DualArmServoLoop::prepareForceOverlayInput(ArmId arm) {
         const double dt = config_.servo.rate_hz > 0
             ? 1.0 / static_cast<double>(config_.servo.rate_hz)
             : 0.002;
-        Wrench6D& state = left ? left_wrench_filter_ : right_wrench_filter_;
-        bool& primed = left ? left_wrench_filter_primed_ : right_wrench_filter_primed_;
         if (hz > 0.0 && dt > 0.0) {
             // Seed on the first covered tick (and after any gap) so the law does
             // not start by ramping up from a stale zero.
             if (!primed) {
-                state = w;
+                filt = nodz;
                 primed = true;
             } else {
                 const double tau = 1.0 / (2.0 * M_PI * hz);
                 const double a = std::min(1.0, dt / (tau + dt));
-                state.fx += a * (w.fx - state.fx);
-                state.fy += a * (w.fy - state.fy);
-                state.fz += a * (w.fz - state.fz);
-                state.tx += a * (w.tx - state.tx);
-                state.ty += a * (w.ty - state.ty);
-                state.tz += a * (w.tz - state.tz);
+                filt.fx += a * (nodz.fx - filt.fx);
+                filt.fy += a * (nodz.fy - filt.fy);
+                filt.fz += a * (nodz.fz - filt.fz);
+                filt.tx += a * (nodz.tx - filt.tx);
+                filt.ty += a * (nodz.ty - filt.ty);
+                filt.tz += a * (nodz.tz - filt.tz);
             }
-            f_stand = math::Vector3(state.fx, state.fy, state.fz);
-            m_stand = math::Vector3(state.tx, state.ty, state.tz);
-            tel.wrench_filtered_stand = state;
             tel.wrench_filter_hz = hz;
         } else {
             primed = false;
-            tel.wrench_filtered_stand = w;
+            filt = nodz;
             tel.wrench_filter_hz = 0.0;
         }
+        tel.wrench_filtered_stand = filt;
     }
-
-    // ---- the workspace frame, re-aimed every tick ---------------------------
-    // The per-axis law is only meaningful in a frame the task reasons in, and for a
-    // streamed tool path that is the TOOL's. Latching it at entry would let the axis
-    // meanings rotate as the arm moves — "soft along the approach" would stop
-    // meaning the approach.
-    {
-        const ArmMountConfig& mount = left ? config_.left_mount : config_.right_mount;
-        const JointArray& q_cmd = left ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_;
-        const std::optional<Pose6D> flange =
-            kinematics_ != nullptr ? kinematics_->computeFlangeStand(arm, q_cmd, mount)
-                                   : std::nullopt;
-        if (flange.has_value()) {
-            const FtArmConfig& ft_cfg = left ? config_.force_torque.left : config_.force_torque.right;
-            Pose6D tool_rot{};
-            tool_rot.rx = ft_cfg.tool_rpy_deg[0] * M_PI / 180.0;
-            tool_rot.ry = ft_cfg.tool_rpy_deg[1] * M_PI / 180.0;
-            tool_rot.rz = ft_cfg.tool_rpy_deg[2] * M_PI / 180.0;
-            overlay.setWorkspaceFrame(math::rotationFromPose(*flange) *
-                                      math::rotationFromPose(tool_rot));
-        }
-    }
-
-    // ---- the PHYSICAL magnitude THE CROSSING IS ABOUT ----------------------
-    // Compensated, BEFORE the deadzone, low-passed at the wrench filter's corner:
-    // judged on the deadzoned wrench the gate arrives 3 N late (2026-09-04). The LAW
-    // still consumes the deadzoned vector on its compliance axes - the deadzone is what
-    // keeps noise out of a bare integrator.
-    //
-    // AND IT IS THE PRESS-AXIS COMPONENT, NOT |F| (2026-09-11, second revision). The
-    // curve's crossing is an algebraic identity between the gate's speed at the declared
-    // force and the LAW's yield at that force - and the law only yields past
-    // rest_force_n on ONE axis. Judged on |F|, an off-axis contact closes the gate for a
-    // force nothing yields against: the crossing is gone and the only equilibrium left
-    // is "gate shut, law at rest", i.e. the contact sits at rest_force_n with ZERO
-    // advance authority. Then the follower's reference freezes, the executor's plan runs
-    // on (lead 25-30 mm), the cursor backlog fills, the plan expires into a brake and
-    // the joint accel clamp finally trips accepted_deviation - the whole chain of the
-    // 14:12 run, where |F| stood at 26-35 N while the press component was 0.3-29 N
-    // (servo_log_20260911_141234, fault at 12.53 s). Modelled with a 20 N lateral
-    // component present: judged on |F| the contact converges at 10.0 N with the gate at
-    // 0.0000; judged on the component, 12.00 N at every stream speed.
-    // Without a declared press axis there is nothing to project onto and |F| is right -
-    // that is CM's isotropic case, where every axis yields.
-    const Wrench6D& nodz = pipe.compSensorNoDeadzone();
-    const Wrench6D& nodz_stand_for_gate = pipe.compStandNoDeadzone();
-    const double f_phys_norm = std::sqrt(nodz.fx * nodz.fx + nodz.fy * nodz.fy + nodz.fz * nodz.fz);
-    double f_phys_raw = f_phys_norm;
-    if (press_axis_index_ >= 0) {
-        const math::Vector3 axis = overlay.workspaceFrame().col(press_axis_index_);
-        f_phys_raw = std::abs(axis.dot(math::Vector3(nodz_stand_for_gate.fx,
-                                                     nodz_stand_for_gate.fy,
-                                                     nodz_stand_for_gate.fz)));
-    }
-    const double m_phys_raw = std::sqrt(nodz.tx * nodz.tx + nodz.ty * nodz.ty + nodz.tz * nodz.tz);
-    double& f_phys_filt = left ? left_gate_force_filt_n_ : right_gate_force_filt_n_;
-    double& m_phys_filt = left ? left_gate_torque_filt_nm_ : right_gate_torque_filt_nm_;
-    {
-        const double hz = config_.force_control.wrench_filter_hz;
-        const double dt = config_.servo.rate_hz > 0
-            ? 1.0 / static_cast<double>(config_.servo.rate_hz)
-            : 0.002;
-        if (hz > 0.0 && dt > 0.0 && tel.wrench_filter_hz > 0.0 &&
-            (f_phys_filt > 0.0 || m_phys_filt > 0.0)) {
-            const double tau = 1.0 / (2.0 * M_PI * hz);
-            const double a = std::min(1.0, dt / (tau + dt));
-            f_phys_filt += a * (f_phys_raw - f_phys_filt);
-            m_phys_filt += a * (m_phys_raw - m_phys_filt);
-        } else {
-            // Filter off, or the first covered tick: seed from the live magnitude.
-            f_phys_filt = f_phys_raw;
-            m_phys_filt = m_phys_raw;
-        }
-    }
-    // THE STREAM SPEED IS THE PLAN'S DEMAND, one tick old (on the preview path this
-    // preparation runs before the stages). Two milliseconds of staleness on a quantity
-    // that moves in tens of ms, against the alternative of feeding the gate its own
-    // output - which reads g = 1 at the operating point and loses the crossing.
-    gate.update(f_stand, m_stand, f_phys_filt, m_phys_filt, force_stream_speed_m_s_[i]);
-
-    prepared_force_tick_[i]=last_loop_start_ns_;
-    // THE PHYSICAL (pre-deadzone) STAND WRENCH: what a FORCE-mode axis and the declared
-    // normal are judged on, so rest_force_n means the force a sensor reads and not that
-    // force plus the deadzone.
-    const Wrench6D& nodz_stand = pipe.compStandNoDeadzone();
-    prepared_force_physical_[i]={nodz_stand.fx,nodz_stand.fy,nodz_stand.fz,
-                                 nodz_stand.tx,nodz_stand.ty,nodz_stand.tz};
-    prepared_force_wrench_[i]={f_stand.x(),f_stand.y(),f_stand.z(),m_stand.x(),m_stand.y(),m_stand.z()};
-    prepared_force_magnitude_[i]=f_phys_raw;      // the press-axis component the gate judged
-    prepared_force_norm_[i]=f_phys_norm;          // |F|, for the pair to stay auditable
-    declared_contact_normal_[i]=declaredContactNormal(arm);
+    const math::Vector3 f_stand(filt.fx, filt.fy, filt.fz);
+    const math::Vector3 m_stand(filt.tx, filt.ty, filt.tz);
+    // THE GATE READS THE SOURCE'S DEMAND, one tick old on the preview path (this
+    // preparation runs before the stages there). Two milliseconds of staleness on a
+    // quantity that moves in tens of ms, against the alternative of feeding the gate
+    // its own output - which reads g = 1 at the operating point and loses the
+    // crossing. A Hold's demand is exactly 0 by construction, so a hand push in Hold
+    // leaves the gate at 1 (it used to read the Hold's own yield: 0.095 on
+    // 2026-09-15).
+    gate.update(f_stand, m_stand, force_source_[i].demand_m_s);
+    contact_normal_[i] = gate.contactNormal();
+    prepared_force_wrench_[i] = {f_stand.x(), f_stand.y(), f_stand.z(),
+                                 m_stand.x(), m_stand.y(), m_stand.z()};
+    prepared_force_tick_[i] = last_loop_start_ns_;
 }
 
-math::Vector3 DualArmServoLoop::declaredContactNormal(ArmId arm) const {
-    // The axis, the frame and the sign rule all live in control::declaredContactNormal;
-    // this only supplies the tool frame the overlay re-aimed this tick and the physical
-    // (pre-deadzone) wrench. The sign band is a NOISE floor, not a force level - putting
-    // it at rest_force_n switched the whole advance authority on and off at 52 Hz.
+void DualArmServoLoop::publishAdvanceGate(ArmId arm) {
     const bool left = arm == ArmId::Left;
-    const control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
-    const Vec6& phys = prepared_force_physical_[left ? 0 : 1];
-    return control::declaredContactNormal(overlay.workspaceFrame(), press_axis_index_,
-                                          math::Vector3(phys.x, phys.y, phys.z),
-                                          kContactNormalSignDeadbandN);
+    const std::size_t i = left ? 0 : 1;
+    auto ctx = armContext(arm);
+    const ForceControlTelemetry& tel = left ? left_force_control_telemetry_ : right_force_control_telemetry_;
+    const control::ForceGate& gate = left ? left_force_gate_ : right_force_gate_;
+    const bool roi_owns = left ? left_roi_fold_active_ : right_roi_fold_active_;
+    if (roi_owns) {
+        // The geometric wall owns the slot: no plan advance into the face, whatever
+        // the force says. The law still yields to the contact through compose, and
+        // the fold still books it.
+        ctx.chunk_follower.setAdvanceGate(0.0, roi_fold_normal_[i]);
+        return;
+    }
+    // An uncovered arm must not be cut by a stale gate: g = 1, no direction.
+    if (!tel.reference_strip_enabled) {
+        ctx.chunk_follower.setAdvanceGate(1.0, math::Vector3::Zero());
+        return;
+    }
+    // +F_hat = the free-space direction; the follower cuts advances whose projection
+    // on it is negative, the preview QP negates it into its closing direction.
+    ctx.chunk_follower.setAdvanceGate(gate.translation(), contact_normal_[i]);
+}
+
+const char* DualArmServoLoop::forceSourceName(ForceSourceKind kind) {
+    switch (kind) {
+        case ForceSourceKind::ChunkFollower: return "chunk_follower";
+        case ForceSourceKind::HoldPose: return "hold";
+        case ForceSourceKind::AbsoluteTarget: return "absolute";
+        case ForceSourceKind::None: break;
+    }
+    return "none";
 }
 
 bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target) {
+    (void)state;
     if (target == nullptr) return false;
     const bool left = arm == ArmId::Left;
-    sensor::FtPipeline& pipe = left ? left_ft_pipeline_ : right_ft_pipeline_;
     control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
     control::ForceGate& gate = left ? left_force_gate_ : right_force_gate_;
     ForceControlTelemetry& tel = left ? left_force_control_telemetry_ : right_force_control_telemetry_;
@@ -11211,47 +11128,16 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     // Prepared early only by the preview path; every other profile evaluates
     // the same sensor/filter/gate operations here, in its original tick order.
     prepareForceOverlayInput(arm);
-    const int i=left?0:1;
-    const Vec6& prepared=prepared_force_wrench_[i];
-    const math::Vector3 f_stand(prepared.x,prepared.y,prepared.z);
-    const math::Vector3 m_stand(prepared.rx,prepared.ry,prepared.rz);
-    const double f_phys_raw=prepared_force_magnitude_[i];
+    const std::size_t i = left ? 0 : 1;
+    const Vec6& prepared = prepared_force_wrench_[i];
+    const math::Vector3 f_stand(prepared.x, prepared.y, prepared.z);
+    const math::Vector3 m_stand(prepared.rx, prepared.ry, prepared.rz);
 
-    // ---- the hand-guide engagement latch (HOLD law only) ---------------------
-    // Judged on the PHYSICAL force magnitude (compensated, before the deadzone), so
-    // the numbers an operator sets are the push they feel. While disengaged the
-    // overlay is frozen: no integration, momentum dropped, deviation untouched.
-    bool engaged = true;
-    if (tel.law == "hold") {
-        control::HoldEngageLatch& latch = left ? left_hold_engage_ : right_hold_engage_;
-        const double f_phys = f_phys_raw;
-        const bool was = latch.engaged();
-        engaged = latch.update(f_phys);
-        tel.hold_force_n = f_phys;
-        if (latch.enabled() && engaged != was) {
-            uint64_t& log_ns = left ? left_hold_engage_log_ns_ : right_hold_engage_log_ns_;
-            const uint64_t now_ns = nowSteadyNs();
-            if (log_ns == 0 || now_ns - log_ns > 1'000'000'000ULL) {
-                log_ns = now_ns;
-                std::cerr << "[INFO] hand-guide " << toString(arm)
-                          << (engaged ? ": ENGAGED (|F| " : ": released (|F| ")
-                          << f_phys << " N vs engage " << latch.engageN()
-                          << " / release " << latch.releaseN() << ")\n";
-            }
-        }
-    }
-    tel.hold_engaged = engaged;
-    // The gate throttles the FORCE-mode walk; compliance keeps yielding regardless.
-    // A gated axis stops WALKING, it does not stop being soft.
-    if (engaged) {
-        // TWO WRENCHES: the deadzoned one for the compliance axes, the physical
-        // (pre-deadzone) one for the declared FORCE axis - see AdmittanceOverlay::step.
-        const Vec6& phys = prepared_force_physical_[i];
-        overlay.step(f_stand, m_stand, math::Vector3(phys.x, phys.y, phys.z),
-                     math::Vector3(phys.rx, phys.ry, phys.rz));
-    } else {
-        overlay.freeze();
-    }
+    // ONE LAW, EVERY SOURCE, EVERY TICK (2026-09-15). No engagement latch and no law
+    // switch: the one-sided vector law is its own threshold (nothing moves at or below
+    // rest_force_n, in any direction), and the gate throttles the SOURCE's advance,
+    // not the law. A gated source stops WALKING; the arm never stops being soft.
+    overlay.step(f_stand, m_stand);
 
     const Pose6D nominal = *target;
     const Pose6D composed = overlay.compose(nominal);
@@ -11259,6 +11145,9 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
 
     tel.enabled = config_.force_control.enable;
     tel.covered = true;
+    tel.source = forceSourceName(force_source_[i].kind);
+    tel.source_demand_m_s = force_source_[i].demand_m_s;
+    tel.contact_normal_stand = {contact_normal_[i].x(), contact_normal_[i].y(), contact_normal_[i].z()};
     const math::Vector3& d = overlay.deviation();
     const math::Vector3& dr = overlay.deviationRot();
     // Report the transform actually written, including sub-micrometre offsets.
@@ -11290,20 +11179,18 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
         }
     }
     tel.gate_translation = gate.translation();
-    tel.gate_rotation = gate.rotation();
     tel.gate_force_n = gate.forceN();
+    tel.gate_torque_nm = gate.torqueNm();
     tel.gate_b_eff = gate.bEff();
     tel.gate_m_eff = gate.mEff();
     tel.gate_cross_speed_m_s = gate.crossSpeedMs();
-    tel.gate_stream_speed_m_s = gate.streamSpeedMs();
     tel.gate_rest_force_n = config_.force_control.gate_rest_force_n;
     tel.gate_peak_force_n = config_.force_control.gate_peak_force_n;
-    tel.gate_wrench_norm_n = prepared_force_norm_[i];
-    tel.gate_torque_nm = gate.torqueNm();
     tel.gate_closed = gate.closed();
 
     // A SATURATION IS NEVER SILENT: while pinned at the fence the overlay holds the
     // bound instead of tracking, and the operator must know which state they are in.
+    // Reachable only on the absolute-target source (the fold declines there).
     bool& prev = left ? left_overlay_bounded_prev_ : right_overlay_bounded_prev_;
     if (tel.bounded && !prev) {
         std::cerr << "[WARN] force overlay " << toString(arm)
@@ -11319,10 +11206,10 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     if (tel.gate_closed && !gate_prev) {
         std::cerr << "[INFO] force gate " << toString(arm) << " nearly shut (|F| "
                   << tel.gate_force_n << " N vs peak " << config_.force_control.gate_peak_force_n
-                  << " N, rest " << config_.force_control.gate_rest_force_n << " N, stream "
-                  << tel.gate_stream_speed_m_s * 1e3 << " mm/s) - the plan's advance into the "
-                     "declared axis is down to the law's own yield. This is the design: the "
-                     "contact converges to peak_force_n\n";
+                  << " N, rest " << config_.force_control.gate_rest_force_n << " N, source "
+                  << tel.source << " demanding " << tel.source_demand_m_s * 1e3
+                  << " mm/s) - the source's advance into the contact is down to the law's own "
+                     "yield. This is the design: the contact converges to peak_force_n\n";
     } else if (!tel.gate_closed && gate_prev) {
         std::cerr << "[INFO] force gate " << toString(arm) << " re-opened\n";
     }
@@ -11330,15 +11217,13 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     return tel.compose_applied;
 }
 
-void DualArmServoLoop::foldForceDeviation(ArmId arm,
+void DualArmServoLoop::foldForceDeviation(ArmId arm, ForceSourceKind source,
                                           control::CartesianChunkFollower& follower,
-                                          control::FollowerOutputSmd& output_smd,
-                                          bool follower_drove,
                                           ForceControlTelemetry& tel) {
     const bool left = arm == ArmId::Left;
+    const std::size_t i = left ? 0 : 1;
     control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
-    std::optional<Pose6D>& hold_nominal =
-        left ? left_hold_compliance_nominal_ : right_hold_compliance_nominal_;
+    std::optional<Pose6D>& hold_pose = hold_source_pose_[i];
     math::Vector3& absorbed = left ? left_fc_absorbed_m_ : right_fc_absorbed_m_;
     Eigen::Quaterniond& absorbed_r = left ? left_fc_absorbed_r_ : right_fc_absorbed_r_;
 
@@ -11349,36 +11234,33 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm,
     tel.absorbed_norm_m = absorbed.norm();
     tel.absorbed_norm_rad = Eigen::AngleAxisd(absorbed_r).angle();
 
-    if (!config_.force_control.fold_deviation) {
-        tel.fold_sink = "off";
-        return;
-    }
-    // THE GATE ON THE TRANSFER: only a law whose every axis is a pure mass-damper
-    // (k == 0, no force target) makes the hand-off a change of variables. Any
-    // spring would follow the transfer and turn it into CM's origin-walk leash.
-    if (!overlay.pureDamperTranslation() || !overlay.pureDamperRotation()) {
-        tel.fold_sink = "declined: law has a spring or a force target";
-        return;
-    }
-    // WHO TAKES IT. The sink must be a chain that carries a displacement forward on
-    // its own; a producer that re-issues an absolute target every tick would
+    // THE FOLD IS STRUCTURAL (2026-09-15): k = 0 by construction, so the hand-off is
+    // always a change of variables (see AdmittanceOverlay::dropDeviation). WHO TAKES
+    // IT is the SOURCE. The sink must be a chain that carries a displacement forward
+    // on its own; a producer that re-issues an absolute target every tick would
     // overwrite the fold and the command would square-wave by one tick's travel.
     const char* sink = nullptr;
-    if (tel.law == "hold") {
-        if (!hold_nominal.has_value()) {
-            tel.fold_sink = "declined: Hold has no latched nominal";
+    switch (source) {
+        case ForceSourceKind::ChunkFollower:
+            if (!follower.active() || follower.holdPaused()) {
+                tel.fold_sink = "declined: chunk follower paused";
+                return;
+            }
+            sink = "chunk_follower";
+            break;
+        case ForceSourceKind::HoldPose:
+            if (!hold_pose.has_value()) {
+                tel.fold_sink = "declined: Hold has no source pose";
+                return;
+            }
+            sink = "hold";
+            break;
+        case ForceSourceKind::AbsoluteTarget:
+            tel.fold_sink = "declined: absolute target (the source re-issues it; fenced)";
             return;
-        }
-        sink = "hold_nominal";
-    } else if (follower_drove) {
-        if (!follower.active() || follower.holdPaused()) {
-            tel.fold_sink = "declined: chunk follower paused";
+        case ForceSourceKind::None:
+            tel.fold_sink = "declined: no source this tick";
             return;
-        }
-        sink = "chunk_follower";
-    } else {
-        tel.fold_sink = "declined: absolute TcpPoseTarget (the source re-issues the target)";
-        return;
     }
     tel.fold_sink = sink;
 
@@ -11391,47 +11273,45 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm,
         : Eigen::Quaterniond::Identity();
 
     math::Vector3 accepted = dp;
-    if (tel.law == "hold") {
-        // The latched nominal becomes the composed pose: same pivot (the TCP),
-        // same displacement, so next tick's nominal IS this tick's command.
+    if (source == ForceSourceKind::HoldPose) {
+        // The hold source pose becomes the composed pose: same pivot (the TCP), same
+        // displacement, so next tick's nominal IS this tick's command.
         //
         // THE WALL ON THE SINK (2026-09-07). The chunk-follower sink is walled by
         // roi_fold, which clamps the emitted plan to the box every tick and folds the
         // clamp back into the plan. This sink had no wall: the Tier-2 clamp bounds
-        // the COMMAND built from the nominal, and the pose-track wall brakes the SMD
-        // state at the face, but the nominal itself kept walking out of the box with
-        // the hand. MEASURED servo_log_20260907_021834.csv, right arm, hand-guide:
-        // at y_min (610-616 s) the nominal was pushed ~130 mm past the face while the
-        // command sat on it; the operator then pushed the other way at 17-35 N for
-        // 2.2 s (~108 mm of hand travel) and the command did not move, gave up,
-        // pushed again and got it moving only after 25 mm more -- the whole
-        // excursion had to be unwound first. At x_min (596-599 s) the same: 18 mm
-        // out, 1.1 s / 19 mm of dead zone on the way back. So: clamp the nominal to
-        // the box and the floor here, and let the part the box refuses vanish
-        // instead of being banked. A reversal then moves the command on its first
-        // tick, which is what a wall is.
-        const Pose6D composed = overlay.compose(*hold_nominal);
+        // the COMMAND built from the nominal, but the nominal itself kept walking out
+        // of the box with the hand. MEASURED servo_log_20260907_021834.csv, right arm,
+        // hand-guide: at y_min (610-616 s) the nominal was pushed ~130 mm past the
+        // face while the command sat on it; the operator then pushed the other way at
+        // 17-35 N for 2.2 s (~108 mm of hand travel) and the command did not move,
+        // gave up, pushed again and got it moving only after 25 mm more -- the whole
+        // excursion had to be unwound first. So: clamp the pose to the box and the
+        // floor here, and let the part the box refuses vanish instead of being banked.
+        // A reversal then moves the command on its first tick, which is what a wall is.
+        const Pose6D composed = overlay.compose(*hold_pose);
         const Pose6D walled = clampPoseToRoi(clampPoseToFloor(composed));
         const math::Vector3 refused(composed.x - walled.x, composed.y - walled.y,
                                     composed.z - walled.z);
-        *hold_nominal = walled;
+        *hold_pose = walled;
         accepted -= refused;
         const double refused_m = refused.norm();
+        double& total = left ? left_hold_source_wall_refused_total_m_
+                             : right_hold_source_wall_refused_total_m_;
         if (refused_m > 1e-9) {
-            double& total = left ? left_hold_fold_refused_total_m_ : right_hold_fold_refused_total_m_;
-            uint64_t& last_log = left ? left_hold_fold_refused_log_ns_ : right_hold_fold_refused_log_ns_;
+            uint64_t& last_log = left ? left_hold_source_wall_refused_log_ns_
+                                      : right_hold_source_wall_refused_log_ns_;
             const bool first = total <= 0.0;
             total += refused_m;
             const uint64_t now_ns = nowSteadyNs();
             if (first || now_ns - last_log > 1'000'000'000ULL) {
                 last_log = now_ns;
                 std::cerr << "[INFO] force fold " << toString(arm)
-                          << ": Hold nominal walled at the ROI/floor, refused "
+                          << ": Hold source pose walled at the ROI/floor, refused "
                           << refused_m * 1000.0 << " mm this tick (" << total * 1000.0
                           << " mm so far); the hand's travel past the face is dropped, not banked\n";
             }
         } else {
-            double& total = left ? left_hold_fold_refused_total_m_ : right_hold_fold_refused_total_m_;
             total = 0.0;
         }
     } else {
@@ -11449,8 +11329,7 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm,
         // 10+ s at a time; and when a geometry hold fired on the same tick the
         // deviation was booked twice (the strip at the booking saw a deviation
         // that had already been dropped here).
-        (void)output_smd;
-        PendingForceFold& pf = pending_force_fold_[left ? 0 : 1];
+        PendingForceFold& pf = pending_force_fold_[i];
         if (pf.valid) {
             // Not consumed last tick (no booking pass ran): accumulate, never lose.
             pf.dp += dp;
@@ -11475,6 +11354,7 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm,
 void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state) {
     // Clear path state outside the state lock (mirroring clearFaultLatch's ordering).
     clearLatchedCartesianTarget(arm_id);
+    tool_com_history_[arm_id == ArmId::Left ? 0 : 1] = ToolComHistory{};
 
     // The servo stream was globally suppressed while teaching. A policy/follower
     // residual assembled before or during that interval must not execute from the

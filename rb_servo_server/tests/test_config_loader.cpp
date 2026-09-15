@@ -81,6 +81,35 @@ std::filesystem::path servoRoot() {
     return std::filesystem::path(__FILE__).parent_path().parent_path();
 }
 
+// THE force_control BLOCK AS BOTH REPO YAMLs SPELL IT (2026-09-15). The splices below
+// replace these exact lines, so a re-wording of the tracked file fails here first,
+// with a name, instead of silently turning a refusal test into a no-op.
+constexpr const char* kYamlForceControlHead = "force_control:\n  enable: true\n";
+constexpr const char* kYamlLawTranslation  = "    translation: {m: 20.0}\n";
+constexpr const char* kYamlLawRotation     = "    rotation: rigid\n";
+constexpr const char* kYamlGatePeak        = "    peak_force_n:   12.0";
+constexpr const char* kYamlGateRest        = "    rest_force_n:   10.0";
+constexpr const char* kYamlGatePeakVel     = "    peak_vel_mm_s:   4.0";
+// What the tracked pair derives: b = (12 - 10) N / 4 mm/s = 500 N*s/m, tau = 20/500.
+constexpr double kShippedLawM = 20.0;
+constexpr double kShippedLawB = 500.0;
+
+// A spliced repo config that has to LOAD (not merely be refused) is written NEXT TO the
+// tracked file: the URDF and mesh paths in it are relative to the config's directory.
+rb_servo::DualArmConfig loadSiblingOf(const std::filesystem::path& tracked,
+                                      const std::string& name, const std::string& body) {
+    const std::filesystem::path sibling = tracked.parent_path() / ("stack_real_" + name + "_test.yaml");
+    { std::ofstream out(sibling); out << body; }
+    try {
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(sibling.string());
+        std::filesystem::remove(sibling);
+        return cfg;
+    } catch (...) {
+        std::filesystem::remove(sibling);
+        throw;
+    }
+}
+
 std::string rb3UrdfPath() {
     return (servoRoot() / "descriptions" / "urdf" / "rb3_730e.urdf").string();
 }
@@ -1699,107 +1728,94 @@ bool testControllerSimProgressSourceIsSimOnly() {
     RB_CHECK(sim.force_control.oscillation_guard_enable ==
              real.force_control.oscillation_guard_enable);
     RB_CHECK(near(sim.force_control.max_deviation_m, real.force_control.max_deviation_m));
-    RB_CHECK(near(sim.force_control.hold.translation[0].k,
-                  real.force_control.hold.translation[0].k));
+    // 2026-09-15: one law - m typed, the gate triple declared, b DERIVED from it.
+    RB_CHECK(near(sim.force_control.law.m, real.force_control.law.m));
+    RB_CHECK(near(sim.force_control.gate_peak_force_n, real.force_control.gate_peak_force_n));
+    RB_CHECK(near(sim.force_control.gate_rest_force_n, real.force_control.gate_rest_force_n));
+    RB_CHECK(near(sim.force_control.gate_peak_vel_mm_s, real.force_control.gate_peak_vel_mm_s));
+    RB_CHECK(near(sim.force_control.law.b, real.force_control.law.b));
+    RB_CHECK(near(sim.force_control.law.b, kShippedLawB));
     return true;
 }
 
-// k = 0 + gate is CM's live configuration and is legal ONLY with the fold: without
-// it nothing bounds the deviation (9.5 m in 300 s). A spring-less compliant Hold
-// likewise. The tracked real stack ships exactly that pairing.
-bool testSpringlessLawRequiresTheFold() {
-    const std::filesystem::path stack_real_path =
-        servoRoot() / "config" / "stack_real.yaml";
-    {
+// ONE LAW (2026-09-15): both repo YAMLs ship the same source-agnostic vector law - m
+// typed, rotation the literal `rigid`, b DERIVED from the gate pair - and load as such.
+// The hold/stream rows, the hand-guide latch pair and the fold switch are gone; their
+// refusals are in testDeletedForceControlKeysAreRefusedWithTheDate below.
+bool testOneLawShipsRigidRotationAndTheDerivedDamping() {
+    for (const char* file : {"stack_real.yaml", "stack_sim.yaml"}) {
         const rb_servo::DualArmConfig cfg =
-            rb_servo::loadConfigFromYaml(stack_real_path.string());
+            rb_servo::loadConfigFromYaml((servoRoot() / "config" / file).string());
         RB_CHECK(cfg.force_control.enable);
-        RB_CHECK(cfg.force_control.fold_deviation);
         RB_CHECK(cfg.force_control.gate_enable);
-        RB_CHECK(cfg.force_control.hold_compliance);
-        for (int i = 0; i < 3; ++i) {
-            // 2026-09-10 (evening): both laws are pure dampers again. The requirement is
-            // YIELD-AND-STAY (a force drags the arm, it stays, the policy re-plans from
-            // there), and a spring returns the arm instead - measured 37 mm out and
-            // 238 mm/s back on the right arm. k = 0 + the fold makes plan == where the
-            // arm is, so no offset accumulates. The force is then a 2..10 N band; a
-            // designed force needs ref_force. What replaced the spring's job on the
-            // floor: the complete into-contact hold-back and the preview plan leash.
-            RB_CHECK(cfg.force_control.stream.translation[i].k == 0.0);
-            RB_CHECK(cfg.force_control.stream.rotation[i].k == 0.0);
-            RB_CHECK(cfg.force_control.hold.translation[i].k == 0.0);
-            RB_CHECK(cfg.force_control.hold.rotation[i].k == 0.0);
-            // Rotation is RIGID on both laws (2026-09-03): the wrist lever turns any
-            // parasitic force into a torque, and with k_r = 0 that torque never stops.
-            RB_CHECK(cfg.force_control.stream.rotation[i].mode == rb_servo::ForceAxisMode::Rigid);
-            RB_CHECK(cfg.force_control.hold.rotation[i].mode == rb_servo::ForceAxisMode::Rigid);
-        }
-        // The hand-guide latch ships ON with a real hysteresis band.
-        RB_CHECK(cfg.force_control.hold_engage_force_n == 5.0);
-        RB_CHECK(cfg.force_control.hold_release_force_n == 2.0);
+        RB_CHECK(near(cfg.force_control.law.m, kShippedLawM));
+        RB_CHECK(near(cfg.force_control.law.b, kShippedLawB));
+        RB_CHECK(near(cfg.force_control.gate_peak_force_n, 12.0));
+        RB_CHECK(near(cfg.force_control.gate_rest_force_n, 10.0));
+        RB_CHECK(near(cfg.force_control.gate_peak_vel_mm_s, 4.0));
+        // m >= 2*b*dt is the semi-implicit Euler floor the loader enforces (2 kg here).
+        RB_CHECK(cfg.force_control.law.m >= 2.0 * cfg.force_control.law.b * 0.002);
         RB_CHECK(cfg.force_torque.right.deadzone_force_n[0] == 3.0);
     }
-    // A release at/above the engage level is a relay, not a hysteresis.
+    // The anchors this file splices on are really in the tracked text.
+    const std::string real = readFile(servoRoot() / "config" / "stack_real.yaml");
+    for (const char* anchor : {kYamlForceControlHead, kYamlLawTranslation, kYamlLawRotation,
+                               kYamlGatePeak, kYamlGateRest, kYamlGatePeakVel}) {
+        RB_CHECK(real.find(anchor) != std::string::npos);
+    }
+    return true;
+}
+
+// DELETED KEYS ARE REFUSED WITH THE DATE (2026-09-15). Every key of the hold/stream
+// split fails the load with a message that says when it died, so a config written
+// for the old controller cannot boot on a guess.
+bool testDeletedForceControlKeysAreRefusedWithTheDate() {
+    const std::filesystem::path stack_real_path = servoRoot() / "config" / "stack_real.yaml";
+    const std::string real = readFile(stack_real_path);
+    const char* const kDeadBlocks[] = {
+        "  stream:\n    translation:\n      - {m: 20.0, b: 500.0, k: 0.0}\n",
+        "  hold:\n    translation:\n      - {m: 20.0, b: 500.0, k: 0.0}\n",
+        "  hold_compliance: true\n",
+        "  hold_engage_force_n: 5.0\n",
+        "  hold_release_force_n: 2.0\n",
+        "  hold_relatch_max_force_n: 5.0\n",
+        "  fold_deviation: true\n",
+    };
+    for (const char* dead : kDeadBlocks) {
+        std::string body = real;
+        RB_CHECK(replaceOnce(&body, kYamlForceControlHead,
+                             std::string(kYamlForceControlHead) + dead));
+        const std::string path = writeTempConfig("fc-dead-key", body);
+        const bool rejected = loadRejectsContaining(path, "was DELETED on 2026-09-15");
+        ::unlink(path.c_str());
+        if (!rejected) std::cerr << "not refused with the date: " << dead;
+        RB_CHECK(rejected);
+    }
+    // Rotation is the literal `rigid`; any other spelling is a design change, not a knob.
     {
-        std::string body = readFile(stack_real_path);
-        RB_CHECK(replaceOnce(&body, "  hold_release_force_n: 2.0", "  hold_release_force_n: 6.0"));
-        const std::string path = writeTempConfig("latch-relay", body);
-        const bool rejected = loadRejectsContaining(
-            path, "hold_release_force_n must be below hold_engage_force_n");
+        std::string body = real;
+        RB_CHECK(replaceOnce(&body, kYamlLawRotation, "    rotation: compliant\n"));
+        const std::string path = writeTempConfig("fc-rotation-compliant", body);
+        const bool rejected = loadRejectsContaining(path, "must be the literal `rigid`");
         ::unlink(path.c_str());
         RB_CHECK(rejected);
     }
-    // Fold off + spring-less Hold: the hand-guide has nothing to move its nominal.
+    // m below the semi-implicit Euler floor (2*b*dt = 2 kg at b = 500) is refused, not
+    // raised silently: a number the operator predicts the robot from may not move.
     {
-        std::string body = readFile(stack_real_path);
-        RB_CHECK(replaceOnce(&body, "  fold_deviation: true", "  fold_deviation: false"));
-        const std::string path = writeTempConfig("fold-off-hold", body);
-        const bool rejected = loadRejectsContaining(
-            path, "force_control.hold_compliance is on but every force_control.hold");
-        ::unlink(path.c_str());
-        RB_CHECK(rejected);
-    }
-    // Fold off, Hold not compliant, and the stream spring removed: the gate with k = 0
-    // bounds force, not deviation. (With the tracked k = 400 that pairing is legal -
-    // CM 0028's spring under the gate - so the spring has to go for this refusal.)
-    {
-        std::string body = readFile(stack_real_path);
-        RB_CHECK(replaceOnce(&body, "  fold_deviation: true", "  fold_deviation: false"));
-        RB_CHECK(replaceOnce(&body, "  hold_compliance: true", "  hold_compliance: false"));
-        // Strip the spring from the three stream translation rows whatever m/b and
-        // comment they carry (the operator tunes m in the tracked file; the test
-        // must not pin that text). Since 2026-09-07 the tracked rows are already
-        // spring-less (k = 0.0); a tracked spring is stripped, a tracked k = 0 is
-        // verified, so the fixture holds for either state of the file.
-        {
-            // Locate the stream block's translation rows without pinning any of the
-            // text an operator tunes (m, b, a declared `mode:`, or the comments between
-            // `stream:` and `translation:`), then strip any spring inside them.
-            const std::size_t block = body.find("  stream:\n");
-            RB_CHECK(block != std::string::npos);
-            const std::size_t rows = body.find("    translation:\n", block);
-            RB_CHECK(rows != std::string::npos);
-            const std::size_t rows_end = body.find("    rotation:", rows);
-            RB_CHECK(rows_end != std::string::npos);
-            std::size_t at = rows;
-            while (true) {
-                const std::size_t spring = body.find("k: 400.0", at);
-                if (spring == std::string::npos || spring > rows_end) break;
-                body.replace(spring, std::string("k: 400.0").size(), "k: 0.0");
-                at = spring + 1;
-            }
-        }
-        const std::string path = writeTempConfig("fold-off-gate", body);
-        const bool rejected = loadRejectsContaining(
-            path, "enable force_control.fold_deviation");
+        std::string body = real;
+        RB_CHECK(replaceOnce(&body, kYamlLawTranslation, "    translation: {m: 1.0}\n"));
+        const std::string path = writeTempConfig("fc-m-below-floor", body);
+        const bool rejected = loadRejectsContaining(path, "must be >= 2*b*dt");
         ::unlink(path.c_str());
         RB_CHECK(rejected);
     }
     return true;
 }
 
-// THE FORCE GATE'S NEW CONTRACT (2026-09-11). Three refusals and one derivation, all
-// of them things that silently break the crossing if they are not enforced.
+// THE FORCE GATE'S CONTRACT (2026-09-11, re-cut 2026-09-15 for the one law). Three
+// refusals and one derivation, all of them things that silently break the crossing
+// if they are not enforced.
 bool testForceGateConvergencePairContract() {
     const std::filesystem::path stack_real_path = servoRoot() / "config" / "stack_real.yaml";
     const std::string real = readFile(stack_real_path);
@@ -1808,8 +1824,7 @@ bool testForceGateConvergencePairContract() {
     for (const char* dead : {"max_force_n: 10.0", "max_torque_nm: 1.4",
                              "stream_arm_force_n: 5.0", "stream_judge_lpf_hz: 2.0"}) {
         std::string body = real;
-        RB_CHECK(replaceOnce(&body, "    peak_force_n:   12.0",
-                             std::string("    ") + dead));
+        RB_CHECK(replaceOnce(&body, kYamlGatePeak, std::string("    ") + dead));
         const std::string path = writeTempConfig("gate-dead-key", body);
         const bool rejected = loadRejectsContaining(path, "was DELETED on 2026-09-11");
         ::unlink(path.c_str());
@@ -1819,71 +1834,39 @@ bool testForceGateConvergencePairContract() {
     //    declared force and the equilibrium is gone.
     {
         std::string body = real;
-        RB_CHECK(replaceOnce(&body, "    rest_force_n:   10.0", "    rest_force_n:   12.0"));
+        RB_CHECK(replaceOnce(&body, kYamlGateRest, "    rest_force_n:   12.0"));
         const std::string path = writeTempConfig("gate-rest-equals-peak", body);
         const bool rejected = loadRejectsContaining(path, "rest_force_n must be < peak_force_n");
         ::unlink(path.c_str());
         RB_CHECK(rejected);
     }
-    // 3. ref_force MAY NOT BE TYPED on a press row - the law's rest point and the
-    //    gate's crossing are one number.
+    // 3. b MAY NOT BE TYPED (2026-09-15): the law's damping and the gate's crossing
+    //    are one number, derived from the pair.
     {
         std::string body = real;
-        RB_CHECK(replaceOnce(&body, "k: 0.0, mode: force}", "k: 0.0, mode: force, ref_force: 8.0}"));
-        const std::string path = writeTempConfig("gate-typed-ref", body);
-        const bool rejected = loadRejectsContaining(path, "ref_force may not be typed");
+        RB_CHECK(replaceOnce(&body, kYamlLawTranslation, "    translation: {m: 20.0, b: 200.0}\n"));
+        const std::string path = writeTempConfig("gate-typed-b", body);
+        const bool rejected = loadRejectsContaining(path, "may not be typed (2026-09-15)");
         ::unlink(path.c_str());
         RB_CHECK(rejected);
     }
-    // 4. THE TWO LAWS SHIP THE SAME TRANSLATION ROWS, so a hand press is a valid test
-    //    of the streamed law (operator, 2026-09-11).
-    {
-        std::string body = real;
-        const std::size_t hold = body.find("  hold:\n");
-        RB_CHECK(hold != std::string::npos);
-        // Through `m`, not `b`: the raise-only derivation would pull a smaller b back
-        // up to the pair's value and the two laws would agree again - which is the
-        // derivation doing its job, and is why this check is about the rest of the row.
-        const std::size_t row = body.find("- {m: 20.0, b: 500.0, k: 0.0}", hold);
-        RB_CHECK(row != std::string::npos);
-        body.replace(row, std::string("- {m: 20.0, b: 500.0, k: 0.0}").size(),
-                     "- {m: 12.0, b: 500.0, k: 0.0}");
-        const std::string path = writeTempConfig("gate-laws-differ", body);
-        const bool rejected = loadRejectsContaining(path, "must be identical");
-        ::unlink(path.c_str());
-        RB_CHECK(rejected);
-    }
-    // 5. THE DERIVATION: b = (peak - rest)/peak_vel, raise-only, and the shipped rows
-    //    already sit at it - so the tracked file installs exactly 500 N*s/m and the
-    //    press row carries rest_force_n as its ref_force.
+    // 4. THE DERIVATION: b = (peak - rest) / peak_vel. The tracked file installs exactly
+    //    500 N*s/m, and halving peak_vel_mm_s doubles it - through the loader, not a
+    //    copy of the formula (2026-09-15: b is derived-only, there is no raise-only path).
     {
         const rb_servo::DualArmConfig cfg =
             rb_servo::loadConfigFromYaml(stack_real_path.string());
         const rb_servo::ForceControlConfig& fc = cfg.force_control;
         const double b_expect = (fc.gate_peak_force_n - fc.gate_rest_force_n) /
                                 (fc.gate_peak_vel_mm_s * 1e-3);
-        int press = -1;
-        for (int i = 0; i < 3; ++i) {
-            RB_CHECK(std::abs(fc.stream.translation[i].b - b_expect) < 1e-9);
-            RB_CHECK(std::abs(fc.hold.translation[i].b - b_expect) < 1e-9);
-            if (fc.stream.translation[i].mode == rb_servo::ForceAxisMode::Force) press = i;
-        }
-        RB_CHECK(press == 2);                      // TOOL Z, by operator decision
-        RB_CHECK(fc.stream.translation[press].ref_force == fc.gate_rest_force_n);
-        RB_CHECK(fc.hold.translation[press].ref_force == fc.gate_rest_force_n);
-        // A raise is a RAISE: a row declaring less damping than the pair needs gets the
-        // pair's value, never the other way round.
+        RB_CHECK(std::abs(fc.law.b - b_expect) < 1e-9);
+        RB_CHECK(std::abs(fc.law.b - kShippedLawB) < 1e-9);
         std::string body = real;
-        RB_CHECK(replaceOnce(&body, "      - {m: 20.0, b: 500.0, k: 0.0}     # tool x",
-                             "      - {m: 20.0, b: 200.0, k: 0.0}     # tool x"));
-        // NEXT TO the tracked file, not in /tmp: this one has to LOAD, and the URDF and
-        // mesh paths in it are relative to the config's own directory.
-        const std::filesystem::path sibling =
-            stack_real_path.parent_path() / ("stack_real_raise_only_test.yaml");
-        { std::ofstream out(sibling); out << body; }
-        const rb_servo::DualArmConfig raised = rb_servo::loadConfigFromYaml(sibling.string());
-        std::filesystem::remove(sibling);
-        RB_CHECK(std::abs(raised.force_control.stream.translation[0].b - b_expect) < 1e-9);
+        RB_CHECK(replaceOnce(&body, kYamlGatePeakVel, "    peak_vel_mm_s:   2.0"));
+        const rb_servo::DualArmConfig halved = loadSiblingOf(stack_real_path, "peak_vel_2", body);
+        RB_CHECK(std::abs(halved.force_control.gate_peak_vel_mm_s - 2.0) < 1e-12);
+        RB_CHECK(std::abs(halved.force_control.law.b - 1000.0) < 1e-9);
+        RB_CHECK(std::abs(halved.force_control.law.m - kShippedLawM) < 1e-12);
     }
     return true;
 }
@@ -1891,7 +1874,8 @@ bool testForceGateConvergencePairContract() {
 int main() {
     if (!testRepositoryConfigsParse()) return 1;
     if (!testForceGateConvergencePairContract()) return 1;
-    if (!testSpringlessLawRequiresTheFold()) return 1;
+    if (!testOneLawShipsRigidRotationAndTheDerivedDamping()) return 1;
+    if (!testDeletedForceControlKeysAreRefusedWithTheDate()) return 1;
     if (!testControllerSimProgressSourceIsSimOnly()) return 1;
     if (!testInitMotionBrakeConfigValidation()) return 1;
     if (!testAutoTareAfterInitMotionConfigValidation()) return 1;

@@ -226,27 +226,27 @@ DualArmConfig fixtureConfig(ArmId selected, bool rotation) {
     tare.settle_sec = 0.5;
     tare.max_sent_speed_deg_s = 0.1;
     tare.invalidate_on_request = true;
+    // ONE LAW FOR EVERY SOURCE (2026-09-15): m*v' + b*v = (|F| - rest)+ * F_hat, k = 0,
+    // rotation rigid. The loader derives b = (peak - rest)/peak_vel; this fixture builds
+    // the struct directly, so b is written by hand to the SAME number the pair implies
+    // (2 N / 20 mm/s = 100 N*s/m), which keeps tau = m/b = 120 ms - the time constant
+    // the pre-2026-09-15 stream fixture ran at. Every force below rest_force_n is now an
+    // equilibrium, so the fixtures push at rest + x and expect (x/b)*(T - tau).
     auto& fc = cfg.force_control;
     fc.enable = true;
     fc.gate_enable = true;
     fc.gate_peak_force_n = 12.0;
     fc.gate_rest_force_n = 10.0;
-    fc.gate_peak_vel_mm_s = 4.0;
+    fc.gate_peak_vel_mm_s = 20.0;
+    fc.law.m = 12.0;
+    fc.law.b = (fc.gate_peak_force_n - fc.gate_rest_force_n) / (fc.gate_peak_vel_mm_s * 1e-3);
     fc.max_deviation_m = 0.04;
     fc.max_deviation_rad = 0.03;
     fc.coverage_recover_sec = 0.5;
-    fc.hold_compliance = true;
-    fc.fold_deviation = true;
-    fc.hold_engage_force_n = 5.0;
-    fc.hold_release_force_n = 2.0;
-    for (int i = 0; i < 3; ++i) {
-        fc.stream.translation[i] = {ForceAxisMode::Compliance, 12.0, 1000.0, 400.0, 0.0};
-        fc.hold.translation[i] = {ForceAxisMode::Compliance, 12.0, 1000.0, 0.0, 0.0};
-        fc.stream.rotation[i] = rotation
-            ? ForceAxisConfig{ForceAxisMode::Compliance, 0.3, 30.0, 8.0, 0.0}
-            : ForceAxisConfig{ForceAxisMode::Rigid, 0.0, 0.0, 0.0, 0.0};
-        fc.hold.rotation[i] = {ForceAxisMode::Rigid, 0.0, 0.0, 0.0, 0.0};
-    }
+    // `rotation` used to select a compliant rotation law; rotation is RIGID since
+    // 2026-09-15 and the flag now only decides whether a torque is applied, so the
+    // rigid-rotation invariant is exercised under a standing torque.
+    (void)rotation;
     TcpPoseTargetProfileConfig plain;
     plain.name = "plain_force_fixture";
     plain.pose_track_smd.enable = false;
@@ -272,9 +272,10 @@ double norm3(const std::array<double, 3>& v) {
     return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 }
 
-// Smaller lifecycle fixtures reuse the same public servo entry points. The
-// force law's damping is shortened only in these synthetic invariance tests,
-// so a standing offset is reached without repeating a long contact warmup.
+// Smaller lifecycle fixtures reuse the same public servo entry points. With the
+// one-sided law (2026-09-15) a standing offset is the integral of the yield
+// (|F| - rest)/b over the warm-up, so each fixture picks its force from the offset
+// it needs: rest + x N at b = 100 N*s/m walks at x * 10 mm/s.
 struct Fixture {
     ManualClock clock;
     DualArmConfig cfg;
@@ -292,7 +293,6 @@ struct Fixture {
                      JointArray initial_q = {10.0, -20.0, 35.0, 5.0, 25.0, -15.0})
         : initial(initial_q) {
         cfg = fixtureConfig(ArmId::Right, false);
-        for (auto& axis : cfg.force_control.stream.translation) axis.b = 100.0;
         configure(cfg);
         kin = std::make_shared<PinocchioKinematics>(cfg.kinematics);
         auto l = std::make_unique<MemoryPlant>(ArmId::Left, initial);
@@ -340,14 +340,27 @@ struct Fixture {
     Pose6D rightSent() const {
         return kin->computeTcpStand(ArmId::Right, latest.right_sent_q_deg, cfg.right_mount);
     }
+    static constexpr int kWarmTicks = 1800;
     void warm(const DualArmCommand& stream, double right_force, double left_force = 0.0) {
         Wrench6D wr, wl;
         wr.fz = right_force;
         wl.fz = left_force;
         right->setWrench(wr);
         left->setWrench(wl);
-        for (int i = 0; i < 1800; ++i) tick(stream);
+        for (int i = 0; i < kWarmTicks; ++i) tick(stream);
         require(latest.right_force_control.covered, "additional fixture never covered the right arm");
+    }
+    // The law's steady yield speed for |F| = force [m/s], and the displacement it
+    // integrates to over `ticks` from rest (first-order lag tau = m/b subtracted).
+    double yieldSpeed(double force) const {
+        const auto& fc = cfg.force_control;
+        return std::max(0.0, force - fc.gate_rest_force_n) / fc.law.b;
+    }
+    double expectedYield(double force, int ticks) const {
+        const auto& fc = cfg.force_control;
+        const double t = ticks / static_cast<double>(cfg.servo.rate_hz);
+        const double tau = fc.law.m / fc.law.b;
+        return yieldSpeed(force) * (t - tau * (1.0 - std::exp(-t / tau)));
     }
 };
 
@@ -422,9 +435,17 @@ bool testInitWithoutAutoTareResetsOnlySelectedArmAndDeduplicates() {
         cfg.force_torque.left = cfg.force_torque.right;
     });
     auto stream = f.command(ControlMode::TcpPoseTarget, ControlMode::TcpPoseTarget);
-    f.warm(stream, 0.896, 0.448);
+    // rest + 0.062 / + 0.031 N: 0.62 / 0.31 mm/s over the 3.6 s warm -> ~2.2 / ~1.1 mm.
+    f.warm(stream, 10.062, 10.031);
     require(f.latest.left_force_control.deviation_norm_m > 0.0005,
             "peer arm did not establish a standing force deviation");
+    // THE ONE LAW, QUANTITATIVELY (2026-09-15): d = (|F| - rest)/b * (T - tau) on both arms.
+    for (const auto* arm : {&f.latest.left_force_control, &f.latest.right_force_control}) {
+        const double expect = f.expectedYield(arm == &f.latest.left_force_control ? 10.031 : 10.062,
+                                              Fixture::kWarmTicks);
+        require(std::abs(arm->deviation_norm_m - expect) < 0.01 * expect,
+                "the standing deviation is not the one-sided law's integrated yield");
+    }
     const auto right_reset_before = f.latest.right_force_control.reference_reset_count;
     const auto left_reset_before = f.latest.left_force_control.reference_reset_count;
     const double peer_before = f.latest.left_force_control.deviation_norm_m;
@@ -536,10 +557,12 @@ bool testCoverageLossPreservesFrozenDeviationWithoutPendingChunkDrift() {
         cfg.force_torque.auto_tare_after_init_motion.enable = false;
     });
     auto stream = f.command(ControlMode::Hold, ControlMode::TcpPoseTarget);
-    f.warm(stream, 0.896);
+    f.warm(stream, 10.062);   // rest + 0.062 N -> ~2.2 mm standing on the absolute source
     const Pose6D held = f.rightSent();
     const double frozen = f.latest.right_force_control.deviation_norm_m;
     require(frozen > 0.001, "generic coverage fixture has no nonzero deviation");
+    require(std::abs(frozen - f.expectedYield(10.062, Fixture::kWarmTicks)) < 0.01 * frozen,
+            "the standing deviation is not the one-sided law's integrated yield");
     const auto reset_count = f.latest.right_force_control.reference_reset_count;
     auto waiting = f.command(ControlMode::Hold, ControlMode::TcpPoseTarget, "flow_infer_smooth");
     waiting.right.tcp_target_stand = held;
@@ -569,35 +592,66 @@ bool testCoverageLossPreservesFrozenDeviationWithoutPendingChunkDrift() {
     return true;
 }
 
+// A COVERED SUB-MICRON DEVIATION STILL COMPOSES, AND THE FOLD BOOKS IT (restated
+// 2026-09-15). Before: the deviation stood in the overlay (fold off, Hold not engaged)
+// and the strip/compose pair had to cancel exactly. Now the fold is structural: the
+// absolute-target source declines it (the deviation stands, fenced), and the first
+// compliant Hold tick composes that sub-micron deviation onto the latched command and
+// hands it to the Hold source pose in the same tick - the sent pose may not step by it
+// in either direction, and the overlay's copy must be gone afterwards.
 bool testCoveredSubmicronDeviationStillComposes() {
     Fixture f([](DualArmConfig& cfg) {
         cfg.safety.init_motion_planner.enable = false;
         cfg.safety.self_collision.enable = false;
         cfg.force_torque.auto_tare_after_init_motion.enable = false;
-        cfg.force_control.fold_deviation = false;
-        cfg.force_control.hold = cfg.force_control.stream;
         cfg.kinematics.ik.position_tolerance_m = 1e-10;
         cfg.kinematics.ik.orientation_tolerance_rad = 1e-10;
     });
     auto stream = f.command(ControlMode::Hold, ControlMode::TcpPoseTarget);
-    f.warm(stream, 0.0002);  // F/k = 0.5 micrometers: below quiescent()'s reporting threshold.
+    // rest + 14.4 uN: 0.144 um/s over the warm -> ~0.5 um, below quiescent()'s threshold.
+    const double force = 10.0 + 1.44e-5;
+    f.warm(stream, force);
     const Pose6D held = f.rightSent();
     const double tiny = f.latest.right_force_control.deviation_norm_m;
     require(tiny > 2e-7 && tiny < 9e-7, "tiny-deviation fixture missed the submicron band");
+    require(f.latest.right_force_control.source == "absolute" &&
+            f.latest.right_force_control.fold_sink.rfind("declined: absolute target", 0) == 0 &&
+            !f.latest.right_force_control.folded,
+            "absolute target must decline the fold and keep its deviation in the overlay");
     auto hold = f.command(ControlMode::Hold, ControlMode::Hold);
     f.right->setWrench({});
+    // The momentum is KEPT across the fold (dropDeviation), so after the wrench is
+    // removed the law coasts v*tau further; the bound is that coast plus IK precision.
+    const double coast = f.yieldSpeed(force) * f.cfg.force_control.law.m / f.cfg.force_control.law.b;
     double max_drift = 0.0;
+    double booked = 0.0;
     for (int i = 0; i < 80; ++i) {
         const auto& s = f.tick(hold);
         require(s.right_force_control.covered && s.right_force_control.reference_strip_enabled,
                 "submicron test did not exercise covered subtraction");
-        require(!s.right_force_control.hold_engaged, "quiet covered Hold must freeze the deviation dynamics");
+        require(s.right_force_control.source == "hold" && s.right_force_control.fold_sink == "hold",
+                "a covered Hold must be the hold source with the hold fold sink");
+        if (i == 0) {
+            require(s.right_force_control.folded, "the first compliant Hold tick did not book the standing deviation");
+            booked = norm3(s.right_force_control.fold_m);
+        } else {
+            require(norm3(s.right_force_control.reference_deviation_m) < coast + 1e-12,
+                    "the fold left a copy of the deviation standing in the overlay");
+        }
         max_drift = std::max(max_drift, math::positionDistance(f.rightSent(), held));
     }
-    std::cout << "tiny covered deviation_um=" << tiny * 1e6
-              << " frozen Hold drift_um=" << max_drift * 1e6 << '\n';
-    require(max_drift < 2e-8,
-            "covered submicron strip was not exactly canceled by force compose");
+    std::cout << "tiny covered deviation_um=" << tiny * 1e6 << " booked_um=" << booked * 1e6
+              << " coast_um=" << coast * 1e6 << " Hold drift_um=" << max_drift * 1e6 << '\n';
+    // The first Hold tick steps the law once more (momentum kept, wrench now zero) before
+    // it composes and folds, so the booked vector is the standing deviation plus at most
+    // one tick of coast.
+    const double one_tick = f.yieldSpeed(force) / f.cfg.servo.rate_hz;
+    require(booked >= tiny - 1e-12 && booked <= tiny + one_tick + 1e-12,
+            "the Hold fold booked something other than the standing deviation");
+    require(f.latest.right_force_control.absorbed_norm_m >= tiny - 1e-12,
+            "the absorbed total does not carry the booked deviation");
+    require(max_drift < coast + 2e-8,
+            "covered submicron strip was not exactly canceled by force compose + fold");
     return true;
 }
 
@@ -631,17 +685,28 @@ bool testHoldFoldSinkIsWalledAtTheRoi() {
     for (int i = 0; i < 50; ++i) f.tick(hold);
     const auto pos_of = [](const Pose6D& p) { return std::array<double, 3>{p.x, p.y, p.z}; };
     const Pose6D start = f.rightSent();
-    // 8 N through the Hold law's pure damper (b = 1000 N s/m) walks the nominal at 8 mm/s.
+    // rest + 0.8 N through the one law (b = 100 N s/m) walks the hold source pose at 8 mm/s.
     Wrench6D push;
-    push.fz = 8.0;
+    push.fz = 10.8;
     f.right->setWrench(push);
+    // THE HOLD IS A ZERO-DEMAND SOURCE (2026-09-15): its own yield is never read back as
+    // demand, so the gate stays at exactly 1 for the whole push. The old stage fed the
+    // Hold's yield to the gate and closed it to 0.095 mid-push (servo_log_20260915_112545).
+    const auto require_zero_demand_source = [&](const char* phase) {
+        const auto& fc = f.latest.right_force_control;
+        require(fc.source == "hold", std::string("hold-wall fixture: source is not the Hold during the ") + phase);
+        require(fc.source_demand_m_s == 0.0, std::string("hold-wall fixture: the Hold reported a nonzero demand during the ") + phase);
+        require(fc.gate_translation == 1.0, std::string("hold-wall fixture: the gate closed on the Hold's own yield during the ") + phase);
+    };
     for (int i = 0; i < 250; ++i) {
         f.tick(hold);
         require(f.latest.right_cartesian_solve.status == "ok" || i < 5,
                 "hold-wall fixture: IK failed during the free hand-guide push (" +
                     f.latest.right_cartesian_solve.status + "/" + f.latest.right_cartesian_solve.reason + ")");
+        require_zero_demand_source("free push");
     }
-    require(f.latest.right_force_control.hold_engaged, "hold-wall fixture: hand-guide did not engage");
+    require(f.latest.right_force_control.folded && f.latest.right_force_control.fold_sink == "hold",
+            "hold-wall fixture: the hand-guide did not fold into the hold source");
     const Pose6D moved = f.rightSent();
     const std::array<double, 3> d{moved.x - start.x, moved.y - start.y, moved.z - start.z};
     int axis = 0;
@@ -659,13 +724,16 @@ bool testHoldFoldSinkIsWalledAtTheRoi() {
     set_roi.roi_max_m = {3.0, 3.0, 3.0};
     (sign > 0.0 ? set_roi.roi_max_m : set_roi.roi_min_m)[axis] = face;
     f.tick(set_roi);
-    // Keep pushing for 3 s: 24 mm of hand travel past the face. The ROI rows hold
-    // the sent pose a hair inside the face (1.6 mm here, the 2 mm pose-track
-    // standoff on the real stack); "reached" means inside that band.
+    // Keep pushing for 3 s: 24 mm of hand travel past the face. The hold-source stage
+    // bypasses the pose-track SMD (2026-09-15), so the SMD's wall standoff no longer
+    // applies here: foldForceDeviation walls the hold source pose at the face itself
+    // and the sent pose sits ~10 um inside it (measured); "reached" means inside a
+    // 2.5 mm band, which also covers the 2 mm pose-track standoff of other stages.
     double deepest = -1.0;
     int ticks_to_face = -1;
     for (int i = 0; i < 1500; ++i) {
         f.tick(hold);
+        require_zero_demand_source("push against the face");
         const double over = sign * (pos_of(f.rightSent())[axis] - face);
         deepest = std::max(deepest, over);
         if (ticks_to_face < 0 && over > -0.0025) ticks_to_face = i + 1;
@@ -688,12 +756,19 @@ bool testHoldFoldSinkIsWalledAtTheRoi() {
     }
     require(ticks_to_face > 0, "hold-wall fixture: the command never reached the ROI face");
     require(deepest < 0.0005, "the hand-guided command crossed the ROI face");
-    require(f.latest.right_force_control.fold_sink == "hold_nominal",
+    require(f.latest.right_force_control.source == "hold" &&
+            f.latest.right_force_control.fold_sink == "hold",
             "hold-wall fixture: the Hold fold sink was not the one exercised");
     const double at_face = pos_of(f.rightSent())[axis];
+    // The law yields ALONG THE MEASURED FORCE (stand frame); the sensor's z is not
+    // aligned with the ROI axis at this pose, so the axis sees |F_hat[axis]| of the
+    // 8 mm/s yield. The published contact normal is that direction.
+    const double v_axis = f.yieldSpeed(push.fz) *
+        std::fabs(f.latest.right_force_control.contact_normal_stand[axis]);
+    require(v_axis > 0.003, "hold-wall fixture: the contact normal has no component along the pushed axis");
     // Reverse the hand.
     Wrench6D pull;
-    pull.fz = -8.0;
+    pull.fz = -10.8;
     f.right->setWrench(pull);
     int ticks_to_leave = -1;
     for (int i = 0; i < 1500; ++i) {
@@ -702,7 +777,7 @@ bool testHoldFoldSinkIsWalledAtTheRoi() {
             const auto& fc = f.latest.right_force_control;
             std::cout << "  pull tick " << i << " back_mm=" << sign * (at_face - pos_of(f.rightSent())[axis]) * 1e3
                       << " fold_mm=" << norm3(fc.fold_m) * 1e3 << " dev_mm=" << fc.deviation_norm_m * 1e3
-                      << " vel=" << fc.velocity_m_s[axis] << " engaged=" << fc.hold_engaged
+                      << " vel=" << fc.velocity_m_s[axis] << " source=" << fc.source
                       << " verdict=" << static_cast<int>(f.latest.safety_verdict) << '\n';
         }
         if (sign * (at_face - pos_of(f.rightSent())[axis]) > 0.003) {
@@ -714,9 +789,17 @@ bool testHoldFoldSinkIsWalledAtTheRoi() {
               << ticks_to_face << " ticks, deepest " << deepest * 1e3 << " mm, left it "
               << (ticks_to_leave > 0 ? std::to_string(ticks_to_leave) : std::string("never"))
               << " ticks after the reversal\n";
-    // 3 mm at 8 mm/s is 188 ticks plus the damper's 12 ms ramp; the banked nominal
-    // used to need the full 24 mm (1500 ticks) first.
-    require(ticks_to_leave > 0 && ticks_to_leave <= 400,
+    // THE WALL'S CONTRACT: the command leaves the face the moment the law's velocity
+    // reverses, with NOTHING banked. Reversing the drive turns v from +v_axis to -v_axis
+    // with tau = m/b (120 ms here): it crosses zero after tau*ln2 and the 3 mm then take
+    // 3 mm / v_axis plus the ramp's tau, i.e. tau*(1 + ln2) + 3 mm / v_axis in all
+    // (369 ticks at 5.6 mm/s). A banked nominal needed the full 24 mm (1500 ticks) first.
+    const double tau = f.cfg.force_control.law.m / f.cfg.force_control.law.b;
+    const int expected_ticks = static_cast<int>(std::ceil(
+        (tau * (1.0 + std::log(2.0)) + 0.003 / v_axis) * f.cfg.servo.rate_hz));
+    std::cout << "  expected from the law's dynamics: " << expected_ticks << " ticks (v_axis "
+              << v_axis * 1e3 << " mm/s, tau " << tau * 1e3 << " ms)\n";
+    require(ticks_to_leave > 0 && ticks_to_leave <= expected_ticks + expected_ticks / 8,
             "reversing the hand at the ROI face did not move the command promptly: "
             "the fold banked the hand's travel past the face into the nominal");
     return true;
@@ -1009,7 +1092,9 @@ bool runCase(ArmId selected, bool rotation, bool fresh_execution = false,
     stream_arm.has_tcp_target = true;
     stream_arm.tcp_target_stand = kin->computeTcpStand(selected, initial, mount);
     Wrench6D force;
-    force.fz = 0.896;  // F/k equilibrium = 2.24 mm, matching the incident's scale.
+    // rest + 0.019 N at b = 100 N*s/m yields 0.19 mm/s; over the 12 s warm (less
+    // tau = 120 ms) that integrates to 2.26 mm, matching the incident's scale.
+    force.fz = 10.019;
     force.tz = rotation ? 0.008 : 0.0;
     plant->setWrench(force);
     ServoSnapshot snap;
@@ -1020,7 +1105,10 @@ bool runCase(ArmId selected, bool rotation, bool fresh_execution = false,
     const double old_rotation = fcOf(snap).deviation_norm_rad;
     require(old_deviation > 0.0015 && old_deviation < 0.003,
             "fixture did not establish a 2.24 mm-scale standing deviation");
-    if (rotation) require(old_rotation > 0.0003, "rotation fixture has no standing rotation");
+    // Rotation is RIGID (2026-09-15): a standing torque turns nothing.
+    require(old_rotation == 0.0, "the rigid rotation law let a standing torque turn the tool");
+    require(fcOf(snap).source == "absolute" && !fcOf(snap).folded,
+            "an absolute TcpPoseTarget must be the fenced absolute source, fold declined");
 
     plant->setWrench({});
     auto init = commandFor(ControlMode::JointTarget, "plain_force_fixture");
@@ -1149,9 +1237,11 @@ bool testPreviewExecutionForceTareResume() {
         cfg.force_control.wrench_filter_hz=8.0;
     });
     const auto plain=f.command(ControlMode::Hold,ControlMode::TcpPoseTarget);
-    f.warm(plain,.896);
+    // rest + 0.062 N: the absolute source declines the fold, so ~2.2 mm stands in the overlay.
+    f.warm(plain,10.062);
     require(f.latest.right_force_control.deviation_norm_m>.0005,
             "preview force fixture has no standing overlay");
+    const double standing_before_fold=f.latest.right_force_control.deviation_norm_m;
     uint64_t wire=0;
     const auto publishZero=[&] {
         auto packet=nlohmann::json::parse(zeroDeltaChunk(ArmId::Right,f.rightSent()));
@@ -1174,10 +1264,19 @@ bool testPreviewExecutionForceTareResume() {
             "force-covered preview never accepted its first command");
     require(f.latest.right_force_control.covered&&f.latest.right_force_control.compose_applied,
             "preview bypassed the covered force overlay");
+    // THE CHUNK FOLLOWER IS A FOLD SINK (2026-09-15): the deviation the absolute source
+    // left standing is booked into the plan on the first covered preview tick, and every
+    // tick's yield after it, so the overlay's copy reads ~0 and `absorbed` carries it.
+    require(f.latest.right_force_control.source=="chunk_follower"&&
+            f.latest.right_force_control.fold_sink=="chunk_follower"&&
+            f.latest.right_force_control.folded,
+            "the preview plan did not take the fold as the chunk-follower source");
+    require(f.latest.right_force_control.absorbed_norm_m>=standing_before_fold*0.99,
+            "the standing deviation was not handed to the preview plan");
 
     // A planning backlog retires the nominal chunk, not the force reference.
-    // Keep a steady nonzero external wrench throughout recovery so lost strip,
-    // double compose, a hold-law switch or a measured-pose restart is visible.
+    // Keep a steady wrench ABOVE rest throughout recovery so lost strip, double
+    // compose, a source switch, a lost fold or a measured-pose restart is visible.
     for(int i=0;i<30;++i)pacedTick(preview);
     const auto recovery_bias=f.latest.right_ft.bias_generation;
     const auto recovery_resets=f.latest.right_force_control.reference_reset_count;
@@ -1193,8 +1292,19 @@ bool testPreviewExecutionForceTareResume() {
                                         1./f.cfg.servo.rate_hz);
     require(expected_brake.start(nominal_before)==control::PreviewBrakeStatus::Ready,
             "accepted covered state has no finite reference brake");
-    const double standing_deviation=f.latest.right_force_control.deviation_norm_m;
-    require(standing_deviation>.0005,"covered recovery lost its standing deviation before the event");
+    // With the fold live the overlay holds at most a tick of yield; the plan holds the rest.
+    require(f.latest.right_force_control.deviation_norm_m<1e-4&&
+            f.latest.right_force_control.absorbed_norm_m>standing_before_fold,
+            "covered recovery did not start with the deviation folded into the plan");
+    // THE FOLD IS A RIGID TRANSPORT OF THE PREVIEW PLAN, applied at the top of the tick
+    // after it is booked: the accepted sample read after tick N carries the folds booked
+    // through N-1. Track that transport so the brake comparison below stays exact.
+    Eigen::Vector3d fold_transport(f.latest.right_force_control.fold_m[0],
+                                   f.latest.right_force_control.fold_m[1],
+                                   f.latest.right_force_control.fold_m[2]);
+    double absorbed_prev=f.latest.right_force_control.absorbed_norm_m;
+    int covered_pushed_ticks=0,folded_ticks=0;
+    double maximum_overlay_deviation=0.;
     double maximum_nominal_drift=0.,maximum_composed_error=0.,maximum_raw_rotation=0.;
     double maximum_stage_raw_rotation=0.;
     double ik_position=f.cfg.kinematics.ik.position_tolerance_m;
@@ -1214,12 +1324,14 @@ bool testPreviewExecutionForceTareResume() {
         require(f.latest.right_ft.bias_valid&&f.latest.right_ft.bias_generation==recovery_bias&&
                 force_state.reference_reset_count==recovery_resets,
                 "planning recovery reset the covered force reference or tare generation");
-        require(force_state.reference_strip_enabled&&force_state.law=="stream",
-                "planning recovery lost force strip eligibility or switched to the hand-guide law");
-        require(norm3(force_state.reference_deviation_m)>.0005,
-                "planning recovery discarded the standing force deviation");
-        require(!force_state.bounded&&!force_state.folded,
-                "planning recovery hit a force fence or folded the spring-law reference");
+        require(force_state.reference_strip_enabled,"planning recovery lost force strip eligibility");
+        // 2026-09-15: the fold keeps the plan where the arm is. The overlay's copy never
+        // regrows toward the pre-fold standing size, the absorbed total never shrinks and
+        // no fence is reachable on this source.
+        maximum_overlay_deviation=std::max(maximum_overlay_deviation,norm3(force_state.reference_deviation_m));
+        require(norm3(force_state.reference_deviation_m)<standing_before_fold*0.5,
+                "planning recovery let the folded deviation regrow in the overlay");
+        require(!force_state.bounded,"planning recovery hit a force fence");
         require(!f.latest.left_cartesian_solve.preview_execution.active,
                 "single-arm recovery gave preview authority to the held peer");
         if(!solve.stage_tcp_target_stand) {
@@ -1230,17 +1342,34 @@ bool testPreviewExecutionForceTareResume() {
         }
         require(force_state.covered&&force_state.compose_applied,
                 "finite recovery target bypassed its standing force overlay");
+        require(force_state.source=="chunk_follower",
+                "a covered preview tick was not driven by the chunk-follower source");
+        // absorbed_* is written by the fold pass only, so it is judged on covered ticks
+        // (an uncovered tick publishes a zeroed telemetry block, not the running total).
+        require(force_state.absorbed_norm_m>=absorbed_prev-1e-12,
+                "the absorbed force displacement shrank during recovery");
+        absorbed_prev=force_state.absorbed_norm_m;
+        if(force_state.gate_force_n>f.cfg.force_control.gate_rest_force_n) {
+            ++covered_pushed_ticks;
+            if(force_state.folded) ++folded_ticks;
+            require(force_state.fold_sink=="chunk_follower"||
+                    force_state.fold_sink=="declined: chunk follower paused",
+                    "the fold named a sink other than the chunk follower: "+force_state.fold_sink);
+        }
         const auto nominal=PreviewRecoveryTestAccess::rightAccepted(*f.loop);
         control::PreviewMotionSample expected_nominal;
         require(expected_brake.sample(static_cast<double>(nowSteadyNs())*1e-9-recovery_origin_sec,
                                       expected_nominal),"reference covered brake sample unavailable");
+        // The brake reference, transported by the folds applied so far.
+        Pose6D expected_pose=expected_nominal.pose;
+        expected_pose.x+=fold_transport.x();expected_pose.y+=fold_transport.y();expected_pose.z+=fold_transport.z();
         maximum_nominal_drift=std::max(maximum_nominal_drift,
             math::positionDistance(nominal.pose,nominal_before.pose));
         // A zero-delta source can still have small accepted angular p/v/a from
         // its cold-start solve. Preserve its finite stopping trajectory first;
         // only the dispatched terminal is the stationary fresh-plan seed.
-        const bool matches_brake=math::positionDistance(nominal.pose,expected_nominal.pose)<1e-10&&
-                math::orientationDistanceRad(nominal.pose,expected_nominal.pose)<1e-10&&
+        const bool matches_brake=math::positionDistance(nominal.pose,expected_pose)<1e-10&&
+                math::orientationDistanceRad(nominal.pose,expected_pose)<1e-10&&
                 (nominal.linear_velocity-expected_nominal.linear_velocity).norm()<1e-10&&
                 (nominal.linear_acceleration-expected_nominal.linear_acceleration).norm()<1e-8&&
                 (nominal.angular_velocity_body-expected_nominal.angular_velocity_body).norm()<1e-10&&
@@ -1256,8 +1385,8 @@ bool testPreviewExecutionForceTareResume() {
         if(tracking) {
             maximum_raw_rotation=std::max(maximum_raw_rotation,raw_rotation);
             maximum_stage_raw_rotation=std::max(maximum_stage_raw_rotation,stage_raw_rotation);
-            require(math::positionDistance(raw_reference.pose,expected_nominal.pose)<1e-10&&raw_rotation<1e-10,
-                    "fresh zero chunk reanchored to the composed/readback pose instead of the nominal terminal");
+            require(math::positionDistance(raw_reference.pose,expected_pose)<1e-10&&raw_rotation<1e-10,
+                    "fresh zero chunk reanchored to the composed/readback pose instead of the (transported) nominal terminal");
         }
         const bool correct_nominal=tracking ?
             math::positionDistance(nominal.pose,raw_reference.pose)<=limits.linear_tracking_tolerance_m&&
@@ -1279,13 +1408,16 @@ bool testPreviewExecutionForceTareResume() {
             <<" now_a="<<nominal.linear_acceleration.transpose()
             <<" now_w="<<nominal.angular_velocity_body.transpose()
             <<" now_alpha="<<nominal.angular_acceleration_body.transpose()
+            <<" expected_dp="<<math::positionDistance(nominal.pose,expected_pose)
             <<" expected_dr="<<math::orientationDistanceRad(nominal.pose,expected_nominal.pose)
+            <<" fold_transport="<<fold_transport.transpose()
             <<" raw_dr="<<math::orientationDistanceRad(PreviewRecoveryTestAccess::rightRaw(*f.loop).pose,
                                                        expected_nominal.pose)
             <<" stage_raw_dr="<<math::orientationDistanceRad(nominal.pose,
                                                             PreviewRecoveryTestAccess::rightRaw(*f.loop).pose)
             <<" folds="<<solve.preview_execution.fold_count
-            <<" force_deviation="<<force_state.deviation_norm_m<<'\n';
+            <<" force_deviation="<<force_state.deviation_norm_m
+            <<" fold_sink="<<force_state.fold_sink<<'\n';
         require(correct_nominal,
                 "covered recovery departed from its accepted-state brake or dispatched terminal seed");
         Pose6D composed=nominal.pose;
@@ -1297,6 +1429,8 @@ bool testPreviewExecutionForceTareResume() {
         maximum_composed_error=std::max(maximum_composed_error,error);
         require(error<=ik_position&&math::orientationDistanceRad(f.rightSent(),composed)<=ik_rotation,
                 "accepted recovery command did not compose its current force deviation exactly once");
+        // This tick's fold is applied at the top of the next tick.
+        fold_transport+=Eigen::Vector3d(force_state.fold_m[0],force_state.fold_m[1],force_state.fold_m[2]);
     };
     PreviewRecoveryTestAccess::request(*f.loop,PreviewRecoveryCause::Backlog);
     pacedTick(preview);
@@ -1329,10 +1463,14 @@ bool testPreviewExecutionForceTareResume() {
              <<" composed FK error um="<<maximum_composed_error*1e6
              <<" raw-terminal rotation rad="<<maximum_raw_rotation
              <<" stage-raw rotation rad="<<maximum_stage_raw_rotation
-             <<" retained deviation mm="<<f.latest.right_force_control.deviation_norm_m*1e3<<'\n';
+             <<" folded "<<folded_ticks<<"/"<<covered_pushed_ticks<<" covered pushed ticks"
+             <<" max overlay deviation um="<<maximum_overlay_deviation*1e6
+             <<" absorbed mm="<<f.latest.right_force_control.absorbed_norm_m*1e3<<'\n';
+    require(covered_pushed_ticks>0&&folded_ticks*20>=covered_pushed_ticks*19,
+            "fewer than 95 % of the covered ticks pushed above rest folded into the chunk follower");
 
     const auto prior=f.latest.right_force_control.wrench_filtered_stand;
-    Wrench6D force;force.fz=1.792;f.right->setWrench(force);pacedTick(preview);
+    Wrench6D force;force.fz=10.8;f.right->setWrench(force);pacedTick(preview);
     const auto& fc=f.latest.right_force_control;
     const double dt=1./f.cfg.servo.rate_hz;
     const double alpha=dt/(1./(2.*M_PI*f.cfg.force_control.wrench_filter_hz)+dt);

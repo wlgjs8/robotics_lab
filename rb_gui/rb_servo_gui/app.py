@@ -2590,21 +2590,35 @@ def _ft_fc_cell(fc: Mapping[str, Any] | None, key: str, scale: float, digits: in
     return escape(f"{value:.{digits}f}")
 
 
-def _ft_law_cell(fc: Mapping[str, Any] | None) -> str:
-    """WHICH LAW. The stream law and the hold law differ by 5x in the ratio that
-    decides how much of a push turns the tool rather than moving it, so a deviation
-    cannot be judged without knowing which one produced it."""
+def _ft_force_cell(fc: Mapping[str, Any] | None) -> str:
+    """WHAT THE FORCE STAGE IS DOING to this arm, in one word. Since 2026-09-15 there
+    is ONE law on the force vector and hold/stream are SOURCES of it, so the cell no
+    longer names a law: it names the state that explains the deviation and gate rows
+    under it — "off" (config), "idle" (enabled, not covering), "fence" (the absolute
+    source's dead backstop is holding the bound), "contact" (the gate is cutting the
+    source's advance into the measured force), else the source that is driving the
+    plan ("chunk_follower" / "hold" / "absolute"). A legacy server that still
+    publishes `law` and no `source` shows the law, so an old stack stays readable."""
     if not isinstance(fc, Mapping):
         return _ft_dim("--")
     if not fc.get("enabled"):
         return _ft_dim("off")
     if not fc.get("covered"):
         return _ft_dim("idle")
-    # Past the fence the law HOLDS the bound instead of tracking, so the arm feels
+    # Past the fence the stage HOLDS the bound instead of tracking, so the arm feels
     # stiff for no visible reason unless the card says so.
     if fc.get("bounded"):
         return '<span class="rb-monitor-warn">fence</span>'
-    law = fc.get("law")
+    try:
+        gate = float(fc.get("gate_translation", 1.0))
+    except (TypeError, ValueError):
+        gate = 1.0
+    if math.isfinite(gate) and gate < 0.999:
+        return '<span class="rb-monitor-warn">contact</span>'
+    source = fc.get("source")
+    if source and str(source) != "none":
+        return escape(str(source))
+    law = fc.get("law")   # pre-2026-09-15 payload
     return escape(str(law)) if law else escape("on")
 
 
@@ -2718,11 +2732,11 @@ def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str
         row_class="rb-monitor-row-gap",
     ))
 
-    # What the law did with it, so the cause and the effect are read together. The
-    # deviation rows only appear while a law is actually covering an arm — an idle
-    # cell would be three more rows of "--" on a card whose point is to stay short.
+    # What the force stage did with it, so the cause and the effect are read together.
+    # The deviation rows only appear while the stage is actually covering an arm — an
+    # idle cell would be three more rows of "--" on a card whose point is to stay short.
     rows.append(_operator_monitor_row3(
-        "law", _ft_law_cell(left_fc), _ft_law_cell(right_fc)))
+        "force", _ft_force_cell(left_fc), _ft_force_cell(right_fc)))
     covering = any(
         isinstance(fc, Mapping) and fc.get("covered") for fc in (left_fc, right_fc)
     )

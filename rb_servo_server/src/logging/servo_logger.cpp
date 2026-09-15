@@ -398,6 +398,13 @@ void writeForceHeader(std::ostream& os, const char* side) {
     writeWrenchHeader(os, side, "ft_raw_sensor");
     // the tool-gravity term subtracted this tick, sensor frame @SRO.
     writeWrenchHeader(os, side, "ft_gravity_sensor");
+    // the tool-INERTIA term subtracted this tick (-m*a_com, sensor frame @SRO), the
+    // commanded COM acceleration it came from, and whether it was applied.
+    writeWrenchHeader(os, side, "ft_inertial_sensor");
+    os << ',' << side << "_ft_com_accel_stand_x_m_s2"
+       << ',' << side << "_ft_com_accel_stand_y_m_s2"
+       << ',' << side << "_ft_com_accel_stand_z_m_s2"
+       << ',' << side << "_ft_inertia_valid";
     // (2) compensated @SRO, pre- and post-deadzone.
     writeWrenchHeader(os, side, "ft_comp_sensor_nodz");
     writeWrenchHeader(os, side, "ft_comp_sensor");
@@ -421,7 +428,11 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_enabled"
        << ',' << side << "_fc_covered"
        << ',' << side << "_fc_coverage_reason"
-       << ',' << side << "_fc_law"
+       << ',' << side << "_fc_source"
+       << ',' << side << "_fc_source_demand_m_s"
+       << ',' << side << "_fc_contact_normal_x"
+       << ',' << side << "_fc_contact_normal_y"
+       << ',' << side << "_fc_contact_normal_z"
        << ',' << side << "_fc_compose_applied"
        << ',' << side << "_fc_reference_dev_x_m"
        << ',' << side << "_fc_reference_dev_y_m"
@@ -450,7 +461,6 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_fence_m"
        << ',' << side << "_fc_fence_rad"
        << ',' << side << "_fc_gate_translation"
-       << ',' << side << "_fc_gate_rotation"
        << ',' << side << "_fc_gate_force_n"
        << ',' << side << "_fc_gate_torque_nm"
        << ',' << side << "_fc_gate_closed"
@@ -458,21 +468,8 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_gate_b_eff"
        << ',' << side << "_fc_gate_m_eff"
        << ',' << side << "_fc_gate_cross_speed_m_s"
-       << ',' << side << "_fc_gate_stream_speed_m_s"
        << ',' << side << "_fc_gate_rest_force_n"
        << ',' << side << "_fc_gate_peak_force_n"
-       << ',' << side << "_fc_gate_wrench_norm_n"
-       << ',' << side << "_smd_gate_sample_valid"
-       << ',' << side << "_smd_gate_armed"
-       << ',' << side << "_smd_gate_releasing"
-       << ',' << side << "_smd_gate_translation"
-       << ',' << side << "_smd_gate_normal_x"
-       << ',' << side << "_smd_gate_normal_y"
-       << ',' << side << "_smd_gate_normal_z"
-       << ',' << side << "_smd_gate_measured_fx_n"
-       << ',' << side << "_smd_gate_measured_fy_n"
-       << ',' << side << "_smd_gate_measured_fz_n"
-       << ',' << side << "_smd_gate_removed_velocity_m_s"
        // The wrench the LAW consumed, after the contact-shock low-pass, beside
        // the RAW one in the ft_ block above: the pair is what shows how much
        // shock the filter took out (0 Hz => filter off, the two are equal).
@@ -480,8 +477,8 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_wrench_filt_fx_n"
        << ',' << side << "_fc_wrench_filt_fy_n"
        << ',' << side << "_fc_wrench_filt_fz_n"
-       // THE FOLD (force_control.fold_deviation): what moved into the plan this
-       // tick, where it went, and the running total for the run.
+       // THE FOLD (structural): what moved into the source's plan this tick, where
+       // it went, and the running total for the run.
        << ',' << side << "_fc_folded"
        << ',' << side << "_fc_fold_sink"
        << ',' << side << "_fc_fold_x_m"
@@ -492,8 +489,6 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_absorbed_z_m"
        << ',' << side << "_fc_absorbed_norm_m"
        << ',' << side << "_fc_absorbed_norm_rad"
-       << ',' << side << "_fc_hold_engaged"
-       << ',' << side << "_fc_hold_force_n"
        // The two tracking errors, beside the force columns because the force path is
        // what makes them diverge: a compliant command deliberately leaves the arm.
        << ',' << side << "_track_command_vs_actual_deg"
@@ -912,6 +907,11 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << ft.axes_determinant;
     writeWrenchColumns(os, ft.raw_sensor);
     writeWrenchColumns(os, ft.gravity_sensor);
+    writeWrenchColumns(os, ft.inertial_sensor);
+    os << ',' << ft.com_accel_stand_m_s2[0]
+       << ',' << ft.com_accel_stand_m_s2[1]
+       << ',' << ft.com_accel_stand_m_s2[2]
+       << ',' << (ft.inertia_valid ? 1 : 0);
     writeWrenchColumns(os, ft.comp_sensor_nodz);
     writeWrenchColumns(os, ft.comp_sensor);
     writeWrenchColumns(os, ft.comp_tcp);
@@ -930,7 +930,11 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.enabled
        << ',' << fc.covered
        << ',' << csvEscape(fc.coverage_reason)
-       << ',' << csvEscape(fc.law)
+       << ',' << csvEscape(fc.source)
+       << ',' << fc.source_demand_m_s
+       << ',' << fc.contact_normal_stand[0]
+       << ',' << fc.contact_normal_stand[1]
+       << ',' << fc.contact_normal_stand[2]
        << ',' << fc.compose_applied
        << ',' << fc.reference_deviation_m[0]
        << ',' << fc.reference_deviation_m[1]
@@ -959,7 +963,6 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.fence_m
        << ',' << fc.fence_rad
        << ',' << fc.gate_translation
-       << ',' << fc.gate_rotation
        << ',' << fc.gate_force_n
        << ',' << fc.gate_torque_nm
        << ',' << fc.gate_closed
@@ -967,21 +970,8 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.gate_b_eff
        << ',' << fc.gate_m_eff
        << ',' << fc.gate_cross_speed_m_s
-       << ',' << fc.gate_stream_speed_m_s
        << ',' << fc.gate_rest_force_n
        << ',' << fc.gate_peak_force_n
-       << ',' << fc.gate_wrench_norm_n
-       << ',' << fc.smd_gate_sample_valid
-       << ',' << fc.smd_gate_armed
-       << ',' << fc.smd_gate_releasing
-       << ',' << fc.smd_gate_translation
-       << ',' << fc.smd_gate_normal_stand[0]
-       << ',' << fc.smd_gate_normal_stand[1]
-       << ',' << fc.smd_gate_normal_stand[2]
-       << ',' << fc.smd_gate_measured_force_stand_n[0]
-       << ',' << fc.smd_gate_measured_force_stand_n[1]
-       << ',' << fc.smd_gate_measured_force_stand_n[2]
-       << ',' << fc.smd_gate_removed_velocity_m_s
        << ',' << fc.wrench_filter_hz
        << ',' << fc.wrench_filtered_stand.fx
        << ',' << fc.wrench_filtered_stand.fy
@@ -996,8 +986,6 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.absorbed_m[2]
        << ',' << fc.absorbed_norm_m
        << ',' << fc.absorbed_norm_rad
-       << ',' << fc.hold_engaged
-       << ',' << fc.hold_force_n
        << ',' << track.command_vs_actual_deg
        << ',' << track.reference_vs_actual_deg
        << ',' << track.reference_valid
