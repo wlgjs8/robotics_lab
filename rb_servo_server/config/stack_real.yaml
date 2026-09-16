@@ -681,8 +681,8 @@ safety:
     # by its own note above, cannot catch the first-contact transient -- plus operator
     # supervision and the E-stop. safety.SafetyVerdict::ExternalForceLimit exists in
     # the enum but is raised NOWHERE in the server, so do not count on it.
-    min_m: [0.200, -0.400, -0.330]
-    max_m: [1.100, 0.400, 0.590]
+    min_m: [0.150, -0.500, -0.400]
+    max_m: [1.200, 0.500, 0.600]
     # runtime_* is the envelope a RUNTIME SetRoiBounds may move the box within, and it
     # is what rb_gui derives its slider limits from. z_min was -0.2 m, so the GUI could
     # not be dragged below -200 mm while laying the box out. Widened to -1.0 m
