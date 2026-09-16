@@ -444,6 +444,14 @@ struct PreviewExecutionTelemetry {
     // says when that bound was active.
     // Command lead over the raw source; leashes future QP reference progression.
     double plan_lead_m = 0.0;
+    // plan_lead_m projected onto the raw source's direction of travel (2026-09-15
+    // night): positive = the dispatched plan is AHEAD of its source along the
+    // motion, negative = behind, 0 when the source is not moving. The unsigned
+    // distance above counted a lagging or laterally offset plan as lead and the
+    // leash then slowed the reference clock for an output that was already
+    // behind (18:25 run, 241-243 s: 390 leash-limited ticks, all behind, three
+    // backlog brakes). Only this signed value feeds the plan-lead leash.
+    double plan_lead_along_m = 0.0;
     // Compatibility field: accepted execution now always uses wall seconds.
     double plan_clock_gate = 1.0;
     double reference_rate_gate{1.0};
@@ -1277,6 +1285,28 @@ struct ArmWorkerTelemetry {
     std::string worker_queue_policy = "latest_wins";
 };
 
+// PER-ARM COLLISION BARRIER STATUS (2026-09-15). See
+// control/barrier_status.hpp for the measurements this exists for: while the
+// barrier HOLDS a pair at its floor the hold fold re-books the plan every tick,
+// the per-tick correction stays under the 2 deg/s "blocked" bar, and
+// self_collision_clamp_count / the SelfCollision verdict therefore missed 60-95%
+// of the held time. These fields are per ARM (the projection columns name only
+// the single tightest row of the whole solve) and carry the episode, so one
+// glance says which arm is stuck on which pair and for how long.
+struct ArmBarrierTelemetry {
+    bool braking = false;       // a collision row is removing this arm's closing motion
+    bool held = false;          // ...and that row is AT its floor: no closing allowed
+    std::string reason;         // "" | "row" | "stale_verdict"
+    std::string pair;           // "geom_a <-> geom_b" of the row reported below
+    std::string klass;          // arm_arm | arm_stand | environment | gripper_gripper | intra_arm | floor | external_box
+    double headroom_m = std::numeric_limits<double>::quiet_NaN();  // d_now - that row's d_hard
+    double held_episode_s = 0.0;   // length of the held episode in progress (0 = none)
+    uint64_t held_count = 0;       // held episodes since start
+    double held_total_s = 0.0;     // time held since start
+    double braking_total_s = 0.0;  // time braking (held included) since start
+    double held_folded_m = 0.0;    // plan motion the hold fold discarded while held
+};
+
 // Per-tick observability for the combined geometric velocity projection
 // (ROI/floor/reach/self-collision rows + the global per-joint ceiling inside
 // solveVelocityProjection). Previously the only output was a 5 Hz stderr line
@@ -1362,6 +1392,8 @@ struct SafetyProjectionTelemetry {
     double right_hold_fold_m = 0.0;
     bool left_hold_fold_capped = false;
     bool right_hold_fold_capped = false;
+    // Per-arm barrier status + episode (2026-09-15). [0] = left, [1] = right.
+    std::array<ArmBarrierTelemetry, 2> barrier{};
 };
 
 struct RbpodoAsyncStreamingTelemetry {
@@ -1843,6 +1875,10 @@ struct ServoSnapshot {
     double self_collision_environment_min_clearance_m = std::numeric_limits<double>::infinity();
     bool self_collision_gripper_excluded = false;
     uint64_t self_collision_clamp_count = 0;
+    // Per-arm barrier status/episode ([0] left, [1] right): which arm the barrier is
+    // slowing or holding, against which pair, and for how long. clamp_count above only
+    // counts ticks the correction passed 2 deg/s, which a held-and-folded pair does not.
+    std::array<ArmBarrierTelemetry, 2> self_collision_barrier{};
     double self_collision_margin_m = 0.0;
     int self_collision_left_bone = -1;
     std::string self_collision_pair;

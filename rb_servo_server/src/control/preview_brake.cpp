@@ -210,29 +210,40 @@ PreviewBrakeStatus PreviewBrake::start(const PreviewMotionState& initial) {
   if (!finitePose(initial.pose)||!initial.linear_velocity.allFinite()||
       !initial.linear_acceleration.allFinite()||!initial.angular_velocity_body.allFinite()||
       !initial.angular_acceleration_body.allFinite()) return reject(PreviewBrakeStatus::InvalidInitialState);
+  // SEED HEADROOM (2026-09-15 night). The seed is the dispatched sample: QP-certified
+  // within its own numerical margin, and it can sit exactly ON a cap. Measured on
+  // servo_log_20260915_223341 at 299.74 s: the policy asked for a wrist rotation
+  // beyond the 1.4 rad/s cap, the plan rode the cap (|omega| = 1.400), three solves
+  // came back infeasible, the plan expired and this refusal (by 1e-7) turned the
+  // expiry brake into a ChunkFollowerFault - a hard stop from 80 deg/s. Refusing to
+  // brake is never safer than braking. A seed up to kSeedHeadroom above a cap is
+  // accepted and the brake is certified against max(cap, what the seed already does);
+  // the velocity interface never limits velocity anyway, and Ruckig brakes an
+  // out-of-box acceleration at max jerk first. Beyond the headroom the seed is
+  // garbage and the refusal (and the fault path behind it) stands.
+  constexpr double kSeedHeadroom=0.25;
+  const double eps=config_.feasibility_tolerance;
   // Per-axis numerical tolerance must not multiply into a larger accepted
   // physical norm at the cube corners. Use the existing physical norm budget.
-  if(initial.angular_velocity_body.norm()>config_.max_angular_velocity_rad_s+config_.feasibility_tolerance||
-     initial.angular_acceleration_body.norm()>config_.max_angular_acceleration_rad_s2+config_.feasibility_tolerance)
+  if(initial.angular_velocity_body.norm()>config_.max_angular_velocity_rad_s*(1.+kSeedHeadroom)+eps||
+     initial.angular_acceleration_body.norm()>config_.max_angular_acceleration_rad_s2*(1.+kSeedHeadroom)+eps)
     return reject(PreviewBrakeStatus::InitialOutsideLimits);
   input_.current_position={initial.pose.x,initial.pose.y,initial.pose.z,0.,0.,0.};
   for(std::size_t i=0;i<6;++i) {
     input_.current_velocity[i]=i<3?initial.linear_velocity[i]:initial.angular_velocity_body[i-3];
     input_.current_acceleration[i]=i<3?initial.linear_acceleration[i]:initial.angular_acceleration_body[i-3];
   }
-  const auto inside_axis=[&](std::size_t i) {
+  const auto inside_axis=[&](std::size_t i,double headroom) {
     const double v=input_.current_velocity[i],a=input_.current_acceleration[i];
-    const double eps=config_.feasibility_tolerance;
-    // A nonzero initial acceleration can unavoidably raise speed before jerk
-    // brings acceleration to zero; reject this case without changing the seed.
-    const double unavoidable=v+std::copysign(a*a/(2.*input_.max_jerk[i]),a);
-    return std::isfinite(v)&&std::isfinite(a)&&std::isfinite(unavoidable)&&
-        std::abs(v)<=input_.max_velocity[i]+eps&&std::abs(a)<=input_.max_acceleration[i]+eps&&
-        std::abs(unavoidable)<=input_.max_velocity[i]+eps;
+    return std::isfinite(v)&&std::isfinite(a)&&
+        std::abs(v)<=input_.max_velocity[i]*(1.+headroom)+eps&&
+        std::abs(a)<=input_.max_acceleration[i]*(1.+headroom)+eps;
   };
-  for(std::size_t i=0;i<3;++i)if(!inside_axis(i))return reject(PreviewBrakeStatus::InitialOutsideLimits);
+  for(std::size_t i=0;i<3;++i)if(!inside_axis(i,kSeedHeadroom))return reject(PreviewBrakeStatus::InitialOutsideLimits);
   Eigen::Matrix3d angular_basis=Eigen::Matrix3d::Identity();
-  if(!inside_axis(3)||!inside_axis(4)||!inside_axis(5)) {
+  // The chart is balanced on the UNPADDED inscribed cube, exactly as before; the
+  // headroom only decides refusal afterwards.
+  if(!inside_axis(3,0.)||!inside_axis(4,0.)||!inside_axis(5,0.)) {
     // A trajectory certified in an earlier chart can have a body-omega
     // component just outside the recentered inscribed cube while its physical
     // norm is well inside the unchanged cap. Rotate the CHART, never the state
@@ -249,8 +260,18 @@ PreviewBrakeStatus PreviewBrake::start(const PreviewMotionState& initial) {
     const Eigen::Vector3d v=angular_basis.transpose()*initial.angular_velocity_body;
     const Eigen::Vector3d a=angular_basis.transpose()*initial.angular_acceleration_body;
     for(std::size_t i=0;i<3;++i){input_.current_velocity[i+3]=v[i];input_.current_acceleration[i+3]=a[i];}
-    if(!inside_axis(3)||!inside_axis(4)||!inside_axis(5))
+    if(!inside_axis(3,kSeedHeadroom)||!inside_axis(4,kSeedHeadroom)||!inside_axis(5,kSeedHeadroom))
       return reject(PreviewBrakeStatus::InitialOutsideLimits);
+  }
+  // What the certified brake may do: the caps, or what the seed already does (a
+  // nonzero seed acceleration unavoidably raises speed by a^2/(2 j) before jerk
+  // brings it to zero). Never looser than that, never a clipped seed.
+  std::array<double,6> v_allow{},a_allow{};
+  for(std::size_t i=0;i<6;++i) {
+    const double v=input_.current_velocity[i],a=input_.current_acceleration[i];
+    const double unavoidable=std::abs(v)+a*a/(2.*input_.max_jerk[i]);
+    v_allow[i]=std::max(input_.max_velocity[i],unavoidable);
+    a_allow[i]=std::max(input_.max_acceleration[i],std::abs(a));
   }
   PreviewBrakeTrajectory candidate;
   candidate.angular_basis=angular_basis;
@@ -263,12 +284,12 @@ PreviewBrakeStatus PreviewBrake::start(const PreviewMotionState& initial) {
     const auto& p=profiles[0][i];
     if (p.brake.duration>0.) for(std::size_t k=0;k<2;++k) {
       if (p.brake.t[k]>0.&&!boundedInterval(p.brake.t[k],p.brake.v[k],p.brake.a[k],p.brake.j[k],
-          input_.max_velocity[i],input_.max_acceleration[i],input_.max_jerk[i],config_.feasibility_tolerance))
+          v_allow[i],a_allow[i],input_.max_jerk[i],config_.feasibility_tolerance))
         return reject(PreviewBrakeStatus::LimitViolation);
     }
     for(std::size_t k=0;k<7;++k) {
-      if (!boundedInterval(p.t[k],p.v[k],p.a[k],p.j[k],input_.max_velocity[i],
-          input_.max_acceleration[i],input_.max_jerk[i],config_.feasibility_tolerance))
+      if (!boundedInterval(p.t[k],p.v[k],p.a[k],p.j[k],v_allow[i],
+          a_allow[i],input_.max_jerk[i],config_.feasibility_tolerance))
         return reject(PreviewBrakeStatus::LimitViolation);
     }
   }

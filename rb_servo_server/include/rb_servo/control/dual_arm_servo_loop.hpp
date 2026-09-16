@@ -15,6 +15,7 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/arm_worker.hpp"
+#include "rb_servo/control/barrier_status.hpp"
 #include "rb_servo/control/cartesian_chunk_follower.hpp"
 #include "rb_servo/control/command_tracking_window.hpp"
 #include "rb_servo/control/cartesian_servo_controller.hpp"
@@ -452,6 +453,7 @@ private:
     );
     void setMotionState(ServerMotionState state);
     ServoTarget currentFaultHoldTarget() const;
+    bool faultBrakeEligible(SafetyVerdict verdict, const FaultContext& context) const;
     JointArray chooseSafeHoldTarget(
         ArmId arm_id,
         const RobotState& state,
@@ -623,6 +625,11 @@ private:
     std::optional<FaultContext> right_latched_fault_context_;
     JointArray left_fault_hold_q_deg_{};
     JointArray right_fault_hold_q_deg_{};
+    // DELIVERED FAULT BRAKE (2026-09-15 night): while set, a non-emergency latch keeps
+    // sending the decelerate-then-latch ramp ("fault_brake" send policy) until every
+    // joint's delivered velocity is zero or the derived deadline lapses.
+    std::atomic<bool> fault_brake_active_{false};
+    uint64_t fault_brake_deadline_ns_{0};
     CartesianSolveTelemetry left_last_cartesian_solve_;
     CartesianSolveTelemetry right_last_cartesian_solve_;
     SafetyTrackingTelemetry left_safety_tracking_;
@@ -909,6 +916,11 @@ private:
     // Self-collision "blocked" tick counter (the floor/ROI/reach rows had one, the
     // collision rows did not).
     uint64_t self_collision_clamp_count_ = 0;
+    // Per-arm barrier braking/held episodes (2026-09-15). The counter above only sees
+    // ticks above 2 deg/s, which is not what a held-and-folded pair looks like; these
+    // track the episode itself and drive the CSV columns, the published state and the
+    // console report. [0] = left, [1] = right.
+    std::array<control::BarrierEpisodeTracker, 2> barrier_tracker_{};
     // Direction jitter of the tightest collision row between consecutive ticks
     // (telemetry: witness-point jumps on parallel hull faces show up here).
     std::uint64_t prev_tightest_pair_key_ = 0;

@@ -160,6 +160,18 @@ PreviewExecutionAcceptance validatePreviewExecutionResult(
 bool transportPreviewExecutionResult(PreviewExecutionResult& result,
     const PreviewExecutionGauge& current, double tolerance);
 
+// CONTACT AUTHORITY SLEW. Raises the contact envelope near the splice so that a plan
+// starting from the dispatched closing state (velocity, acceleration along the contact
+// normal) can meet the authority along the smoothest two-interval jerk profile that
+// stays within tracker.contact_slew_jerk_m_s3 (escalating to max_linear_jerk_m_s3 and
+// the horizon only if that is impossible). The result is max(envelope, slew) plus the
+// servo-grid chord margin of the slew's quadratic pieces; nothing below the original
+// envelope is ever admitted, and beyond the slew the envelope is untouched. Returns
+// false on invalid input or knot overflow. See PreviewTrackerConfig::contact_slew_jerk_m_s3.
+bool slewContactAuthority(PreviewContactConstraint& contact, double closing_velocity_m_s,
+    double closing_acceleration_m_s2, const PreviewTrackerConfig& tracker,
+    double servo_period_sec);
+
 struct PreviewExecutionWorkerDiagnostics {
   std::array<std::uint64_t, 8> worker_status_counts{}, solve_status_counts{};
   std::uint64_t request_invalid{0}, request_mailbox_full{0}, request_coalesced{0};

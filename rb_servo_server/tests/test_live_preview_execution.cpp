@@ -36,6 +36,7 @@ RuckigFollowerConfig config(bool recovery=false,double leash_start=.025) {
   if(recovery)p.recovery={true,.25,3};
   auto& t=p.tracker;t.planning_dt_sec=.01;t.horizon_steps=24;
   t.max_linear_velocity_m_s=.6;t.max_linear_acceleration_m_s2=12;t.max_linear_jerk_m_s3=2000;
+  t.contact_slew_jerk_m_s3=400;t.trusted_future_sec=0;
   t.max_angular_velocity_rad_s=1.4;t.max_angular_acceleration_rad_s2=40;t.max_angular_jerk_rad_s3=4000;
   t.linear_tracking_scale_m=.01;t.angular_tracking_scale_rad=.03;
   t.jerk_weight=2000;t.jerk_difference_weight=.01;

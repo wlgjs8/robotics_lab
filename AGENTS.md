@@ -118,6 +118,22 @@ Do not create `config/local` launch variants. Change one reviewed setting at a
 time in the appropriate tracked stack config so the effective runtime profile
 remains visible and auditable.
 
+### Self-collision barrier observability (2026-09-15)
+
+`self_collision_clamp_count`, the `SelfCollision` verdict and `motion_state` only move
+when the projection removes more than 2 deg/s from an arm. A pair HELD at its floor does
+not look like that: the hold fold re-books the plan onto the held pose every tick, the
+per-tick correction stays near 1 deg/s, and a full scan of the 09-10..09-15 runs found
+60-95 % of held time reading as `Ok` / `Running` / `clamp +0` while 18-243 mm of
+commanded motion per episode was discarded. Do not judge "was the arm blocked" from
+those three. Use, in order: `<side>_barrier_held` / `_pair` / `_class` /
+`_held_folded_m` (servo CSV), `self_collision.barrier.<side>` (published state),
+`arms.<side>.barrier` (policy step log), the `[WARN] barrier HELD …` server line, or
+`rb_servo_server/tools/analyze_barrier_holds.py` after the fact. The rule itself lives
+in `control/barrier_status.hpp` (braking = a collision row with this arm in J that the
+request violated and the solve corrected; held = that row at its floor) and is covered
+by `test_barrier_status`.
+
 ## Force Control
 
 The current contract is [single-target force and preview](docs/reference/force_preview_single_target.md).
@@ -136,9 +152,18 @@ this revision is pending; historical hardware evidence does not qualify these ne
   Deleted rest/peak/peak-velocity keys and mixed schemas fail loading. No guessed migration.
 - Preview owns its force constraint once: feasible free candidate -> constrained QP,
   nominal-relative continuous closing bound, shared deadline, no unconstrained fallback.
-  Actual execution/splices/brakes are in wall time; lead leashes the future QP reference.
-  Only the current segment supplies committed future position demand. Unexecuted closing
-  travel is retired from the source, never clamped out of the physical command.
+  The bound is slewed from the dispatched closing state within
+  `tracker.contact_slew_jerk_m_s3` (never widened along the fastest brake: that demanded a
+  cut the 10 ms planning jerk could only meet by retreating - the 2.2 Hz floor bounce).
+  Actual execution/splices/brakes are in wall time; the SIGNED along-track lead
+  (`plan_lead_along_m`) leashes the future QP reference, a lagging plan is never leashed.
+  The follower forecast is trusted for `tracker.trusted_future_sec` (0.10 s, the execute
+  window; 0 = the selected segment only), then continued at constant velocity. Unexecuted
+  closing travel is retired from the source, never clamped out of the physical command.
+  A finite brake accepts a seed up to 25 % above a cap (it brakes, it does not fault).
+- A non-emergency latch delivers its decelerate-then-latch ramp under send policy
+  `fault_brake` until the sent velocity is zero, then goes silent (`fault_latched`);
+  emergency/backend/robot-state latches suppress immediately.
 - Hold, chunk and relative-goal SMD sources absorb yield. Literal PTP without SMD retains
   its explicit declined fold and deviation fence. Timeout/Hold from preview uses an
   accepted-state finite brake and must dispatch its terminal sample before releasing ownership.

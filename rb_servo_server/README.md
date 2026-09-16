@@ -110,6 +110,25 @@ python3 tools/plot_servo_log.py logs/servo_log.csv
 python3 tools/analyze_servo_log.py logs/servo_log.csv
 ```
 
+Find where the self-collision barrier slowed or HELD an arm (per episode, with the
+pair, the plan motion the hold fold discarded, and how much of it
+`self_collision_clamp_count` saw):
+
+```bash
+python3 tools/analyze_barrier_holds.py logs/servo_log.csv
+```
+
+`<side>_barrier_held` / `_braking` / `_pair` / `_class` / `_headroom_m` /
+`_held_episode_s` / `_held_count` / `_held_total_s` / `_braking_total_s` /
+`_held_folded_m` are the columns behind it (2026-09-15); the same status is in the
+published state under `self_collision.barrier.<side>`, in the policy step log under
+`arms.<side>.barrier`, and the server prints a `[WARN] barrier HELD …` line when an
+episode ends (or every 2 s while it lasts). It exists because a pair held AT its floor
+keeps the per-tick correction near 1 deg/s — under the 2 deg/s bar
+`self_collision_clamp_count`, the `SelfCollision` verdict and `motion_state` all use —
+so 60-95 % of held time used to read as a healthy run. Logs from before 2026-09-15 are
+reconstructed by the tool from the columns they do have.
+
 For direct rbpodo `request_data()` latency, record a bounded passive capture
 alongside the already-supervised server run (the capture command does not start
 the server or authorize motion):

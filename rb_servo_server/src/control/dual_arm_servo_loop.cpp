@@ -1412,6 +1412,13 @@ BackendCallSnapshot sendCallSnapshot(const SendServoJResult& result) {
     return snapshot;
 }
 
+// Which send policies actually put a servo_j on the wire. "fault_brake" is the
+// finite deceleration a non-emergency latch delivers before going silent
+// (see currentSendPolicy and the FAULT-HOLD RAMP in tick()).
+bool sendPolicyDelivers(const std::string& send_policy) {
+    return send_policy == "send_servo_j" || send_policy == "fault_brake";
+}
+
 BackendError suppressedSendError(const std::string& send_policy) {
     return backendError(
         BackendErrorKind::SuppressedByPolicy,
@@ -2797,6 +2804,10 @@ void DualArmServoLoop::loopMain() {
         bool fault_latched_before_send = false;
         std::string send_policy = "send_servo_j";
         bool send_suppressed = true;
+        // A delivered send books prev_sent/reference history. During the fault brake
+        // the latch is already set, so the flag below, not fault_latched_before_send,
+        // decides bookkeeping: the ramp can only progress if each step is booked.
+        bool booked_delivery = false;
         std::array<bool,2> top_send_history_booked{{false,false}};
         if (send_at_top) {
             // Re-evaluate the policy at dispatch time: a fault latched (or a
@@ -2805,12 +2816,14 @@ void DualArmServoLoop::loopMain() {
             // than "send_servo_j" without touching the sockets.
             fault_latched_before_send = fault_latched_.load();
             send_policy = currentSendPolicy();
-            if (!pending_top_send.valid && send_policy == "send_servo_j") {
+            if (!pending_top_send.valid && sendPolicyDelivers(send_policy)) {
                 // First tick(s) after start: nothing staged yet. Telemetry
                 // shows this as its own suppressed policy.
                 send_policy = "no_pending_target";
             }
-            send_suppressed = send_policy != "send_servo_j";
+            send_suppressed = !sendPolicyDelivers(send_policy);
+            booked_delivery = !send_suppressed &&
+                (!fault_latched_before_send || send_policy == "fault_brake");
             sent_target = pending_top_send.target;
             dual_send_result = sendTargets(
                 pending_top_send.target,
@@ -2840,14 +2853,12 @@ void DualArmServoLoop::loopMain() {
 #endif
             if (book_left_at_top||book_right_at_top) {
                 std::lock_guard<std::mutex> lock(state_mutex_);
-                if (book_left_at_top && dual_send_result.left.result.accepted &&
-                    !fault_latched_before_send && !send_suppressed) {
+                if (book_left_at_top && dual_send_result.left.result.accepted && booked_delivery) {
                     left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
                     left_prev_sent_q_deg_ = sent_target.left_q_target_deg;
                     top_send_history_booked[0]=true;
                 }
-                if (book_right_at_top && dual_send_result.right.result.accepted &&
-                    !fault_latched_before_send && !send_suppressed) {
+                if (book_right_at_top && dual_send_result.right.result.accepted && booked_delivery) {
                     right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
                     right_prev_sent_q_deg_ = sent_target.right_q_target_deg;
                     top_send_history_booked[1]=true;
@@ -3568,11 +3579,17 @@ void DualArmServoLoop::loopMain() {
         if (fault_latched_.load()) {
             const bool emergency = motion_state_.load() == ServerMotionState::EmergencyLatched;
             if (!emergency && filter_dt_sec > 0.0) {
+                // Returns true when the LAST DELIVERED sample already had zero
+                // velocity on every joint: prev_sent is only booked for delivered
+                // sends, so the zero-velocity terminal sample has reached the box
+                // before the brake window closes (2026-09-15 night).
                 const auto brake = [&](JointArray& target, const JointArray& prev,
                                        const JointArray& prevprev) {
                     JointArray stop = prev;
+                    bool moving = false;
                     for (int i = 0; i < kDof; ++i) {
                         const double v = (prev[i] - prevprev[i]) / filter_dt_sec;
+                        if (std::abs(v) > 1e-9) moving = true;
                         const double a = config_.safety.ddq_max_deg_s2[i];
                         const double dv = std::isfinite(a) && a > 0.0 ? a * filter_dt_sec : std::abs(v);
                         const double v_next = std::abs(v) <= dv ? 0.0 : v - std::copysign(dv, v);
@@ -3581,9 +3598,16 @@ void DualArmServoLoop::loopMain() {
                     const SafetyClampTelemetry ramp = safety_filter_.clampMotionDetailed(
                         stop, prev, prevprev, filter_dt_sec);
                     target = ramp.q_after_accel_limit_deg;
+                    return !moving;
                 };
-                brake(safe_target.left_q_target_deg, left_prev_sent_q_deg_, left_prevprev_sent_q_deg_);
-                brake(safe_target.right_q_target_deg, right_prev_sent_q_deg_, right_prevprev_sent_q_deg_);
+                const bool left_stopped =
+                    brake(safe_target.left_q_target_deg, left_prev_sent_q_deg_, left_prevprev_sent_q_deg_);
+                const bool right_stopped =
+                    brake(safe_target.right_q_target_deg, right_prev_sent_q_deg_, right_prevprev_sent_q_deg_);
+                if (fault_brake_active_.load() &&
+                    ((left_stopped && right_stopped) || loop_start >= fault_brake_deadline_ns_)) {
+                    fault_brake_active_.store(false);
+                }
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 left_fault_hold_q_deg_ = safe_target.left_q_target_deg;
                 right_fault_hold_q_deg_ = safe_target.right_q_target_deg;
@@ -3650,7 +3674,9 @@ void DualArmServoLoop::loopMain() {
         } else {
             fault_latched_before_send = fault_latched_.load();
             send_policy = currentSendPolicy();
-            send_suppressed = send_policy != "send_servo_j";
+            send_suppressed = !sendPolicyDelivers(send_policy);
+            booked_delivery = !send_suppressed &&
+                (!fault_latched_before_send || send_policy == "fault_brake");
             sent_target = attempted_target;
             dual_send_result = sendTargets(
                 attempted_target,
@@ -3687,7 +3713,7 @@ void DualArmServoLoop::loopMain() {
                 populateTcpPose(right_state, config_.right_mount);
             }
         }
-        if (left_ok && !fault_latched_before_send && !send_suppressed) {
+        if (left_ok && booked_delivery) {
             noteReferenceSupervisionSentTarget(
                 this,
                 config_,
@@ -3697,7 +3723,7 @@ void DualArmServoLoop::loopMain() {
                 sent_target.left_q_target_deg
             );
         }
-        if (right_ok && !fault_latched_before_send && !send_suppressed) {
+        if (right_ok && booked_delivery) {
             noteReferenceSupervisionSentTarget(
                 this,
                 config_,
@@ -3797,13 +3823,11 @@ void DualArmServoLoop::loopMain() {
 
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            if (!top_send_history_booked[0] && left_ok &&
-                !fault_latched_before_send && !send_suppressed) {
+            if (!top_send_history_booked[0] && left_ok && booked_delivery) {
                 left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
                 left_prev_sent_q_deg_ = sent_target.left_q_target_deg;
             }
-            if (!top_send_history_booked[1] && right_ok &&
-                !fault_latched_before_send && !send_suppressed) {
+            if (!top_send_history_booked[1] && right_ok && booked_delivery) {
                 right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
                 right_prev_sent_q_deg_ = sent_target.right_q_target_deg;
             }
@@ -4123,6 +4147,9 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_gripper_excluded =
                 safety_projection_telemetry_.selfcol_gripper_excluded;
             latest_snapshot_.self_collision_clamp_count = self_collision_clamp_count_;
+            // Per-arm barrier status/episode: clamp_count above is the >2 deg/s tick
+            // counter, which a held-and-folded pair never reaches (barrier_status.hpp).
+            latest_snapshot_.self_collision_barrier = safety_projection_telemetry_.barrier;
             // Telemetry "margin" is the hard floor the mesh barrier defends.
             latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.d_hard_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
@@ -6441,7 +6468,11 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             // which planLeashGate evaluates to 1.0 for the 0 passed here: the plan's
             // rotation uses the same future reference rate.
             leash.min_gate = rf.preview_execution.plan_lead_leash_min_gate;
-            lead_gate = control::planLeashGate(executor->telemetry().plan_lead_m, 0.0, leash);
+            // SIGNED LEAD (2026-09-15 night): only a plan AHEAD of its source along the
+            // source's motion is leashed. The unsigned distance leashed a lagging plan
+            // (18:25, 241-243 s) and the cursor backlog then hit its cap. A negative
+            // projection (behind) leaves planLeashGate at 1.
+            lead_gate = control::planLeashGate(executor->telemetry().plan_lead_along_m, 0.0, leash);
             executor->setReferenceRateGate(lead_gate);
         }
     }
@@ -8555,6 +8586,11 @@ ServoTarget DualArmServoLoop::applySafety(
     bool user_floor_engaged = false;   // a user-floor-plane row is within its engage band
     bool self_collision_hold = false;  // stale verdict -> whole-arm hold, skip solve
     bool collision_constraints_engaged = false;
+    // PER-ARM barrier status (2026-09-15, control/barrier_status.hpp): which arm the
+    // collision rows are braking or holding, filled by the solve below and consumed by
+    // the episode trackers after the hold fold.
+    std::array<control::ArmBarrierRows, 2> barrier_rows{};
+    double barrier_solver_correction_deg_s[2] = {0.0, 0.0};
     bool left_floor_engaged = false;
     bool right_floor_engaged = false;
     bool left_roi_engaged = false;
@@ -9341,6 +9377,17 @@ ServoTarget DualArmServoLoop::applySafety(
                 }
             }
         }
+        // PER-ARM barrier status, on the SAME rows this solve just ran (2026-09-15).
+        // The headroom/pair fields above are the tightest row of the whole solve; they
+        // cannot say which ARM is being braked, and a held arm's correction stays under
+        // the 2 deg/s bar below because the hold fold re-books its plan every tick.
+        barrier_rows = control::classifyBarrierRows(
+            safety_cons, safety_ctx[0].prev_sent_q_deg, safety_ctx[1].prev_sent_q_deg,
+            plan_gate_requested[0], plan_gate_requested[1],
+            proj.left_correction_deg_s, proj.right_correction_deg_s, dt_sec);
+        barrier_solver_correction_deg_s[0] = proj.left_correction_deg_s;
+        barrier_solver_correction_deg_s[1] = proj.right_correction_deg_s;
+
         // "Meaningfully blocked" (vs merely slowed while sliding) gates the windup
         // reanchor AND the safety verdict, so tangential motion stays Running and is
         // never frozen.
@@ -9629,6 +9676,79 @@ ServoTarget DualArmServoLoop::applySafety(
             book_force_only();
         }
     }
+    // ---- PER-ARM BARRIER EPISODES (2026-09-15) ----
+    // Run AFTER the hold fold so the episode can carry the plan motion that fold
+    // discarded. Diagnostics only: nothing below changes a target.
+    {
+        const auto pair_class_name = [](const CollisionNearPair& p) -> const char* {
+            if (p.external_box) return "external_box";
+            if (p.external) return "floor";
+            if (p.intra_arm) return "intra_arm";
+            if (p.gripper_gripper) return "gripper_gripper";
+            if (p.environment) return "environment";
+            if (p.arm_stand) return "arm_stand";
+            return "arm_arm";  // the self class with none of the above = arm <-> arm
+        };
+        for (int i = 0; i < 2; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i);
+            const ArmId arm_id = i == 0 ? ArmId::Left : ArmId::Right;
+            const control::ArmBarrierRows& rows = barrier_rows[idx];
+            control::BarrierTickInput in;
+            in.now_ns = safety_now_ns;
+            in.dt_s = dt_sec;
+            // A stale verdict holds BOTH arms at prev_sent (fail closed) without ever
+            // building a row, so it would otherwise leave no per-arm trace at all.
+            in.held = rows.held || self_collision_hold;
+            in.braking = rows.braking || self_collision_hold;
+            in.reason = self_collision_hold ? "stale_verdict" : (rows.braking ? "row" : "");
+            in.headroom_m = rows.headroom_m;
+            in.correction_deg_s = barrier_solver_correction_deg_s[idx];
+            in.folded_m = i == 0 ? safety_projection_telemetry_.left_hold_fold_m
+                                 : safety_projection_telemetry_.right_hold_fold_m;
+            if (rows.has_row) {
+                for (const CollisionNearPair& p : last_collision_verdict_.near) {
+                    const std::uint64_t key =
+                        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.geom_a)) << 32) |
+                        static_cast<std::uint32_t>(p.geom_b);
+                    if (key == rows.pair_key) {
+                        in.pair = p.name_a + " <-> " + p.name_b;
+                        in.klass = pair_class_name(p);
+                        break;
+                    }
+                }
+            }
+            control::BarrierEpisodeTracker& tracker = barrier_tracker_[idx];
+            const std::vector<control::BarrierEpisodeReport> reports = tracker.update(in);
+            if (tracker.heldEpisodeOpenedThisTick() && kinematics_) {
+                // Where the arm was when it got stuck, so the report can be walked to on
+                // the cell. Computed once per episode, never per tick.
+                try {
+                    const Pose6D tcp = kinematics_->computeTcpStand(
+                        arm_id, i == 0 ? out.left_q_target_deg : out.right_q_target_deg,
+                        i == 0 ? config_.left_mount : config_.right_mount);
+                    tracker.setHeldEpisodeStartTcp({tcp.x, tcp.y, tcp.z});
+                } catch (const std::exception&) {
+                    // FK refused: the episode still reports, just without a position.
+                }
+            }
+            for (const control::BarrierEpisodeReport& r : reports) {
+                std::cerr << control::formatBarrierReport(toString(arm_id), r) << "\n";
+            }
+            ArmBarrierTelemetry& t = safety_projection_telemetry_.barrier[idx];
+            t.braking = in.braking;
+            t.held = in.held;
+            t.reason = in.reason;
+            t.pair = in.pair;
+            t.klass = in.klass;
+            t.headroom_m = in.headroom_m;
+            t.held_episode_s = tracker.heldEpisodeS();
+            t.held_count = tracker.heldCount();
+            t.held_total_s = tracker.heldTotalS();
+            t.braking_total_s = tracker.brakingTotalS();
+            t.held_folded_m = tracker.heldFoldedM();
+        }
+    }
+
     // SAFETY PLAN GATE input: how much of the step an OBSTRUCTION removed. Both
     // attack and release are first-order, per arm. Consumed by
     // applyChunkFollowerStage on the NEXT tick (one-tick delay).
@@ -10188,7 +10308,7 @@ DualSendResult DualArmServoLoop::sendTargets(
     dispatch_request.dispatch_start_ns = dispatch_start_ns;
     dispatch_request.deadline_ns = deadline_ns;
 
-    if (send_policy != "send_servo_j") {
+    if (!sendPolicyDelivers(send_policy)) {
         const uint64_t suppressed_time_ns = nowSteadyNs();
         const BackendTiming timing = makeBackendTiming(suppressed_time_ns, suppressed_time_ns);
         const BackendError error = suppressedSendError(send_policy);
@@ -13189,6 +13309,18 @@ std::string DualArmServoLoop::currentSendPolicy() const {
     if (readOnlyMode()) {
         return "read_only";
     }
+    if (fault_latched_.load() && fault_brake_active_.load()) {
+        // DELIVER THE BRAKE BEFORE GOING SILENT (2026-09-15 night). The decelerate-
+        // then-latch ramp of 2026-09-10 was computed every tick but never reached the
+        // box: the latch tick already reported "fault_latched", sendTargets() dropped
+        // the ramp and prev_sent stopped being booked, so the box drained its FIFO and
+        // hard-stopped from whatever velocity it had (measured 18:25 and 18:30
+        // 2026-09-15: q_ref 65 and 31 deg/s to 0 across the queue's last point, 10-12 Hz
+        // 0.3 deg ringing, logged as 33.5k / 19.7k deg/s^2). The ramp is delivered
+        // under this policy until every joint's sent velocity is zero (or the derived
+        // deadline lapses); only then does the latch go silent.
+        return "fault_brake";
+    }
     if (fault_latched_.load() || state == ServerMotionState::FaultLatched) {
         return "fault_latched";
     }
@@ -13292,6 +13424,7 @@ bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right
 
     std::lock_guard<std::mutex> lock(state_mutex_);
     fault_latched_.store(false);
+    fault_brake_active_.store(false);
     fault_verdict_.store(SafetyVerdict::Ok);
     latched_fault_reason_.store(SafetyVerdict::Ok);
     fault_reason_.clear();
@@ -13372,7 +13505,36 @@ void DualArmServoLoop::latchFault(
     setMotionState(verdict == SafetyVerdict::EmergencyStop
         ? ServerMotionState::EmergencyLatched
         : ServerMotionState::FaultLatched);
-    std::cerr << "[WARN] fault latched: " << toString(verdict) << " - " << reason << "\n";
+    // Arm the delivered brake (see currentSendPolicy "fault_brake"). Bounded by the
+    // time the declared limits need to stop the fastest declared joint, twice, plus
+    // ten ticks: derived from safety.dq_max/ddq_max, not a separate constant.
+    double stop_sec = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        const double dq = config_.safety.dq_max_deg_s[i], ddq = config_.safety.ddq_max_deg_s2[i];
+        if (std::isfinite(dq) && std::isfinite(ddq) && dq > 0.0 && ddq > 0.0)
+            stop_sec = std::max(stop_sec, dq / ddq);
+    }
+    const bool brake = latched_fault_context_.has_value() && stop_sec > 0.0 &&
+        faultBrakeEligible(verdict, *latched_fault_context_);
+    fault_brake_deadline_ns_ = brake
+        ? addDeadlineNs(nowSteadyNs(), static_cast<uint64_t>((2.0 * stop_sec + 0.02) * 1e9))
+        : 0;
+    fault_brake_active_.store(brake);
+    std::cerr << "[WARN] fault latched: " << toString(verdict) << " - " << reason
+              << (brake ? " (delivering brake)" : "") << "\n";
+}
+
+bool DualArmServoLoop::faultBrakeEligible(SafetyVerdict verdict, const FaultContext& context) const {
+    // Only a software/safety-policy latch on a healthy, armed link keeps sending: an
+    // emergency keeps its widened instant ramp, and a backend/robot-state/transport
+    // fault has nothing reliable to send to.
+    if (verdict == SafetyVerdict::EmergencyStop) return false;
+    if (context.domain == FaultDomain::Emergency || context.domain == FaultDomain::Backend ||
+        context.domain == FaultDomain::RobotState) return false;
+    if (context.domain == FaultDomain::Command && context.suppress_regular_servo &&
+        context.robot_error_code != 0) return false;
+    if (context.robot_error_code != 0) return false;
+    return servo_stream_armed_.load(std::memory_order_relaxed);
 }
 
 void DualArmServoLoop::setMotionState(ServerMotionState state) {

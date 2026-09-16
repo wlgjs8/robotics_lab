@@ -28,6 +28,40 @@ struct PreviewTrackerConfig {
   double angular_tracking_scale_rad{0.03};
   double jerk_weight{0.02};
   double jerk_difference_weight{0.01};
+  // CONTACT AUTHORITY SLEW (2026-09-15 night). The contact envelope is g x the free
+  // candidate's own closing velocity, certified on 2 ms Bernstein controls, and the
+  // splice state is the dispatched one, so whenever g < 1 (or the authority fell between
+  // request and splice) the plan starts ABOVE its envelope. The worker used to widen the
+  // first few ms along the fastest brake (max jerk, zero in ~3 ms) and from there on the
+  // plan had to sit below g*v_nominal at every 2 ms control. Planning jerk is constant
+  // per 10 ms interval, so a 1 mm/s cut demanded 2 ms in costs j ~ -500 m/s^3 for the
+  // whole interval: -25 mm/s at 10 ms, -50 mm/s at 20 ms. Reproduced offline on the
+  // 2026-09-15 19:54 run's inputs (a 10 mm/s approach onto a descending reference):
+  // g=0.98 stalled it, g=0.9 turned it into a -69 mm/s retreat (+5.5 mm), g=0.5 into
+  // -183 mm/s; decomposed and coupled solves agree, so this is the problem posed, not
+  // the solver. Every replan then inherited the retreating splice, the nominal closing
+  // read 0 and the bound collapsed to 0 until the gate reopened - the 2.2 Hz floor
+  // bounce (15 impacts, 141 N) and the 3 N graze that retreated at 105 mm/s.
+  // The envelope is now slewed from the splice closing velocity to the authority along
+  // the smoothest two-interval jerk profile whose jerk stays within this value (longer
+  // slews for bigger cuts, capped by max_linear_jerk_m_s3 and the horizon), so the cut
+  // the QP must realise is one it can realise without overshoot. Positive, at most
+  // max_linear_jerk_m_s3; no default.
+  double contact_slew_jerk_m_s3{0.0};
+  // TRUSTED FUTURE (2026-09-15 night). How much of the follower's actual forecast the
+  // QP reference may use before it continues at constant velocity. 0 = only the
+  // currently selected segment (the 2026-09-15 evening rule; median 16 ms), so the
+  // remaining ~220 ms of the horizon was the extrapolation of ONE segment's end
+  // velocity. Chunk rows jitter by 1-2 mm at 33 ms, i.e. the segment-end velocity
+  // flips by +-50 mm/s row to row, and the executor chased that: measured on the
+  // 22:33 run, +-60..110 mm/s swings of the command around a source doing +-20 mm/s,
+  // 0.67-0.69 command/source path ratio on slow segments, 60-70 ms lag. The policy's
+  // committed window is execute_steps rows (4 x 33 ms); trusting the forecast for
+  // that long (minus the last row, whose central-difference velocity already reads
+  // the first uncommitted row) averages the jitter instead of extrapolating it.
+  // Rows beyond the window still cannot pull the command (they are not sampled).
+  // Nonnegative, at most the horizon; no default.
+  double trusted_future_sec{0.0};
   // REFERENCE TRUST (2026-09-10). The reference is the source rolled forward over the
   // whole horizon, but only its first ~100-133 ms is a chunk the policy has committed
   // to executing: everything past that is replaced by the next inference. Taking the

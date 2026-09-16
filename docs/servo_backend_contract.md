@@ -73,6 +73,14 @@ top-level cause.
 
 The servo loop must not keep sending regular `servo_j` while fault-latched, emergency-latched, or read-only. Suppression is explicit state, not a send failure.
 
+One bounded exception (2026-09-15 night): a non-emergency software latch (safety-policy,
+command or kinematics domain, no robot error code) first delivers its decelerate-then-latch
+ramp under `send_policy: "fault_brake"` (`send_suppressed: false`) until every joint's
+delivered velocity is zero, bounded by twice the declared `dq_max/ddq_max` stop time plus ten
+ticks; then it reports `fault_latched` and stays silent. Emergency, backend, robot-state and
+transport latches suppress immediately as before. Without this the box drained its FIFO and
+hard-stopped from the last delivered velocity (measured 65 and 31 deg/s, 10-12 Hz ringing).
+
 Expected fields include:
 
 ```json

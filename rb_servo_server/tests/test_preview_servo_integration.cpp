@@ -60,7 +60,7 @@ class MemoryBackend final:public IRobotBackend {
     if(refuse_next_){refuse_next_=false;SendServoJResult out;out.accepted=false;
       out.requested_q_deg=r.q_target_deg;out.acceptance_semantics="memory_refused";
       out.timing=makeBackendTiming(nowSteadyNs(),nowSteadyNs());return out;}
-    q_=r.q_target_deg;
+    if(!frozen_)q_=r.q_target_deg;
     SendServoJResult out;out.accepted=true;out.requested_q_deg=q_;
     out.acceptance_semantics="memory_applied";out.timing=makeBackendTiming(nowSteadyNs(),nowSteadyNs());return out;
   }
@@ -73,7 +73,11 @@ class MemoryBackend final:public IRobotBackend {
     BackendResult<RobotState> out;out.ok=connected_;out.op=op;out.value=s;
     out.timing=makeBackendTiming(nowSteadyNs(),nowSteadyNs());return out;
   }
-  ArmId arm_;JointArray q_;bool connected_{false},ready_{false},refuse_next_{false};uint64_t sequence_{0};
+  ArmId arm_;JointArray q_;bool connected_{false},ready_{false},refuse_next_{false},frozen_{false};uint64_t sequence_{0};
+ public:
+  // The arm stops following its commands (a stuck joint); the servo loop's tracking
+  // error must latch and the delivered brake must follow.
+  void freeze(){frozen_=true;}
 };
 
 DualArmConfig config(bool send_at_top,bool geometry=false){
@@ -455,5 +459,61 @@ void boundedRecoveryRetries(bool top) {
 }
 
 }
-int main(){try{sourceTimeoutDispatchesFiniteBrake(false);sourceTimeoutDispatchesFiniteBrake(true);exercise(false);exercise(true);oneArmAndRejectedTopDispatch();productionGeometryFoldMetadata(false);productionGeometryFoldMetadata(true);bimanualRecovery(false);bimanualRecovery(true);boundedRecoveryRetries(false);boundedRecoveryRetries(true);std::cout<<"preview servo integration PASS\n";return 0;}
+// DELIVERED FAULT BRAKE (2026-09-15 night). On the 18:25 and 18:30 accepted_deviation
+// latches the decelerate-then-latch ramp was computed but never sent: the latch tick
+// already suppressed regular servo_j and stopped booking prev_sent, so the box drained
+// its FIFO and hard-stopped from 65 / 31 deg/s with 10-12 Hz ringing. A software latch
+// must keep delivering the ramp (send policy "fault_brake") until the sent velocity is
+// zero on every joint, and only then go silent under "fault_latched".
+void faultBrakeDelivered(bool top){
+  Fixture f(top);
+  auto cmd=f.command(ControlMode::TcpPoseTarget);
+  for(int k=0;k<150;++k){if(k%25==0)f.frame(.003);f.tick(cmd);}   // ~90 mm/s along +x
+  f.left_backend->freeze();
+  int latch=-1;
+  for(int k=0;k<2000&&latch<0;++k){if(k%25==0)f.frame(.003);f.tick(cmd,true);if(f.snapshot.fault_latched)latch=k;}
+  require(latch>=0,"no software latch after the left arm stopped following");
+  require(f.snapshot.latched_fault_reason==SafetyVerdict::TrackingError||
+          f.snapshot.latched_fault_reason==SafetyVerdict::ChunkFollowerFault,
+          "unexpected latch kind: "+f.snapshot.fault_reason);
+  require(f.snapshot.motion_state==ServerMotionState::FaultLatched,"not a non-emergency latch");
+  // Walk the delivered sends after the latch: every delivered step decelerates each
+  // joint by at most ddq_max*dt, never accelerates, and the window closes silent.
+  const double dt=.002,ddq=f.cfg.safety.ddq_max_deg_s2[0]*dt;
+  const ServoSnapshot& before=f.recent[(f.recent_count-2)%f.recent.size()];
+  JointArray prev=before.left_sent_q_deg,last=f.snapshot.left_sent_q_deg;
+  std::array<double,kDof> v{};for(int i=0;i<kDof;++i)v[i]=(last[i]-prev[i])/dt;
+  double peak=0;for(double x:v)peak=std::max(peak,std::abs(x));
+  require(peak>1.,"fixture did not latch while moving (peak sent velocity "+std::to_string(peak)+" deg/s)");
+  int brake_ticks=0,silent_at=-1;bool saw_brake=false;
+  for(int k=0;k<200&&silent_at<0;++k){
+    f.tick(cmd,true,false);
+    if(f.snapshot.send_policy=="fault_brake"){
+      require(!f.snapshot.send_suppressed,"fault_brake must deliver");saw_brake=true;++brake_ticks;
+      const JointArray q=f.snapshot.left_sent_q_deg;
+      for(int i=0;i<kDof;++i){
+        const double v_next=(q[i]-last[i])/dt;
+        require(std::abs(v_next)<=std::abs(v[i])+1e-6,"brake accelerated joint "+std::to_string(i));
+        require(std::abs(v_next-v[i])<=ddq+1e-6,"brake step exceeded ddq_max on joint "+std::to_string(i));
+        v[i]=v_next;
+      }
+      last=q;
+    } else {
+      require(f.snapshot.send_policy=="fault_latched"&&f.snapshot.send_suppressed,
+              "unexpected policy after latch: "+f.snapshot.send_policy);
+      silent_at=k;
+    }
+  }
+  require(saw_brake,"the brake was never delivered");
+  require(silent_at>=0,"the brake window never closed");
+  double residual=0;for(double x:v)residual=std::max(residual,std::abs(x));
+  require(residual<1e-6,"went silent before the sent velocity reached zero ("+std::to_string(residual)+" deg/s)");
+  require(brake_ticks<=static_cast<int>((2.*f.cfg.safety.dq_max_deg_s[0]/f.cfg.safety.ddq_max_deg_s2[0]+.02)/dt)+2,
+          "brake window outlived its derived deadline");
+  // Silence is sticky: no later tick re-opens the wire.
+  for(int k=0;k<20;++k){f.tick(cmd,true,false);require(f.snapshot.send_suppressed,"silence must be sticky");}
+  std::cout<<"fault brake top="<<top<<" delivered over "<<brake_ticks<<" ticks from "<<peak<<" deg/s\n";
+}
+
+int main(){try{faultBrakeDelivered(false);faultBrakeDelivered(true);sourceTimeoutDispatchesFiniteBrake(false);sourceTimeoutDispatchesFiniteBrake(true);exercise(false);exercise(true);oneArmAndRejectedTopDispatch();productionGeometryFoldMetadata(false);productionGeometryFoldMetadata(true);bimanualRecovery(false);bimanualRecovery(true);boundedRecoveryRetries(false);boundedRecoveryRetries(true);std::cout<<"preview servo integration PASS\n";return 0;}
   catch(const std::exception& e){setExternalSteadyNs(0);std::cerr<<e.what()<<'\n';return 1;}}

@@ -49,6 +49,7 @@ add_library(rb_servo_core
     src/control/delta_twist_follower.cpp
     src/math/se3.cpp
     src/control/collision_monitor.cpp
+    src/control/barrier_status.cpp
     src/control/init_motion_planner.cpp
     src/control/dual_arm_servo_loop.cpp
     src/network/chunk_frame_receiver.cpp
@@ -321,6 +322,10 @@ if(BUILD_TESTING)
     add_executable(test_projection_release tests/test_projection_release.cpp)
     target_link_libraries(test_projection_release PRIVATE rb_servo_core)
     add_test(NAME projection_release COMMAND test_projection_release)
+
+    add_executable(test_barrier_status tests/test_barrier_status.cpp)
+    target_link_libraries(test_barrier_status PRIVATE rb_servo_core)
+    add_test(NAME barrier_status COMMAND test_barrier_status)
 
     add_executable(test_user_floor_constraint tests/test_user_floor_constraint.cpp)
     target_link_libraries(test_user_floor_constraint PRIVATE rb_servo_core)

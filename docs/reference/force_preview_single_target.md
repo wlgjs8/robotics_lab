@@ -102,17 +102,35 @@ noise statistics. No online bias adaptation or automatic contact tare was added.
    adjacent maxima form a continuous piecewise-linear envelope. It is slightly conservative in
    allowing velocity, not an equality to raw follower velocity. At `g -> 1`, the result approaches
    the same nominal optimum. At `g=0` the steady closing bound is zero.
-3. A newly tightened bound cannot instantaneously stop existing momentum. The existing finite
-   acceleration/jerk brake envelope widens the initial authority only as required by that seed.
+3. A newly tightened bound cannot instantaneously stop existing momentum. Since 2026-09-15
+   night the authority is **slewed** from the dispatched closing state (velocity and
+   acceleration along the normal) to the envelope along the smoothest two-planning-interval
+   jerk profile within `tracker.contact_slew_jerk_m_s3` (400 m/s^3; longer slews for larger
+   cuts, escalating to the physical jerk limit only if that fails), then follows the envelope.
+   The earlier widening along the fastest brake reached zero in ~3 ms and, because the
+   planning jerk is constant per 10 ms interval, demanded a cut the QP could only meet by
+   overshooting into a retreat: reproduced offline on the 19:54 run's inputs, `g=0.9` alone
+   turned a 10 mm/s approach into a -69 mm/s retreat, `g=0.5` into -183 mm/s, and each replan
+   inherited it (the 2.2 Hz floor bounce, 141 N). With the slew both stay within a few mm/s of
+   `g` times the free candidate (`test_preview_execution_worker`, contact slew case).
    Rejected/late contact solves never fall back to an unconstrained command. Both solves share
    the original splice deadline, with one servo period reserved for delivery/admission.
-4. Only the currently selected follower segment can create future positional demand. Beyond it,
-   reference construction uses that prefix endpoint's constant-velocity continuation. Unselected
-   later chunk rows cannot pull the current command far forward. Full forecast stays diagnostic
+4. The follower's actual forecast is trusted for `tracker.trusted_future_sec` (0.10 s = three
+   rows of the four-row execute window; `0` restores the 2026-09-15 evening rule of the selected
+   segment only). Beyond it, reference construction uses that prefix endpoint's constant-velocity
+   continuation. The one-segment rule extrapolated a single segment's end velocity over ~220 ms;
+   chunk rows jitter 1-2 mm per 33 ms, so the executor swung +-60..110 mm/s around a +-20 mm/s
+   source and attenuated slow segments to 0.67-0.69 of the source path (22:33 run). Rows beyond
+   the trusted window still cannot pull the current command. Full forecast stays diagnostic
    for phase tracking. `execute_steps` is a publisher cadence, not proof later rows are committed.
 5. **All accepted trajectories, derivatives, splices and brakes use wall seconds.** Plan lead
    reduces the future reference rate inside the QP (`reference_rate_gate`); it does not scale
-   output sample time. This replaces the draft's variable-clock derivative approach and removes
+   output sample time. Since 2026-09-15 night the leash reads the **signed** lead
+   `plan_lead_along_m` (the plan-minus-source offset projected onto the source's direction of
+   travel, 0 when the source is below the cursor velocity floor); the unsigned `plan_lead_m`
+   stays as diagnostics. The norm had leashed a plan that was BEHIND its source (18:25 run,
+   241-243 s: every leash-limited tick was behind, cursor backlog at its 100 ms cap, three
+   recovery brakes). This replaces the draft's variable-clock derivative approach and removes
    its `g_dot`/`g_ddot` mismatch entirely. Legacy `plan_clock_gate` telemetry is always 1.
 6. Removed closing travel is integrated from nominal-minus-constrained velocity and retired
    from the raw source only. Physical output is never position-clamped for this retirement.
@@ -140,6 +158,31 @@ noise statistics. No online bias adaptation or automatic contact tare was added.
   During this finite brake the same force integrator may compose a fenced deviation; Hold takes
   the fold after stopping. Fault/E-stop/invalid-state handling keeps its own stronger veto.
 
+## Brake seed headroom and cursor rotation band
+
+A finite brake starts from the dispatched sample, which can sit exactly on a cap. On the
+22:33 run the policy asked for a wrist rotation beyond the 1.4 rad/s angular cap; the plan
+rode the cap, three solves came back infeasible, the plan expired and the brake seed was
+refused by 1e-7 (`brake_initial_outside_limits`), turning the expiry brake into a
+ChunkFollowerFault. Since 2026-09-15 night a seed up to 25 % above a velocity or acceleration
+cap is braked, certified against max(cap, what the seed already does); beyond that it is still
+refused. The same run showed the preview cursor's 2-5.7 deg rotation band slowing the reference
+clock to its 0.25 floor while the tracker was saturated in rotation, filling the 100 ms backlog
+in 130 ms and forcing a recovery stop/restart; on the preview profile that band is now
+10-30 deg (`plan_leash_start_rad`/`plan_leash_full_rad`, cursor-only there).
+
+## Fault stop delivery
+
+A non-emergency latch (accepted deviation, tracking error, chunk-follower fault) keeps
+sending its decelerate-then-latch ramp under send policy `fault_brake` until every joint's
+delivered velocity is zero, bounded by twice the declared `dq_max/ddq_max` stop time plus ten
+ticks, and only then goes silent under `fault_latched`. Before 2026-09-15 night the ramp was
+computed but never delivered: the latch tick already suppressed regular `servo_j` and
+stopped booking `prev_sent`, so the box drained its FIFO and hard-stopped from 65 and 31 deg/s
+(18:30 and 18:25 runs; 10-12 Hz ringing logged as 33.5k / 19.7k deg/s^2). Emergency,
+backend, robot-state and transport latches keep their immediate suppression. Covered by
+`test_preview_servo_integration` (fault brake, both send orders).
+
 ## Diagnostics and offline validation
 
 New force fields: `target_force_n`, `contact_confidence`, `physical_gate`. Existing `gate_m_eff` and
@@ -148,7 +191,8 @@ New force fields: `target_force_n`, `contact_confidence`, `physical_gate`. Exist
 
 New preview CSV fields include reference rate, nominal closing velocity, accepted contact bound
 and its normal, executed closing velocity, retired source advance, nominal solve time, trusted
-prefix length, source stop requests and **completed terminal dispatches**. Existing accepted seed,
+prefix length, source stop requests, **completed terminal dispatches** and, since 2026-09-15
+night, the signed `plan_lead_along_m`. Existing accepted seed,
 worker/result identity, deadline and final-safety telemetry remain available. UDP stays a compact
 summary; detailed forensic fields are CSV-only to preserve packet size and safety-state precision.
 

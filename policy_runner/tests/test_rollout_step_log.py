@@ -184,6 +184,63 @@ class RolloutStepLoggerTest(unittest.TestCase):
         self.assertAlmostEqual(record["arms"]["right"]["gripper_proprio_pct"], 0.0)
         self.assertEqual(record["arms"]["right"]["gripper_proprio_source"], "hybrid_free")
 
+    def test_barrier_status_is_recorded_per_arm(self) -> None:
+        # Until 2026-09-15 a rollout log could not say the guard had stopped the arm:
+        # the server holds a pair at its floor, the hold fold re-books the plan every
+        # tick so the correction stays under the 2 deg/s bar the clamp counter uses, and
+        # from this side the step just did not happen.
+        payload = _state_payload()
+        payload["self_collision"] = {
+            "clamp_count": 0,
+            "barrier": {
+                "left": {
+                    "braking": True,
+                    "held": True,
+                    "reason": "row",
+                    "pair": "left_link6_0 <-> right_pika_gripper_base",
+                    "class": "arm_arm",
+                    "headroom_m": -0.00002,
+                    "held_episode_s": 1.57,
+                    "held_count": 3,
+                    "held_total_s": 4.2,
+                    "braking_total_s": 6.1,
+                    "held_folded_m": 0.0213,
+                },
+                "right": {"braking": False, "held": False, "reason": None, "pair": None,
+                          "class": None, "headroom_m": None, "held_episode_s": 0.0,
+                          "held_count": 0, "held_total_s": 0.0, "braking_total_s": 0.0,
+                          "held_folded_m": 0.0},
+            },
+        }
+        record = build_rollout_step_record(
+            state_payload=payload, command_intent=None, conditioned_targets=None,
+            raw_delta_ee_local=None, gripper_cmd_pct=None, chunk_id=1,
+            chunk_step_index=0, stall=False, hold=False, inference_latency_ms=None,
+            t_mono=1.0, t_wall=2.0,
+        )
+        left = record["arms"]["left"]["barrier"]
+        self.assertTrue(left["held"] and left["braking"])
+        self.assertEqual(left["class"], "arm_arm")
+        self.assertAlmostEqual(left["headroom_mm"], -0.02)
+        self.assertAlmostEqual(left["held_episode_s"], 1.57)
+        self.assertAlmostEqual(left["held_folded_mm"], 21.3)
+        self.assertEqual(left["held_count"], 3)
+        right = record["arms"]["right"]["barrier"]
+        self.assertFalse(right["held"] or right["braking"])
+        self.assertIsNone(right["pair"])
+
+    def test_barrier_status_absent_is_null_not_a_claim_of_no_hold(self) -> None:
+        # An older server publishes no barrier block. Recording False there would read
+        # as "the barrier was not acting", which is exactly the wrong claim to invent.
+        record = build_rollout_step_record(
+            state_payload=_state_payload(), command_intent=None,
+            conditioned_targets=None, raw_delta_ee_local=None, gripper_cmd_pct=None,
+            chunk_id=1, chunk_step_index=0, stall=False, hold=False,
+            inference_latency_ms=None, t_mono=1.0, t_wall=2.0,
+        )
+        self.assertIsNone(record["arms"]["left"]["barrier"])
+        self.assertIsNone(record["arms"]["right"]["barrier"])
+
     def test_gripper_proprio_absent_records_null_not_a_guess(self) -> None:
         record = build_rollout_step_record(
             state_payload=_state_payload(), command_intent=None,

@@ -83,29 +83,44 @@ bool physicalAngularDerivatives(){
   CHECK((stand_acceleration_derivative-mid.angular_jerk_stand).norm()<.01);
   CHECK((rmid*mid.angular_velocity_body).allFinite());return true;
 }
-bool refuseWithoutClipping(){
+bool seedHeadroomBrakesWithoutClipping(){
+  // 2026-09-15 night: a seed on or slightly above a cap is BRAKED, never refused (the
+  // refusal turned an expiry brake at the 1.4 rad/s cap into a hard-stop fault); the
+  // seed is never clipped; beyond the 25 % headroom the seed is garbage and refused.
   PreviewBrake brake(config(),.002);auto s=moving();CHECK(brake.start(s)==PreviewBrakeStatus::Ready);
-  s.linear_velocity.x()=.601;CHECK(brake.start(s)==PreviewBrakeStatus::InitialOutsideLimits);
-  PreviewMotionSample out;CHECK(!brake.sample(0.,out));
+  PreviewMotionSample out;
+  s.linear_velocity.x()=.601;CHECK(brake.start(s)==PreviewBrakeStatus::Ready);
+  CHECK(brake.sample(0.,out));CHECK(same(out,s));
+  {
+    double previous=std::abs(out.linear_velocity.x());
+    for(double t=.004;t<=brake.durationSec();t+=.004) {
+      CHECK(brake.sample(t,out));CHECK(std::abs(out.linear_velocity.x())<=previous+1e-9);
+      previous=std::abs(out.linear_velocity.x());
+    }
+  }
+  s.linear_velocity.x()=.6*1.25+.01;CHECK(brake.start(s)==PreviewBrakeStatus::InitialOutsideLimits);
+  CHECK(!brake.sample(0.,out));
   s=moving();s.linear_velocity.x()=.599;s.linear_acceleration.x()=10.;
-  CHECK(brake.start(s)==PreviewBrakeStatus::InitialOutsideLimits); // unavoidable speed overshoot
+  CHECK(brake.start(s)==PreviewBrakeStatus::Ready); // the unavoidable overshoot is braked, not refused
+  CHECK(brake.sample(0.,out));CHECK(same(out,s));
   s=moving();s.angular_velocity_body={1.,0.,0.};
   CHECK(s.angular_velocity_body.norm()<config().max_angular_velocity_rad_s);
   CHECK(brake.start(s)==PreviewBrakeStatus::Ready); // same norm budget, rotated chart
   CHECK(brake.sample(0.,out));CHECK(same(out,s));
   s=moving();s.angular_velocity_body={1.401,0.,0.};
-  CHECK(brake.start(s)==PreviewBrakeStatus::InitialOutsideLimits); // physical norm cannot fit either chart
-  s=moving();s.angular_velocity_body={1.2,0.,0.};s.angular_acceleration_body={0.,38.,0.};
-  CHECK(brake.start(s)==PreviewBrakeStatus::InitialOutsideLimits); // balancing omega cannot fit this alpha
+  CHECK(brake.start(s)==PreviewBrakeStatus::Ready); // ON the cap: brake from it
+  CHECK(brake.sample(0.,out));CHECK(same(out,s));
+  s=moving();s.angular_velocity_body={config().max_angular_velocity_rad_s*1.3,0.,0.};
+  CHECK(brake.start(s)==PreviewBrakeStatus::InitialOutsideLimits); // beyond the headroom
   s=moving();s.angular_acceleration_body.setZero();
   s.angular_velocity_body.setConstant(config().max_angular_velocity_rad_s/std::sqrt(3.)+.8*config().feasibility_tolerance);
-  CHECK(s.angular_velocity_body.cwiseAbs().maxCoeff()<config().max_angular_velocity_rad_s/std::sqrt(3.)+config().feasibility_tolerance);
   CHECK(s.angular_velocity_body.norm()>config().max_angular_velocity_rad_s+config().feasibility_tolerance);
-  CHECK(brake.start(s)==PreviewBrakeStatus::InitialOutsideLimits);
+  CHECK(brake.start(s)==PreviewBrakeStatus::Ready);
   s=moving();s.pose.rx=std::numeric_limits<double>::quiet_NaN();
   CHECK(brake.start(s)==PreviewBrakeStatus::InvalidInitialState);
   auto invalid=config();invalid.max_linear_jerk_m_s3=0.;bool threw=false;
   try{PreviewBrake bad(invalid,.002);}catch(const std::invalid_argument&){threw=true;}CHECK(threw);
+
   s=moving();s.linear_velocity.setZero();s.linear_acceleration.setZero();
   s.angular_velocity_body.setZero();s.angular_acceleration_body.setZero();
   CHECK(brake.start(s)==PreviewBrakeStatus::Ready);CHECK(brake.durationSec()==0.);
@@ -325,7 +340,7 @@ bool balancedAngularChartPreservesPhysicalMotion(){
 }
 }
 int main(){
-  if(!finiteStopAndLimits()||!physicalAngularDerivatives()||!refuseWithoutClipping()||!exportShiftAndNoAllocation()||
+  if(!finiteStopAndLimits()||!physicalAngularDerivatives()||!seedHeadroomBrakesWithoutClipping()||!exportShiftAndNoAllocation()||
      !variedReuseMatchesFreshCalculator()||!velocityModeUnusedPositionTargetCannotChangeChartBound()||
      !angularContinuationDeadlinesAndFolds()||!balancedAngularChartPreservesPhysicalMotion())return 1;
   std::cout<<"Preview brake tests passed\n";return 0;

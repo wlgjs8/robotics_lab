@@ -8,66 +8,32 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 
 namespace rb_servo::control {
-namespace {
-// The dispatched closing velocity may sit above the knot-0 authority while the
-// executor's contact slew is mid-ramp. The authority is widened to
-// max(authority, ramp) where ramp is the FASTEST brake of that residual the QP can
-// realise: piecewise-constant jerk on the planning grid, jerk capped so the
-// acceleration box is met at each planning-interval end, i.e. exactly what the
-// tracker's Bernstein controls can do. The ramp's Bernstein/chord margin (j h^2 / 4
-// on the servo grid) is added only while the ramp is positive, its zero time and every
-// authority crossing are inserted as exact knots, so nothing beyond that
-// physically forced residual is admitted. Returns false on knot overflow.
-bool widenContactAuthorityWithRamp(PreviewContactConstraint& contact,double v0,double decel0,
-                                   const PreviewTrackerConfig& tracker,double servo_period_sec) {
+bool slewContactAuthority(PreviewContactConstraint& contact,double v0,double a0,
+                          const PreviewTrackerConfig& tracker,double servo_period_sec) {
+  // WHY A SLEW AND NOT THE FASTEST BRAKE (2026-09-15 night). The envelope is g x the
+  // free candidate's own closing controls and the splice is the dispatched state, so at
+  // g < 1 the plan starts above its bound by (1-g) v0. The previous widening followed
+  // the fastest brake (max jerk): it reached zero in ~3 ms and from there the plan had
+  // to be under g*v_nominal at every 2 ms control. With jerk constant per planning
+  // interval, a 1 mm/s cut required within 2 ms costs ~-500 m/s^3 for the whole 10 ms
+  // (-25 mm/s), the acceleration must then be unwound over the next interval (-50 mm/s
+  // at 20 ms), and each replan started from that retreat. Offline on the 19:54 run's
+  // inputs: g=0.9 alone turned a 10 mm/s approach into -69 mm/s. The bound now leaves
+  // the splice state along the two-interval profile below, whose jerk the QP can
+  // spend without overshoot, and only then follows the envelope.
   using Knot=PreviewContactConstraint::Knot;
   const double a_max=tracker.max_linear_acceleration_m_s2,j_max=tracker.max_linear_jerk_m_s3;
+  const double j_soft=tracker.contact_slew_jerk_m_s3;
   const double h_plan=tracker.planning_dt_sec,h=servo_period_sec;
-  if(!(v0>=0.0)||!(a_max>0.0)||!(j_max>0.0)||!(h_plan>0.0)||!(h>0.0))return false;
-  // The tracker certifies contact rows on Bernstein controls per servo sub-interval:
-  // the middle control of a quadratic velocity piece sits |j| h^2 / 8 ABOVE the
-  // curve, and the curve's chord between knots sits |j| h^2 / 8 below it, so a
-  // brake at full jerk needs j h^2 / 4 of headroom on a piecewise-linear envelope.
-  const double margin=j_max*h*h/4.0;
-  // Piecewise profile of the fastest realisable brake: (t_k, v_k, a_k, j_k).
-  struct Piece { double t,v,a,j; };
-  std::array<Piece,PreviewTrajectoryTracker::kMaxHorizonSteps+2> pieces{};
-  std::size_t piece_count=0;
-  double t_zero=-1.0;
-  {
-    // decel0 < 0 = the splice is still ACCELERATING into the contact; the fastest
-    // brake first has to bring that acceleration down through zero.
-    double t=0.0,v=v0,a=std::clamp(decel0,-a_max,a_max);
-    const double horizon=contact.knots[contact.count-1].time_sec;
-    while(t<=horizon && piece_count<pieces.size()) {
-      const double j=std::min(j_max,(a_max-a)/h_plan);
-      pieces[piece_count++]={t,v,a,j};
-      // zero crossing inside this interval: v - a s - j s^2 / 2 = 0
-      double s_zero=-1.0;
-      if(j>0.0) {
-        const double disc=a*a+2.0*j*v;
-        if(disc>=0.0)s_zero=(-a+std::sqrt(disc))/j;
-      } else if(a>0.0) s_zero=v/a;
-      if(s_zero>=0.0 && s_zero<=h_plan) {t_zero=t+s_zero;break;}
-      v-=a*h_plan+0.5*j*h_plan*h_plan;a+=j*h_plan;t+=h_plan;
-    }
-  }
-  if(piece_count==0)return false;
-  const auto ramp=[&](double t) {
-    // The zero knot itself keeps the margin: the fastest brake reaches it with
-    // the acceleration box exactly tight, and an envelope that is also exactly
-    // tight there leaves the QP no numerical slack (measured: 9 um/s over a 0.1
-    // um/s tolerance -> Infeasible). One servo knot later the bound is 0.
-    if(t_zero>=0.0 && t>t_zero+1e-12)return 0.0;
-    std::size_t k=0;
-    while(k+1<piece_count && pieces[k+1].t<=t)++k;
-    const double s=t-pieces[k].t;
-    return std::max(0.0,pieces[k].v-pieces[k].a*s-0.5*pieces[k].j*s*s)+margin;
-  };
+  if(!std::isfinite(v0)||!std::isfinite(a0)||!(a_max>0.0)||!(j_max>0.0)||!(j_soft>0.0)||j_soft>j_max||
+     !(h_plan>0.0)||!(h>0.0)||!contact.enabled||contact.count<2||contact.count>contact.knots.size())return false;
+  const double horizon=contact.knots[contact.count-1].time_sec;
+  if(!(horizon>0.0))return false;
   const auto bound=[&](double t) {
     std::size_t hi=1;
     while(hi+1<contact.count && contact.knots[hi].time_sec<t)++hi;
@@ -75,15 +41,61 @@ bool widenContactAuthorityWithRamp(PreviewContactConstraint& contact,double v0,d
     const double u=std::clamp((t-a.time_sec)/(b.time_sec-a.time_sec),0.0,1.0);
     return (1.0-u)*a.upper_velocity_m_s+u*b.upper_velocity_m_s;
   };
-  // Merged knot times: the original grid plus the ramp's zero time.
+  // Two-interval profile: jerk j1 for tau, then j2 for tau (T = 2 tau, tau a whole
+  // number of planning intervals) from (v0, a0) to (v_T, a_T):
+  //   a_T = a0 + (j1 + j2) tau
+  //   v_T = v0 + 1.5 a0 tau + 0.5 a_T tau + j1 tau^2
+  // The landing point is the envelope at T with the envelope's own slope, unless the
+  // plan's free coast v0 + a0 t is already under the envelope there, in which case the
+  // coast itself is the profile (j1 = j2 = 0) and only the max with the envelope
+  // shapes the bound. The shortest T whose jerks fit the soft cap wins; the physical
+  // cap is a last resort before refusing the request.
+  const int max_m=std::max(1,static_cast<int>(std::floor(horizon/(2.0*h_plan)+1e-9)));
+  double tau=0.0,T=0.0,j1=0.0,j2=0.0;bool found=false;
+  for(const double j_cap:{j_soft,j_max}) {
+    for(int m=1;m<=max_m && !found;++m) {
+      tau=m*h_plan;T=2.0*tau;
+      const double free_T=v0+a0*T,env_T=bound(T);
+      double v_T,a_T;
+      if(free_T<=env_T) {v_T=free_T;a_T=a0;}
+      else {
+        v_T=env_T;
+        const double t_next=std::min(T+h,horizon);
+        a_T=t_next>T?std::clamp((bound(t_next)-env_T)/(t_next-T),-a_max,a_max):0.0;
+      }
+      j1=(v_T-v0-1.5*a0*tau-0.5*a_T*tau)/(tau*tau);
+      j2=(a_T-a0)/tau-j1;
+      const double a_mid=a0+j1*tau;
+      if(std::isfinite(j1)&&std::isfinite(j2)&&std::abs(j1)<=j_cap&&std::abs(j2)<=j_cap&&
+         std::abs(a_mid)<=a_max&&std::abs(a_T)<=a_max)found=true;
+    }
+    if(found)break;
+  }
+  if(!found)return false;
+  const auto profile=[&](double t,double& jerk_at) {
+    if(t<=tau) {jerk_at=j1;return v0+a0*t+0.5*j1*t*t;}
+    const double v_tau=v0+a0*tau+0.5*j1*tau*tau,a_tau=a0+j1*tau,s=t-tau;
+    jerk_at=j2;return v_tau+a_tau*s+0.5*j2*s*s;
+  };
+  // The tracker certifies contact rows on Bernstein controls per servo sub-interval:
+  // the middle control of a quadratic velocity piece sits |j| h^2 / 8 above the curve
+  // and the chord between knots |j| h^2 / 8 below it, so a piecewise-linear envelope
+  // needs j h^2 / 4 of headroom for the plan to follow the profile exactly.
+  const auto slew=[&](double t) {
+    if(t>T+1e-12)return -std::numeric_limits<double>::infinity();
+    double jerk_at=0.0;const double v=profile(std::min(t,T),jerk_at);
+    return std::max(v,0.0)+std::abs(jerk_at)*h*h/4.0;
+  };
+  // Merged knot times: the original grid, T itself, and every envelope/slew crossing.
   std::array<double,PreviewContactConstraint::kCapacity> times{};
-  std::size_t time_count=0;
+  std::size_t time_count=0;bool inserted_T=false;
   for(std::size_t k=0;k<contact.count;++k) {
     const double t=contact.knots[k].time_sec;
-    if(t_zero>=0.0 && time_count>0 && times[time_count-1]<t_zero && t_zero<t) {
+    if(!inserted_T && t>T+1e-12) {
       if(time_count>=times.size())return false;
-      times[time_count++]=t_zero;
+      times[time_count++]=T;inserted_T=true;
     }
+    if(std::abs(t-T)<=1e-12)inserted_T=true;
     if(time_count>=times.size())return false;
     times[time_count++]=t;
   }
@@ -93,23 +105,21 @@ bool widenContactAuthorityWithRamp(PreviewContactConstraint& contact,double v0,d
     if(count>=out.size())return false;
     out[count++]={t,upper};return true;
   };
+  double prev_t=0.0,prev_d=0.0;bool have_prev=false;
   for(std::size_t k=0;k<time_count;++k) {
-    const double tb=times[k],rb=ramp(tb),bb=bound(tb);
-    if(k>0) {
-      const double ta=times[k-1],ra=ramp(ta),ba=bound(ta);
-      const double da=ra-ba,db=rb-bb;
-      if((da>0.0)!=(db>0.0) && da!=db) {
-        const double u=da/(da-db);
-        const double tc=ta+u*(tb-ta);
-        if(tc>ta && tc<tb && !push(tc,ba+u*(bb-ba)))return false;
-      }
+    const double t=times[k],bb=bound(t),sb=slew(t);
+    const bool finite=std::isfinite(sb);
+    const double d=finite?sb-bb:-1.0;
+    if(have_prev && finite && (prev_d>0.0)!=(d>0.0) && prev_d!=d) {
+      const double u=prev_d/(prev_d-d),tc=prev_t+u*(t-prev_t);
+      if(tc>prev_t && tc<t && !push(tc,bound(tc)))return false;
     }
-    if(!push(tb,std::max(bb,rb)))return false;
+    if(!push(t,std::max(bb,finite?sb:bb)))return false;
+    prev_t=t;prev_d=d;have_prev=finite;
   }
   contact.knots=out;contact.count=count;
   return true;
 }
-}  // namespace
 namespace {
 using Clock = std::chrono::steady_clock;
 enum class SlotState : unsigned char { Free, Writing, Ready, Reading };
@@ -303,7 +313,11 @@ struct PreviewExecutionWorker::Impl {
         !positive(cfg.max_request_age_sec) || cfg.poll_period_sec >= cfg.max_request_age_sec ||
         cfg.max_snapshot_horizon == 0 || cfg.max_snapshot_horizon > 256 ||
         (tracker.durationSec() + cfg.max_request_age_sec)/cfg.servo_period_sec + 2 > kMaxFutureSamples ||
-        2*(std::ceil(tracker.durationSec()/cfg.servo_period_sec)+2)-1>PreviewContactConstraint::kCapacity)
+        2*(std::ceil(tracker.durationSec()/cfg.servo_period_sec)+2)-1>PreviewContactConstraint::kCapacity ||
+        !(tracker.config().contact_slew_jerk_m_s3 > 0.0) ||
+        tracker.config().contact_slew_jerk_m_s3 > tracker.config().max_linear_jerk_m_s3 ||
+        !std::isfinite(tracker.config().trusted_future_sec) || tracker.config().trusted_future_sec < 0.0 ||
+        tracker.config().trusted_future_sec > tracker.durationSec())
       throw std::invalid_argument("Invalid explicit preview worker configuration");
     for (auto& slot : requests) {
       slot = std::make_unique<RequestSlot>(follower_cfg);
@@ -411,9 +425,15 @@ struct PreviewExecutionWorker::Impl {
     // execute_steps is a publisher replacement cadence, not a commitment to
     // execute later rows. Continue the last sample of this prefix at its own
     // velocity; the next live tick/replan will expose the next selected row.
+    // TRUSTED FUTURE (2026-09-15 night): with tracker.trusted_future_sec > 0 the
+    // forecast is trusted for that long (the committed execute window) instead of
+    // one segment, so row jitter is averaged, not extrapolated. A stall still ends it.
     std::size_t prefix_end=0;
+    const double trusted=tracker.config().trusted_future_sec;
     for(std::size_t k=1;k<future.samples.size();++k) {
-      if(future.samples[k].step_index!=future.samples[0].step_index || future.samples[k].stalled)break;
+      if(future.samples[k].stalled)break;
+      if(trusted>0.0) {if(future.samples[k].relative_time_sec>trusted+1e-12)break;}
+      else if(future.samples[k].step_index!=future.samples[0].step_index)break;
       prefix_end=k;
     }
     const auto& prefix=future.samples[prefix_end];
@@ -497,18 +517,15 @@ struct PreviewExecutionWorker::Impl {
     // here; the plan is continuous with the dispatched path by construction.
     if(contact_active && !r.cold_start) {
       const Eigen::Vector3d& normal=r.contact_normal_stand;
-      const double tol=tracker.config().feasibility_tolerance;
-      const double bound0=contact.knots[0].upper_velocity_m_s;
-      const double closing_velocity=normal.dot(out.initial.linear_velocity);
-      const double closing_acceleration=normal.dot(out.initial.linear_acceleration);
-      // A splice that closes faster than the knot-0 authority (an
-      // authority that fell between request and splice while the executor was not
-      // yet holding anything back) is never refused as Infeasible: the plan gets the
-      // fastest brake it can realise from that state, and nothing looser (2026-09-10
-      // pm: 27 such refusals in 5 s fed the expiry-brake cycle under a hand push).
-      if((closing_velocity>bound0+tol || (closing_velocity>=bound0-tol && closing_acceleration>tol)) &&
-         !widenContactAuthorityWithRamp(contact,closing_velocity,-closing_acceleration,
-                                        tracker.config(),cfg.servo_period_sec))
+      // A splice that closes faster than the authority is never refused as Infeasible
+      // (2026-09-10 pm: 27 such refusals in 5 s fed the expiry-brake cycle under a hand
+      // push). Since 2026-09-15 night the authority is not widened along the fastest
+      // brake either: that demanded a cut the 10 ms planning jerk could only realise by
+      // overshooting into a retreat (see slewContactAuthority). The envelope is slewed
+      // from the dispatched closing state; a coast already under the envelope is a no-op.
+      if(!slewContactAuthority(contact,normal.dot(out.initial.linear_velocity),
+                               normal.dot(out.initial.linear_acceleration),
+                               tracker.config(),cfg.servo_period_sec))
         return finish(PreviewExecutionWorkerStatus::InvalidRequest);
     }
     // Solver state is strictly worker-owned. Never publish its previous result

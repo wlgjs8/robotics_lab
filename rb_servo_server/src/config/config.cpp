@@ -316,7 +316,8 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
             "linear_tracking_tolerance_m", "angular_tracking_tolerance_rad",
             "max_linear_tracking_slack_m", "max_angular_tracking_slack_rad",
             "max_reference_chart_angle_rad", "feasibility_tolerance",
-            "max_working_set_recalculations", "max_solve_time_sec"}, at);
+            "max_working_set_recalculations", "max_solve_time_sec", "contact_slew_jerk_m_s3",
+            "trusted_future_sec"}, at);
         auto& t = out->tracker;
         for (const auto& field : std::vector<std::pair<const char*, double*>>{
                  {"planning_dt_sec", &t.planning_dt_sec}, {"linear_tracking_scale_m", &t.linear_tracking_scale_m},
@@ -330,7 +331,9 @@ void parsePreviewExecutionConfig(const YAML::Node& node, const std::string& path
                  {"max_linear_tracking_slack_m", &t.max_linear_tracking_slack_m},
                  {"max_angular_tracking_slack_rad", &t.max_angular_tracking_slack_rad},
                  {"max_reference_chart_angle_rad", &t.max_reference_chart_angle_rad},
-                 {"feasibility_tolerance", &t.feasibility_tolerance}, {"max_solve_time_sec", &t.max_solve_time_sec}}) {
+                 {"feasibility_tolerance", &t.feasibility_tolerance}, {"max_solve_time_sec", &t.max_solve_time_sec},
+                 {"contact_slew_jerk_m_s3", &t.contact_slew_jerk_m_s3},
+                 {"trusted_future_sec", &t.trusted_future_sec}}) {
             if (out->enable) require(sec, field.first, at);
             if (has(sec, field.first)) *field.second = asDouble(sec[field.first], at + "." + field.first);
         }
@@ -2770,6 +2773,12 @@ void validateConfig(const DualArmConfig& cfg) {
             positive(t.max_reference_chart_angle_rad, "tracker.max_reference_chart_angle_rad");
             positive(t.feasibility_tolerance, "tracker.feasibility_tolerance");
             positive(t.max_solve_time_sec, "tracker.max_solve_time_sec");
+            positive(t.contact_slew_jerk_m_s3, "tracker.contact_slew_jerk_m_s3");
+            nonnegative(t.trusted_future_sec, "tracker.trusted_future_sec");
+            if (t.trusted_future_sec > t.horizon_steps * t.planning_dt_sec)
+                throw std::runtime_error(at + ".tracker.trusted_future_sec must not exceed the planning horizon");
+            if (t.contact_slew_jerk_m_s3 > t.max_linear_jerk_m_s3)
+                throw std::runtime_error(at + ".tracker.contact_slew_jerk_m_s3 must not exceed the profile's max_linear_jerk_m_s3");
             nonnegative(t.reference_trust_full_sec, "tracker.reference_trust_full_sec");
             if (!(t.reference_trust_tail_sec > t.reference_trust_full_sec) ||
                 !std::isfinite(t.reference_trust_tail_sec))

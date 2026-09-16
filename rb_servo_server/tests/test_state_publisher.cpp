@@ -438,6 +438,47 @@ bool testStatePublisherPublishesTheForceSourceNotTheLaw() {
     return true;
 }
 
+bool testStatePublisherReportsPerArmBarrierStatus() {
+    // The held state is the one the counters miss: while the barrier holds a pair at its
+    // floor the hold fold re-books the plan every tick, so the correction stays under the
+    // 2 deg/s bar `clamp_count` counts and a consumer reading only that sees a healthy
+    // run. The per-arm block says which arm is stuck, on what, and for how long.
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(322);
+    snapshot.self_collision_clamp_count = 0;   // 1.9 deg/s of correction never reached it
+    rb_servo::ArmBarrierTelemetry& left = snapshot.self_collision_barrier[0];
+    left.braking = true;
+    left.held = true;
+    left.reason = "row";
+    left.pair = "dual_rb5_850e_left_link6_0 <-> dual_rb5_850e_right_pika_gripper_base";
+    left.klass = "arm_arm";
+    left.headroom_m = -0.00002;
+    left.held_episode_s = 1.57;
+    left.held_count = 3;
+    left.held_total_s = 4.2;
+    left.braking_total_s = 6.1;
+    left.held_folded_m = 0.0213;
+
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    const auto& barrier = json.at("self_collision").at("barrier");
+    const auto& l = barrier.at("left");
+    RB_CHECK(l.at("held").get<bool>());
+    RB_CHECK(l.at("braking").get<bool>());
+    RB_CHECK(l.at("reason") == "row");
+    RB_CHECK(l.at("class") == "arm_arm");
+    RB_CHECK(l.at("pair").get<std::string>().find("right_pika_gripper_base") != std::string::npos);
+    RB_CHECK(l.at("headroom_m").get<double>() < 0.0005);
+    RB_CHECK(l.at("held_episode_s").get<double>() == 1.57);
+    RB_CHECK(l.at("held_count").get<std::uint64_t>() == 3);
+    RB_CHECK(l.at("held_folded_m").get<double>() > 0.02);
+    // ...and the arm that is free says so, with nulls rather than invented names.
+    const auto& r = barrier.at("right");
+    RB_CHECK(!r.at("held").get<bool>() && !r.at("braking").get<bool>());
+    RB_CHECK(r.at("pair").is_null() && r.at("class").is_null() && r.at("reason").is_null());
+    RB_CHECK(r.at("held_total_s").get<double>() == 0.0);
+    return true;
+}
+
 bool testStatePublisherSerializesPerPairSelfCollisionBands() {
     // The near list is ordered by RAW clearance, so a consumer cannot tell which pairs
     // are in hard violation unless each pair carries its OWN floor. Measured on the RB5
@@ -821,6 +862,7 @@ bool testPreviewTelemetryAndCapabilitySurviveWitnessBudget() {
     p.solve_time_sec = .0004; p.submitted = 23; p.accepted = 19;
     p.rejected = 3; p.expired = 2; p.contact_guard_count = 5;
     p.plan_lead_m = .0035;
+    p.plan_lead_along_m = -.0021;
     p.plan_clock_gate = .75;
     populateDetailedPreviewFixture(p);
     // Populate both arms to test the actual worst-side diagnostic wire growth.
@@ -836,7 +878,7 @@ bool testPreviewTelemetryAndCapabilitySurviveWitnessBudget() {
         {"backlog_sec",.012},{"rate",1.03},{"plan_age_sec",.024},
         {"accepted_position_error_m",.00015},{"accepted_rotation_error_rad",.00025},
         {"solve_time_sec",.0004},{"submitted",23},{"accepted",19},{"rejected",3},
-        {"expired",2},{"contact_guard_count",5},{"plan_lead_m",.0035},{"plan_clock_gate",.75},
+        {"expired",2},{"contact_guard_count",5},{"plan_lead_m",.0035},{"plan_lead_along_m",-.0021},{"plan_clock_gate",.75},
         {"reference_rate_gate",1.0}};
     // Check the complete original telemetry contract while allowing explicitly
     // additive fields. Large integer source IDs must not pass through double.
@@ -1045,6 +1087,7 @@ int main() {
     if (!testStatePublisherPreservesForceReferenceWhenUncovered()) return 1;
     if (!testStatePublisherPublishesTheForceSourceNotTheLaw()) return 1;
     if (!testStatePublisherSerializesPerPairSelfCollisionBands()) return 1;
+    if (!testStatePublisherReportsPerArmBarrierStatus()) return 1;
     if (!testRealtimeTimingAccumulatorAndSerialization()) return 1;
     return 0;
 }

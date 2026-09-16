@@ -1753,7 +1753,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             {"solve_time_sec",p.solve_time_sec},{"submitted",p.submitted},
             {"accepted",p.accepted},{"rejected",p.rejected},{"expired",p.expired},
             {"contact_guard_count",p.contact_guard_count},
-            {"plan_lead_m",p.plan_lead_m},{"plan_clock_gate",p.plan_clock_gate},{"reference_rate_gate",p.reference_rate_gate}};
+            {"plan_lead_m",p.plan_lead_m},{"plan_lead_along_m",p.plan_lead_along_m},{"plan_clock_gate",p.plan_clock_gate},{"reference_rate_gate",p.reference_rate_gate}};
         // This fixed wire summary retains execution/freshness authority and
         // current diagnostic reasons. Full result identities, reason arrays,
         // fold transforms and certificate details remain in the servo CSV.
@@ -2038,6 +2038,32 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             finite_or_null(snapshot.self_collision_environment_min_clearance_m);
         self_collision["gripper_excluded"] = snapshot.self_collision_gripper_excluded;
         self_collision["clamp_count"] = snapshot.self_collision_clamp_count;
+        // PER-ARM BARRIER STATUS (2026-09-15). clamp_count above only counts ticks the
+        // correction passed 2 deg/s; a pair HELD at its floor with the hold fold
+        // re-booking the plan every tick does not reach it, so a live consumer (GUI,
+        // policy_runner step log) had no way to see which arm was stuck on what.
+        {
+            nlohmann::json barrier;
+            const char* names[2] = {"left", "right"};
+            for (std::size_t i = 0; i < snapshot.self_collision_barrier.size(); ++i) {
+                const ArmBarrierTelemetry& b = snapshot.self_collision_barrier[i];
+                nlohmann::json arm;
+                arm["braking"] = b.braking;
+                arm["held"] = b.held;
+                arm["reason"] = b.reason.empty() ? nlohmann::json(nullptr)
+                                                 : nlohmann::json(b.reason);
+                arm["pair"] = b.pair.empty() ? nlohmann::json(nullptr) : nlohmann::json(b.pair);
+                arm["class"] = b.klass.empty() ? nlohmann::json(nullptr) : nlohmann::json(b.klass);
+                arm["headroom_m"] = finite_or_null(b.headroom_m);
+                arm["held_episode_s"] = b.held_episode_s;
+                arm["held_count"] = b.held_count;
+                arm["held_total_s"] = b.held_total_s;
+                arm["braking_total_s"] = b.braking_total_s;
+                arm["held_folded_m"] = b.held_folded_m;
+                barrier[names[i]] = std::move(arm);
+            }
+            self_collision["barrier"] = std::move(barrier);
+        }
         self_collision["left_bone"] = snapshot.self_collision_left_bone;
         self_collision["right_bone"] = snapshot.self_collision_right_bone;
         self_collision["pair"] = snapshot.self_collision_pair.empty()

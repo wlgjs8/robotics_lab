@@ -108,6 +108,8 @@ class LivePreviewExecution {
   const LivePreviewAdmissionDiagnostics& admissionDiagnostics() const { return admission_diagnostics_; }
 
  private:
+  void publishLead(const FollowerOutputKinematics& raw_sample);
+
   PreviewExecutionGauge gauge() const;
   void cancelStaged(std::size_t reason, double now);
   void recordResult(PreviewExecutionAcceptance check, double observed_at);

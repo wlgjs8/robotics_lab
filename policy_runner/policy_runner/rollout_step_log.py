@@ -442,6 +442,15 @@ def build_rollout_step_record(
                 if isinstance((gripper_proprio or {}).get(arm), Mapping)
                 else None
             ),
+            # SELF-COLLISION BARRIER, per arm (server `self_collision.barrier`, added
+            # 2026-09-15). Until now a rollout log could not say that the arm had been
+            # stopped by the guard at all: the server holds a pair at its floor, the hold
+            # fold re-books the plan every tick so the correction stays under the 2 deg/s
+            # bar that self_collision_clamp_count uses, and from this side the step simply
+            # did not happen. Measured over 09-10..09-15 that state ran 24% of the right
+            # arm's time above the table near the stand. null = an older server that does
+            # not publish it, never a fabricated "not held".
+            "barrier": _barrier_record(payload, arm),
         }
         record["arms"][arm] = arm_record
     return record
@@ -489,6 +498,42 @@ def _rtc_record(rtc: Any) -> dict[str, Any] | None:
 def _finite_int(value: Any) -> int | None:
     resolved = _finite_float(value)
     return None if resolved is None else int(resolved)
+
+
+def _barrier_record(payload: Mapping[str, Any], arm: str) -> dict[str, Any] | None:
+    """Per-arm self-collision barrier status out of the published state.
+
+    Returns None when the server does not publish it (pre-2026-09-15) so a missing
+    field can never be read as "the barrier was not acting".
+    """
+    self_collision = payload.get("self_collision")
+    if not isinstance(self_collision, Mapping):
+        return None
+    barrier = self_collision.get("barrier")
+    if not isinstance(barrier, Mapping):
+        return None
+    side = barrier.get(arm)
+    if not isinstance(side, Mapping):
+        return None
+    return {
+        "braking": bool(side.get("braking", False)),
+        "held": bool(side.get("held", False)),
+        "reason": side.get("reason"),
+        "pair": side.get("pair"),
+        "class": side.get("class"),
+        "headroom_mm": (
+            None if _finite_float(side.get("headroom_m")) is None
+            else _finite_float(side.get("headroom_m")) * 1000.0
+        ),
+        "held_episode_s": _finite_float(side.get("held_episode_s")),
+        "held_count": _finite_int(side.get("held_count")),
+        "held_total_s": _finite_float(side.get("held_total_s")),
+        "braking_total_s": _finite_float(side.get("braking_total_s")),
+        "held_folded_mm": (
+            None if _finite_float(side.get("held_folded_m")) is None
+            else _finite_float(side.get("held_folded_m")) * 1000.0
+        ),
+    }
 
 
 def _arm_mapping(payload: Mapping[str, Any], arm: str) -> Mapping[str, Any]:

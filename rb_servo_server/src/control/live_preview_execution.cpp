@@ -66,6 +66,7 @@ void LivePreviewExecution::reset(const char* reason) {
   fold_translation_.setZero();fold_rotation_.setIdentity();gauge_revision_=0;
   cursor_.clear();history_count_=history_begin_=0;
   telemetry_.active=false;telemetry_.status=reason;telemetry_.epoch=epoch_;telemetry_.plan_id=0;
+  telemetry_.plan_lead_m=0.;telemetry_.plan_lead_along_m=0.;
   telemetry_.backlog_sec=0;telemetry_.rate=1;telemetry_.plan_age_sec=0;
   telemetry_.phase_window_used=false;telemetry_.phase_window_sec=0;
   telemetry_.contact_bound_active=false;telemetry_.retired_source_advance_m=0.;
@@ -229,7 +230,7 @@ bool LivePreviewExecution::beginBrake(const char* reason,bool contact_only) {
   if(!initialized_||faulted_){fail("brake_no_epoch");return false;}
   // A brake starts from the accepted (dispatched, already held-back) sample:
   // nothing is held back against it.
-  telemetry_.plan_lead_m=0;
+  telemetry_.plan_lead_m=0;telemetry_.plan_lead_along_m=0;
   PreviewMotionState initial;
   if(accepted_epoch_) {
     initial=accepted_sample_;brake_origin_sec_=accepted_sample_time_sec_;
@@ -329,10 +330,21 @@ bool LivePreviewExecution::stagedCurrent(const CartesianChunkFollower& raw) cons
       id.parent_plan_id==current.parent_plan_id;
 }
 
+void LivePreviewExecution::publishLead(const FollowerOutputKinematics& raw_sample) {
+  const Eigen::Vector3d offset=xyz(sample_.pose)-xyz(raw_sample.pose);
+  telemetry_.plan_lead_m=offset.norm();
+  const Eigen::Vector3d raw_velocity(raw_sample.velocity.x,raw_sample.velocity.y,raw_sample.velocity.z);
+  const double raw_speed=raw_velocity.norm();
+  // Below the cursor's own velocity floor the source has no direction of travel and
+  // there is nothing to be ahead of; the leash then stays open.
+  telemetry_.plan_lead_along_m=std::isfinite(raw_speed) &&
+      raw_speed>=config_.preview_execution.cursor.translation_velocity_floor?
+      offset.dot(raw_velocity)/raw_speed:0.0;
+}
 LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFollower& raw,
     const Pose6D& accepted_nominal,bool stationary,double contact_gate,
     const Eigen::Vector3d& contact_normal) {
-  telemetry_.active=false;telemetry_.plan_lead_m=0.0;
+  telemetry_.active=false;telemetry_.plan_lead_m=0.0;telemetry_.plan_lead_along_m=0.0;
   retired_source_advance_.setZero();
   telemetry_.nominal_closing_m_s=0.;telemetry_.allowed_closing_m_s=0.;
   telemetry_.retired_source_advance_m=0.;
@@ -483,7 +495,11 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
         // the same order. The lead is published instead, and the servo loop leashes the
         // PLAN CLOCK with it (control::planLeashGate), which slows the reference and the
         // plan together and cannot step the command.
-        telemetry_.plan_lead_m=(xyz(sample_.pose)-xyz(raw_sample.pose)).norm();
+        // SIGNED (2026-09-15 night): the leash reads the projection onto the source's
+        // direction of travel. The norm counted a plan BEHIND its source as lead and
+        // slowed the reference clock further (18:25 run, 241-243 s: every leash-limited
+        // tick was behind; cursor backlog reached its 100 ms cap, three recovery brakes).
+        publishLead(raw_sample);
       }
     }
   }
@@ -496,7 +512,7 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     telemetry_.plan_age_sec=now-brake_origin_sec_;
     // The lead is measured through a brake too (2026-09-15 night): the leash used to go
     // blind exactly while the source was frozen by executor_waits.
-    telemetry_.plan_lead_m=(xyz(sample_.pose)-xyz(raw_sample.pose)).norm();
+    publishLead(raw_sample);
     // The terminal hold must actually pass dispatch before the fault policy
     // suppresses further sends. Reaching its timestamp in the planner alone
     // would abandon the final stop sample one tick early.

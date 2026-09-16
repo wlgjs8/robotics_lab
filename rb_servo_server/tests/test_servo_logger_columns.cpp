@@ -248,6 +248,7 @@ int main() {
         p.solve_time_sec = .0004; p.submitted = 23; p.accepted = 19;
         p.rejected = 3; p.expired = 2; p.contact_guard_count = 5;
         p.plan_lead_m = .0035;
+        p.plan_lead_along_m = -.0021;
         p.reference_rate_gate=.7;p.source_stop_count=4;p.source_stop_completed=3;
         p.nominal_closing_m_s=.12;p.allowed_closing_m_s=.07;p.executed_closing_m_s=.06;
         p.contact_bound_active=true;p.contact_bound_normal_stand={.6,0.,.8};
@@ -339,6 +340,17 @@ int main() {
         "right_reach_margin_m",
         "right_reach_r_far_m",
         "reach_clamp_count",
+        // per-arm barrier status + episode (2026-09-15): the held state the 2 deg/s
+        // clamp counter cannot see, and the plan motion discarded while it lasted
+        "left_barrier_held",
+        "left_barrier_braking",
+        "left_barrier_pair",
+        "left_barrier_class",
+        "left_barrier_headroom_m",
+        "left_barrier_held_episode_s",
+        "right_barrier_held",
+        "right_barrier_held_total_s",
+        "right_barrier_held_folded_m",
     };
     for (const char* name : required) {
         if (!contains(header_fields, name)) {
@@ -386,7 +398,7 @@ int main() {
              "source_wire_seq","source_recv_seq","backlog_sec","rate","plan_age_sec",
              "accepted_position_error_m","accepted_rotation_error_rad","solve_time_sec",
              "submitted","accepted","rejected","expired","contact_guard_count",
-             "plan_lead_m"}) {
+             "plan_lead_m","plan_lead_along_m"}) {
             const std::string name = std::string(side) + "_preview_execution_" + field;
             if (std::count(header_fields.begin(), header_fields.end(), name) != 1) {
                 std::cerr << "missing or duplicate preview column: " << name << '\n'; return 1;
@@ -405,7 +417,7 @@ int main() {
     for (const auto& item : std::vector<std::pair<std::string, double>>{
              {"backlog_sec",.012},{"rate",1.03},{"plan_age_sec",.024},
              {"accepted_position_error_m",.00015},{"accepted_rotation_error_rad",.00025},{"solve_time_sec",.0004},
-             {"plan_lead_m",.0035}}) {
+             {"plan_lead_m",.0035},{"plan_lead_along_m",-.0021}}) {
         if (std::abs(std::stod(column("left_preview_execution_" + item.first)) - item.second) > 1e-9) {
             std::cerr << "incorrect preview timing/error column: " << item.first << '\n'; return 1;
         }

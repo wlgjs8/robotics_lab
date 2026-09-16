@@ -2830,7 +2830,19 @@ cartesian_control:
         max_linear_velocity_m_s: 0.6
         max_linear_accel_m_s2: 12.0
         max_linear_jerk_m_s3: 2000.0
-        max_angular_velocity_rad_s: 1.4
+        # 1.4 -> 2.5 rad/s (2026-09-16, jhkim). The faster-collected bolt data asks
+        # for wrist rotations up to 79 deg/s per row (model raw output, 22:36 run;
+        # p99 34-40); 1.4 rad/s = 80.2 deg/s was the model's own peak, so the
+        # executor had zero headroom to recover a rotation lag: at 298.7-299.0 s the
+        # source rotated 55-80 deg/s, the command saturated at 80, the lag reached
+        # 5-7.5 deg and the cursor/backlog/brake chain latched. 2.5 rad/s = 143 deg/s
+        # keeps the wrist under dq_max 170 (RB5-850 rating 180), the brake budget
+        # (A = 40 - 0.5 V^2, J = 4000 - 2.5 V A - 5/6 V^3) stays positive, and the
+        # 240 ms reference chart (<= 1.0 rad) sees at most 0.6 rad. The angular accel
+        # cap never bound (p99 4.5-7 rad/s^2), so it stays. The policy runner's own
+        # per-row clamp is 2.0 rad/s (DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S), which
+        # the model does not reach; raise it only if a future model asks for more.
+        max_angular_velocity_rad_s: 2.5
         max_angular_accel_rad_s2: 40.0
         max_angular_jerk_rad_s3: 4000.0
         discard_head_steps: 0
@@ -2927,6 +2939,29 @@ cartesian_control:
             feasibility_tolerance: 0.0000001
             max_working_set_recalculations: 200
             max_solve_time_sec: 0.05
+            # CONTACT AUTHORITY SLEW (2026-09-15 night, jhkim). How fast the contact
+            # envelope may pull the plan's closing velocity down from the dispatched
+            # splice state. The old "fastest brake" widening (max jerk 2000, zero in
+            # ~3 ms) forced the QP - whose jerk is constant per 10 ms interval - to spend
+            # ~500 m/s^3 on the whole first interval for a 1 mm/s cut, i.e. a -25..-50 mm/s
+            # retreat, which every replan then inherited. Reproduced offline on this run's
+            # inputs (servo_log_20260915_195438, left 374.7-386 s): a 10 mm/s approach
+            # with g=0.9 became a -69 mm/s retreat, with g=0.5 -183 mm/s; with the slew
+            # both stay within a few mm/s of g x the free candidate. 400 m/s^3 = the jerk
+            # the tracker itself spends on an ordinary 12 m/s^2 reversal over 30 ms; a
+            # 250 mm/s impact with the gate at 0.3 then slews over 60 ms (three planning
+            # intervals, 5.8 m/s^2 peak). Must be <= max_linear_jerk_m_s3 above.
+            contact_slew_jerk_m_s3: 400.0
+            # TRUSTED FUTURE (2026-09-15 night, jhkim). The QP reference follows the
+            # follower's actual forecast this far, then continues at constant velocity.
+            # 0 = only the selected segment (the evening rule, median 16 ms), which
+            # extrapolated ONE segment's end velocity over the remaining ~220 ms: rows
+            # jitter 1-2 mm per 33 ms, so that velocity flips +-50 mm/s row to row and
+            # the executor swung +-60..110 mm/s around a +-20 mm/s source (22:33 run;
+            # slow-segment path ratio 0.67-0.69, 60-70 ms lag). 0.10 s = three rows of
+            # the four-row execute window; the fourth row's central-difference velocity
+            # already reads the first uncommitted row. Set 0 to A/B the evening rule.
+            trusted_future_sec: 0.10
           # Offline execution_cursor_v1.json: bounded lag, no target-origin fold.
           cursor:
             enable: true
@@ -2968,9 +3003,19 @@ cartesian_control:
         core_time_stretch_max_ratio: 4.0
         plan_leash_enable: true
         plan_leash_start_m: 0.01
-        plan_leash_start_rad: 0.0349
+        # ON THIS PROFILE THESE FEED THE PREVIEW CURSOR ONLY (the legacy divergence
+        # leash runs only with preview_execution disabled). The cursor slows the
+        # reference clock by the output's signed lag along the source's motion; the
+        # ANGULAR band was 2 -> 5.7 deg, which the tracker exceeds whenever the policy
+        # asks for more than the 1.4 rad/s angular cap: servo_log_20260915_223341 at
+        # 299.0-299.25 s the wrist lagged 5-7.5 deg at the cap, the cursor went to its
+        # 0.25 floor, the backlog hit its 100 ms cap in 130 ms, the recovery brake +
+        # restart abandoned that backlog and the re-accelerated plan rode the cap into
+        # an expiry brake and a fault. A rotation lag at the cap is not a backlog: the
+        # band is now 10 -> 30 deg so only a gross rotation lag slows the clock.
+        plan_leash_start_rad: 0.1745
         plan_leash_full_m: 0.05
-        plan_leash_full_rad: 0.1
+        plan_leash_full_rad: 0.5236
         plan_leash_min_gate: 0.25
         hold_bounce_resume_sec: 0.5
         chunk_feed_timeout_sec: 1.5

@@ -150,7 +150,7 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
             "source_wire_seq","source_recv_seq","backlog_sec","rate","plan_age_sec",
             "accepted_position_error_m","accepted_rotation_error_rad","solve_time_sec",
             "submitted","accepted","rejected","expired","contact_guard_count",
-            "plan_lead_m","plan_clock_gate","reference_rate_gate","nominal_closing_m_s","allowed_closing_m_s","retired_source_advance_m",
+            "plan_lead_m","plan_lead_along_m","plan_clock_gate","reference_rate_gate","nominal_closing_m_s","allowed_closing_m_s","retired_source_advance_m",
             "nominal_solve_time_sec","trusted_prefix_sec","source_stop_count","source_stop_completed",
             "executed_closing_m_s","contact_bound_active","contact_bound_nx","contact_bound_ny","contact_bound_nz"})
         os << ',' << side << "_preview_execution_" << field;
@@ -826,6 +826,26 @@ void ServoLogger::writeHeader() {
              ",selfcol_gripper_excluded,selfcol_stale"
              ",projection_sweeps,projection_converged,projection_tightest_dir_change_deg"
              ",self_collision_clamp_count";
+    // PER-ARM BARRIER STATUS + EPISODE (2026-09-15; control/barrier_status.hpp).
+    // `self_collision_clamp_count` above counts ticks the correction passed 2 deg/s.
+    // While the barrier HOLDS a pair at its floor the hold fold re-books the plan every
+    // tick, the correction stays at ~1 deg/s, and 60-95% of held time never reached that
+    // counter, the SelfCollision verdict or motion_state (measured over 09-10..09-15:
+    // a 1.57 s hold read Ok / Running / clamp +0). `_held` with `_headroom_m` ~ 0 is the
+    // signal; `_held_folded_m` is how much commanded motion was discarded meanwhile.
+    for (const char* side : {"left", "right"}) {
+        file_ << ',' << side << "_barrier_braking"
+              << ',' << side << "_barrier_held"
+              << ',' << side << "_barrier_reason"
+              << ',' << side << "_barrier_pair"
+              << ',' << side << "_barrier_class"
+              << ',' << side << "_barrier_headroom_m"
+              << ',' << side << "_barrier_held_episode_s"
+              << ',' << side << "_barrier_held_count"
+              << ',' << side << "_barrier_held_total_s"
+              << ',' << side << "_barrier_braking_total_s"
+              << ',' << side << "_barrier_held_folded_m";
+    }
     // REACH SHELL (safety.reach_constraint), 2026-09-04. This layer had no column
     // here at all while its verdict aliased to RoiViolation, so a run where a sphere
     // centered on the shoulder refused 31-81 mm of commanded descent read as an ROI
@@ -1225,7 +1245,7 @@ void writeArmProfilingColumns(
        << ',' << p.accepted_position_error_m << ',' << p.accepted_rotation_error_rad
        << ',' << p.solve_time_sec << ',' << p.submitted << ',' << p.accepted
        << ',' << p.rejected << ',' << p.expired << ',' << p.contact_guard_count
-       << ',' << p.plan_lead_m << ',' << p.plan_clock_gate << ',' << p.reference_rate_gate << ',' << p.nominal_closing_m_s
+       << ',' << p.plan_lead_m << ',' << p.plan_lead_along_m << ',' << p.plan_clock_gate << ',' << p.reference_rate_gate << ',' << p.nominal_closing_m_s
        << ',' << p.allowed_closing_m_s << ',' << p.retired_source_advance_m
        << ',' << p.nominal_solve_time_sec << ',' << p.trusted_prefix_sec
        << ',' << p.source_stop_count << ',' << p.source_stop_completed
@@ -1793,6 +1813,19 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sample.safety_projection.converged
           << ',' << sample.safety_projection.tightest_dir_change_deg
           << ',' << sample.safety_projection.self_collision_clamp_count;
+    for (const ArmBarrierTelemetry& b : sample.safety_projection.barrier) {
+        file_ << ',' << b.braking
+              << ',' << b.held
+              << ',' << csvEscape(b.reason)
+              << ',' << csvEscape(b.pair)
+              << ',' << csvEscape(b.klass)
+              << ',' << b.headroom_m
+              << ',' << b.held_episode_s
+              << ',' << b.held_count
+              << ',' << b.held_total_s
+              << ',' << b.braking_total_s
+              << ',' << b.held_folded_m;
+    }
     file_ << ',' << sample.safety_projection.left_reach_engaged
           << ',' << sample.safety_projection.left_reach_margin_m
           << ',' << sample.safety_projection.left_reach_r_far_m

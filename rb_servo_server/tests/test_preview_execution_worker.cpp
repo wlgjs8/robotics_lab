@@ -49,6 +49,8 @@ using namespace rb_servo::control;
 PreviewTrackerConfig trackerConfig() {
   PreviewTrackerConfig c;
   c.max_linear_velocity_m_s=.6; c.max_linear_acceleration_m_s2=12.; c.max_linear_jerk_m_s3=2000.;
+  c.contact_slew_jerk_m_s3=400.;
+  c.trusted_future_sec=0.;   // legacy: the selected segment only; the window variant is tested explicitly
   c.max_angular_velocity_rad_s=1.4; c.max_angular_acceleration_rad_s2=40.; c.max_angular_jerk_rad_s3=4000.;
   c.linear_tracking_tolerance_m=.02; c.angular_tracking_tolerance_rad=.08;
   c.max_linear_tracking_slack_m=.08; c.max_angular_tracking_slack_rad=.25;
@@ -129,6 +131,27 @@ bool testContactRestrictionConvergesToTheFreeCandidate() {
   for(int k=0;k<=120;++k) {
     PreviewMotionSample a,b;CHECK(free.trajectory.sample(k*.002,a));CHECK(tail.trajectory.sample(k*.002,b));
     CHECK(sameState(a,b,1e-7));
+  }
+  // TRUSTED FUTURE (2026-09-15 night): a 0.10 s window covers rows 0-2 of the
+  // four-row execute window (row 3's central-difference velocity reads row 4), so a
+  // tail changed from row 4 on still cannot move the plan; the window itself must be
+  // exposed as the trusted prefix and must not exceed the configured value.
+  {
+    auto tw=tc;tw.trusted_future_sec=.10;
+    PreviewExecutionWorker window(tw,fc,workerConfig());
+    CartesianChunkFollower g1(fc),g2(fc);g1.submitDeltaFrame(fr,pose(.4));g1.tick(.002);
+    g2.submitDeltaFrame(other,pose(.4));g2.tick(.002);
+    auto r1=request(g1);r1.contact_normal_stand={1,0,0};auto r2=request(g2);r2.contact_normal_stand={1,0,0};
+    CHECK(window.trySubmit(g1,r1));PreviewExecutionResult w1;CHECK(waitResult(window,w1));CHECK(w1.accepted());
+    CHECK(window.trySubmit(g2,r2));PreviewExecutionResult w2;CHECK(waitResult(window,w2));CHECK(w2.accepted());
+    CHECK(w1.trusted_prefix_sec>.05&&w1.trusted_prefix_sec<=.10+1e-9);
+    for(int k=0;k<=120;++k) {
+      PreviewMotionSample a,b;CHECK(w1.trajectory.sample(k*.002,a));CHECK(w2.trajectory.sample(k*.002,b));
+      CHECK(sameState(a,b,1e-7));
+    }
+    auto bad=tw;bad.trusted_future_sec=1.;bool threw=false;
+    try {PreviewExecutionWorker w(bad,fc,workerConfig());} catch(const std::invalid_argument&) {threw=true;}
+    CHECK(threw);
   }
   return true;
 }
@@ -348,9 +371,20 @@ bool testClampedDispatchSplice() {
   {
     const auto& tr=trackerConfig();const double tol=tr.feasibility_tolerance;
     const double v0=at_splice.linear_velocity.x();
-    const double t_brake=v0/tr.max_linear_acceleration_m_s2+2*tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+3*tr.planning_dt_sec;
+    // Since 2026-09-15 night the authority is SLEWED from the dispatched closing state
+    // (see slewContactAuthority) instead of widened along the fastest brake, so the
+    // stop lands one to two planning intervals after the fastest-brake time and is
+    // never faster than the authority itself; the plan must still sit under the
+    // certified bound at every sample.
+    const double t_brake=v0/tr.max_linear_acceleration_m_s2+2*tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+
+        5*tr.planning_dt_sec;
     for(int k=0;k<=120;++k) {
       PreviewMotionSample s;CHECK(out.trajectory.sample(.002*k,s));
+      const auto& cert=out.contact_authority;std::size_t hi=1;
+      while(hi+1<cert.count && cert.knots[hi].time_sec<.002*k)++hi;
+      const auto& a=cert.knots[hi-1];const auto& b=cert.knots[hi];
+      const double u=std::clamp((.002*k-a.time_sec)/(b.time_sec-a.time_sec),0.,1.);
+      CHECK(s.linear_velocity.x()<=(1-u)*a.upper_velocity_m_s+u*b.upper_velocity_m_s+tol);
       if(.002*k>=t_brake)CHECK(s.linear_velocity.x()<=tol);
     }
   }
@@ -358,8 +392,9 @@ bool testClampedDispatchSplice() {
   // REFUSED (2026-09-10 pm; the dispatched-state offset and the contact clamp that
   // produced it are gone since 2026-09-11). The authority can fall between request and
   // splice, so the initial state legitimately exceeds it; refusing that as Infeasible
-  // fed the expiry-brake cycle (27 refusals in 5 s under a hand push). The plan gets
-  // the fastest brake it can realise from that state and nothing looser.
+  // fed the expiry-brake cycle (27 refusals in 5 s under a hand push). Since
+  // 2026-09-15 night the plan gets the SLEWED authority from that state (not the
+  // fastest brake, which the 10 ms planning jerk could only meet by overshooting).
   {
     auto tighter=contact;
     tighter.contact_gate=0.0;                // authority 0 at every knot
@@ -377,7 +412,7 @@ bool testClampedDispatchSplice() {
     const auto& tr=trackerConfig();const double tol=tr.feasibility_tolerance;
     const double v0=at_splice.linear_velocity.x();
     const double t_brake=v0/tr.max_linear_acceleration_m_s2+
-        2*tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+3*tr.planning_dt_sec;
+        2*tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+5*tr.planning_dt_sec;   // slewed stop, see above
     for(int k=0;k<=120;++k) {
       PreviewMotionSample sm;CHECK(out.trajectory.sample(.002*k,sm));
       CHECK(sm.linear_velocity.x()<=v0+2e-3+tol);          // never faster than dispatched
@@ -483,6 +518,101 @@ bool testGaugeTransportPreservesC2AndIdentity() {
   corrupt=result;corrupt.gauge.rotation.coeffs().setZero();CHECK(!transportPreviewExecutionResult(corrupt,target,1e-7));
   return true;
 }
+// CONTACT AUTHORITY SLEW (2026-09-15 night). Regression for the 19:54 floor bounce: the
+// envelope is g x the free candidate's own closing controls and the splice is the
+// dispatched state, so any g < 1 put the plan above its bound. Widening only the first
+// ~3 ms along the fastest brake then demanded a cut the 10 ms planning jerk could only
+// realise by overshooting: measured offline on this scenario, g=0.9 turned a 10 mm/s
+// approach into a -69 mm/s retreat and g=0.5 into -183 mm/s. The slewed envelope keeps
+// the constrained plan near g x nominal and never lets it retreat past the free plan.
+bool testContactSlewKeepsClosingNearScaledNominal() {
+  auto tc=trackerConfig();
+  const Eigen::Vector3d n=Eigen::Vector3d(.18,.04,-.98).normalized();
+  const auto line=[&](const Eigen::Vector3d& p0,const Eigen::Vector3d& v_prefix,const Eigen::Vector3d& v_cont,double prefix) {
+    PreviewReference r;r.count=25;
+    for(std::size_t k=0;k<r.count;++k) {
+      const double t=.01*k;
+      const Eigen::Vector3d p=t<=prefix?Eigen::Vector3d(p0+v_prefix*t):Eigen::Vector3d(p0+v_prefix*prefix+v_cont*(t-prefix));
+      Pose6D knot;knot.x=p.x();knot.y=p.y();knot.z=p.z();
+      r.knots[k]={t,knot};
+    }
+    return r;
+  };
+  const auto envelope=[&](const PreviewPolynomialTrajectory& nominal_path,double g,PreviewContactConstraint& contact) {
+    contact.enabled=true;contact.normal_stand=n;contact.count=1;contact.knots[0]={0.,0.};
+    for(std::size_t segment=0;segment<nominal_path.count;++segment) {
+      const double start=segment*nominal_path.step_sec,end=(segment+1)*nominal_path.step_sec;
+      for(double a=start;a<end;) {
+        const double b=std::min(a+.002,end);PreviewMotionSample sample;
+        if(!nominal_path.sample(a,sample))return false;
+        const double v=n.dot(sample.linear_velocity),accel=n.dot(sample.linear_acceleration);
+        const double jerk=n.dot(nominal_path.jerk.row(segment).head<3>()),dt=b-a;
+        const double upper=g*std::max({0.,v,v+.5*dt*accel,v+dt*accel+.5*dt*dt*jerk});
+        auto& previous=contact.knots[contact.count-1];
+        previous.upper_velocity_m_s=std::max(previous.upper_velocity_m_s,upper);
+        contact.knots[contact.count++]={b,upper};a=b;
+      }
+    }
+    return true;
+  };
+  struct Case {const char* name;PreviewMotionState initial;PreviewReference ref;double g;double floor_m_s;double late_ratio;};
+  const auto at=[](double x,double y,double z){Pose6D p;p.x=x;p.y=y;p.z=z;return p;};
+  PreviewMotionState approach;approach.pose=at(.35,.10,-.2103);
+  approach.linear_velocity={.02,0.,-.0065};approach.linear_acceleration={.1,0.,.1};   // closing ~10 mm/s
+  const auto descending=line({.35,.10,-.2111},{.02,0.,-.017},{.02,0.,-.005},.02);
+  PreviewMotionState impact;impact.pose=at(.35,.10,-.2141);
+  impact.linear_velocity={0.,0.,-.043};impact.linear_acceleration={0.,0.,2.};          // 42 mm/s onto a surface
+  const auto stationary=line({.35,.10,-.2145},{0.,0.,0.},{0.,0.,.007},.02);
+  const Case cases[]={
+    {"approach g=.98",approach,descending,.98,-.001,.8},
+    {"approach g=.90",approach,descending,.90,-.001,.8},
+    {"approach g=.50",approach,descending,.50,-.005,.8},
+    {"impact g=.62",impact,stationary,.62,-.015,0.},
+  };
+  for(const auto& c:cases) {
+    PreviewTrajectoryTracker nominal_tracker(tc),tracker(tc);
+    const auto nominal=nominal_tracker.plan(c.ref,c.initial,{},PreviewContactSolveMode::Automatic,.05);
+    PreviewPolynomialTrajectory nominal_path;
+    CHECK(nominal.accepted());CHECK(nominal_tracker.exportTrajectory(nominal_path));
+    PreviewContactConstraint contact;CHECK(envelope(nominal_path,c.g,contact));
+    const double v0=n.dot(c.initial.linear_velocity),a0=n.dot(c.initial.linear_acceleration);
+    CHECK(slewContactAuthority(contact,v0,a0,tc,.002));
+    // The slewed knot 0 admits the dispatched state; nothing below the envelope is admitted.
+    CHECK(contact.knots[0].upper_velocity_m_s>=v0-tc.feasibility_tolerance);
+    const auto solved=tracker.plan(c.ref,c.initial,contact,PreviewContactSolveMode::Automatic,.05);
+    PreviewPolynomialTrajectory path;
+    if(!solved.accepted())std::cerr<<c.name<<" status="<<static_cast<int>(solved.status)<<'\n';
+    CHECK(solved.accepted());CHECK(tracker.exportTrajectory(path));
+    double worst_retreat=0.,worst_gap=0.;
+    for(int k=0;k<=120;++k) {
+      const double t=.002*k;PreviewMotionSample a,b;
+      CHECK(nominal_path.sample(t,a));CHECK(path.sample(t,b));
+      const double vn=n.dot(a.linear_velocity),vc=n.dot(b.linear_velocity);
+      std::size_t hi=1;while(hi+1<contact.count&&contact.knots[hi].time_sec<t)++hi;
+      const auto& ka=contact.knots[hi-1];const auto& kb=contact.knots[hi];
+      const double u=std::clamp((t-ka.time_sec)/(kb.time_sec-ka.time_sec),0.,1.);
+      CHECK(vc<=(1-u)*ka.upper_velocity_m_s+u*kb.upper_velocity_m_s+tc.feasibility_tolerance);
+      worst_retreat=std::min(worst_retreat,vc-std::min(vn,0.));   // retreat beyond the free plan's own
+      if(t>=.15)worst_gap=std::max(worst_gap,c.g*vn-vc);           // late-horizon tracking of g x nominal
+    }
+    std::cout<<c.name<<" worst retreat beyond nominal "<<worst_retreat*1e3<<" mm/s, late gap to g*nominal "<<worst_gap*1e3<<" mm/s\n";
+    CHECK(worst_retreat>=c.floor_m_s);
+    if(c.late_ratio>0.) {
+      PreviewMotionSample a,b;CHECK(nominal_path.sample(.2,a));CHECK(path.sample(.2,b));
+      CHECK(n.dot(b.linear_velocity)>=c.late_ratio*c.g*n.dot(a.linear_velocity)-.001);
+    }
+  }
+  // Refusals: a cap above the physical jerk limit or a non-positive cap is not a slew.
+  PreviewContactConstraint contact;contact.enabled=true;contact.normal_stand=n;contact.count=2;
+  contact.knots[0]={0.,0.};contact.knots[1]={.24,0.};
+  auto bad=tc;bad.contact_slew_jerk_m_s3=0.;CHECK(!slewContactAuthority(contact,.01,0.,bad,.002));
+  bad.contact_slew_jerk_m_s3=bad.max_linear_jerk_m_s3*2.;CHECK(!slewContactAuthority(contact,.01,0.,bad,.002));
+  bool threw=false;
+  try {PreviewExecutionWorker worker(bad,followerConfig(),workerConfig());} catch(const std::invalid_argument&) {threw=true;}
+  CHECK(threw);
+  return true;
+}
+
 bool wallClockBenchmark() {
   setExternalSteadyNs(0);
   const auto root=std::filesystem::path(__FILE__).parent_path().parent_path();
@@ -521,7 +651,7 @@ bool wallClockBenchmark() {
 
 int main(int argc,char** argv) {
   if(argc==2 && std::string(argv[1])=="--wall-clock-benchmark")return wallClockBenchmark()?0:1;
-  const bool okay=testContactRestrictionConvergesToTheFreeCandidate()&&testSnapshotAndExport()&&testWorkerSpliceAndAdmission()&&testRefusalsAndBoundedSnapshots()&&
+  const bool okay=testContactSlewKeepsClosingNearScaledNominal()&&testContactRestrictionConvergesToTheFreeCandidate()&&testSnapshotAndExport()&&testWorkerSpliceAndAdmission()&&testRefusalsAndBoundedSnapshots()&&
       testPhysicalContactAndBrakePredecessor()&&testClampedDispatchSplice()&&testVelocityAuthorityAtSourceZeroCrossing()&&testGaugeTransportPreservesC2AndIdentity();
   setExternalSteadyNs(0);
   if (!okay) return 1;
