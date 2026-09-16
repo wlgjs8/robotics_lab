@@ -51,6 +51,7 @@ PreviewTrackerConfig trackerConfig() {
   c.max_linear_velocity_m_s=.6; c.max_linear_acceleration_m_s2=12.; c.max_linear_jerk_m_s3=2000.;
   c.contact_slew_jerk_m_s3=400.;
   c.trusted_future_sec=0.;   // legacy: the selected segment only; the window variant is tested explicitly
+  c.contact_realign_sec=.1;c.contact_retreat_slack_m_s=.005;
   c.max_angular_velocity_rad_s=1.4; c.max_angular_acceleration_rad_s2=40.; c.max_angular_jerk_rad_s3=4000.;
   c.linear_tracking_tolerance_m=.02; c.angular_tracking_tolerance_rad=.08;
   c.max_linear_tracking_slack_m=.08; c.max_angular_tracking_slack_rad=.25;
@@ -372,12 +373,11 @@ bool testClampedDispatchSplice() {
     const auto& tr=trackerConfig();const double tol=tr.feasibility_tolerance;
     const double v0=at_splice.linear_velocity.x();
     // Since 2026-09-15 night the authority is SLEWED from the dispatched closing state
-    // (see slewContactAuthority) instead of widened along the fastest brake, so the
-    // stop lands one to two planning intervals after the fastest-brake time and is
-    // never faster than the authority itself; the plan must still sit under the
-    // certified bound at every sample.
-    const double t_brake=v0/tr.max_linear_acceleration_m_s2+2*tr.max_linear_acceleration_m_s2/tr.max_linear_jerk_m_s3+
-        5*tr.planning_dt_sec;
+    // (see slewContactAuthority) instead of widened along the fastest brake, and since
+    // 2026-09-16 it is two-sided: the plan sits inside the certified tube at every
+    // sample, closing at no less than g x the free candidate toward the source that is
+    // still ahead of it (it used to be free to stop, or to retreat, on its own).
+    (void)v0;
     for(int k=0;k<=120;++k) {
       PreviewMotionSample s;CHECK(out.trajectory.sample(.002*k,s));
       const auto& cert=out.contact_authority;std::size_t hi=1;
@@ -385,7 +385,7 @@ bool testClampedDispatchSplice() {
       const auto& a=cert.knots[hi-1];const auto& b=cert.knots[hi];
       const double u=std::clamp((.002*k-a.time_sec)/(b.time_sec-a.time_sec),0.,1.);
       CHECK(s.linear_velocity.x()<=(1-u)*a.upper_velocity_m_s+u*b.upper_velocity_m_s+tol);
-      if(.002*k>=t_brake)CHECK(s.linear_velocity.x()<=tol);
+      CHECK(s.linear_velocity.x()>=(1-u)*a.lower_velocity_m_s+u*b.lower_velocity_m_s-tol);
     }
   }
   // A SPLICE THAT STILL CLOSES FASTER THAN THE NEW KNOT-0 BOUND IS WIDENED, NEVER
@@ -649,9 +649,129 @@ bool wallClockBenchmark() {
 }
 } // namespace
 
+// TWO-SIDED CONTACT TUBE (2026-09-16). The ceiling alone left the plan free to back
+// out of a contact on the objective's own account: a replan that starts mid-brake
+// after an impact (closing +8 mm/s, -3.5 m/s^2) unwound that acceleration at the jerk
+// the cost prefers, -72 mm/s and 4.5 mm of retreat offline, -86 mm/s and a lost
+// contact on the 14:38 run, with the source 8 mm DEEPER the whole time. The floor is
+// the free candidate's own lower envelope (closing scaled by g, retreat unscaled), the
+// candidate is solved from a de-braked splice, and the slew lands on the scaled
+// candidate's state, so the tube is feasible by construction.
+bool testContactTubeStopsDiscretionaryRetreat() {
+  auto tc=trackerConfig();
+  const Eigen::Vector3d n(0.,0.,-1.);
+  const auto at=[](double x,double y,double z){Pose6D p;p.x=x;p.y=y;p.z=z;return p;};
+  const auto line=[&](const Eigen::Vector3d& p0,const Eigen::Vector3d& v) {
+    PreviewReference r;r.count=25;
+    for(std::size_t k=0;k<r.count;++k) {const double t=.01*k;const Eigen::Vector3d p=p0+v*t;r.knots[k]={t,at(p.x(),p.y(),p.z())};}
+    return r;
+  };
+  const auto floor_at=[&](const PreviewContactConstraint& contact,double t) {
+    std::size_t hi=1;while(hi+1<contact.count&&contact.knots[hi].time_sec<t)++hi;
+    const auto& a=contact.knots[hi-1];const auto& b=contact.knots[hi];
+    if(!std::isfinite(a.lower_velocity_m_s)||!std::isfinite(b.lower_velocity_m_s))return -std::numeric_limits<double>::infinity();
+    const double u=std::clamp((t-a.time_sec)/(b.time_sec-a.time_sec),0.,1.);
+    return (1-u)*a.lower_velocity_m_s+u*b.lower_velocity_m_s;
+  };
+  const auto ceiling_at=[&](const PreviewContactConstraint& contact,double t) {
+    std::size_t hi=1;while(hi+1<contact.count&&contact.knots[hi].time_sec<t)++hi;
+    const auto& a=contact.knots[hi-1];const auto& b=contact.knots[hi];
+    const double u=std::clamp((t-a.time_sec)/(b.time_sec-a.time_sec),0.,1.);
+    return (1-u)*a.upper_velocity_m_s+u*b.upper_velocity_m_s;
+  };
+  // Exactly the worker's pipeline: de-braked candidate, two-sided envelope, slew
+  // landing on the scaled candidate, constrained solve from the true splice.
+  const auto solve=[&](const char* name,const PreviewMotionState& initial,const PreviewReference& ref,double g,
+                       PreviewContactConstraint& contact,PreviewPolynomialTrajectory& nominal_path,
+                       PreviewPolynomialTrajectory& path) {
+    PreviewTrajectoryTracker nominal_tracker(tc),tracker(tc);
+    PreviewMotionState debraked=initial;
+    debraked.linear_acceleration-=std::min(0.,n.dot(debraked.linear_acceleration))*n;
+    const auto nominal=nominal_tracker.plan(ref,debraked,{},PreviewContactSolveMode::Automatic,.05);
+    if(!nominal.accepted()||!nominal_tracker.exportTrajectory(nominal_path)) {std::cerr<<name<<": nominal rejected\n";return false;}
+    contact.enabled=true;contact.normal_stand=n;
+    if(!buildContactEnvelope(contact,nominal_path,g,.002,tc.contact_retreat_slack_m_s)) {std::cerr<<name<<": envelope refused\n";return false;}
+    if(!slewContactAuthority(contact,n.dot(initial.linear_velocity),n.dot(initial.linear_acceleration),tc,.002,&nominal_path,g)) {std::cerr<<name<<": slew refused\n";return false;}
+    const auto solved=tracker.plan(ref,initial,contact,PreviewContactSolveMode::Automatic,.05);
+    if(!solved.accepted()) {std::cerr<<name<<" status="<<static_cast<int>(solved.status)<<" viol="<<solved.diagnostics.max_contact_velocity_violation_m_s<<'\n';return false;}
+    if(!tracker.exportTrajectory(path))return false;
+    // Every sample honours both sides; the scaled candidate itself lies inside the tube.
+    for(int k=0;k<=120;++k) {
+      const double t=.002*k;PreviewMotionSample b,c;if(!path.sample(t,b)||!nominal_path.sample(t,c))return false;
+      const double vc=n.dot(b.linear_velocity),vn=g*n.dot(c.linear_velocity);
+      if(vc>ceiling_at(contact,t)+tc.feasibility_tolerance) {std::cerr<<name<<": ceiling violated at "<<t<<'\n';return false;}
+      if(vc<floor_at(contact,t)-tc.feasibility_tolerance) {std::cerr<<name<<": floor violated at "<<t<<'\n';return false;}
+      if(t>=.06&&(vn>ceiling_at(contact,t)+1e-9||vn<floor_at(contact,t)-1e-9)) {std::cerr<<name<<": scaled candidate outside its tube at "<<t<<'\n';return false;}
+    }
+    return true;
+  };
+  const auto closing_at=[&](const PreviewPolynomialTrajectory& path,double t) {
+    PreviewMotionSample b;
+    if(!path.sample(t,b))return std::numeric_limits<double>::quiet_NaN();
+    return n.dot(b.linear_velocity);
+  };
+  // A. Post-impact unwinding: closing +8 mm/s while braking at -3.5 m/s^2 along the
+  // normal, source 8 mm DEEPER and stationary, g = 0.5. Only the braking profile's own
+  // dip remains (~17 mm/s for ~25 ms), not the objective's -72 mm/s; the de-braked
+  // candidate closes, so the floor is positive once the slew has landed.
+  {
+    PreviewMotionState s;s.pose=at(.35,.10,-.2141);s.linear_velocity={0.,0.,-.008};s.linear_acceleration={0.,0.,3.5};
+    const auto ref=line({.35,.10,-.2221},{0.,0.,0.});
+    PreviewContactConstraint contact;PreviewPolynomialTrajectory nominal_path,path;
+    CHECK(solve("unwinding",s,ref,.5,contact,nominal_path,path));
+    CHECK(contact.knots[0].lower_velocity_m_s<=.008);           // the dispatched state is admitted
+    double min_closing=0.,max_retreat=0.;
+    for(int k=0;k<=120;++k) {
+      const double t=.002*k;PreviewMotionSample b;CHECK(path.sample(t,b));
+      min_closing=std::min(min_closing,n.dot(b.linear_velocity));
+      max_retreat=std::max(max_retreat,n.dot(Eigen::Vector3d(s.pose.x,s.pose.y,s.pose.z)-Eigen::Vector3d(b.pose.x,b.pose.y,b.pose.z)));
+    }
+    std::cout<<"unwinding: min closing "<<min_closing*1e3<<" mm/s, max retreat "<<max_retreat*1e3<<" mm, closing at 0.1 s "<<closing_at(path,.1)*1e3<<" mm/s\n";
+    CHECK(min_closing>=-.025);
+    CHECK(max_retreat<=.0006);
+    for(int k=30;k<=60;++k)CHECK(floor_at(contact,.002*k)>=0.);
+    CHECK(closing_at(path,.1)>.01);                             // closing on the deeper source at g x nominal
+  }
+  // B. Lifting source: 10 mm ABOVE the plan and rising at 100 mm/s. Retreat must follow
+  // the candidate at FULL authority, not g x it.
+  {
+    PreviewMotionState s;s.pose=at(.35,.10,-.2141);
+    const auto ref=line({.35,.10,-.2041},{0.,0.,.1});
+    PreviewContactConstraint contact;PreviewPolynomialTrajectory nominal_path,path;
+    CHECK(solve("lifting",s,ref,.05,contact,nominal_path,path));
+    const double late=closing_at(path,.2),candidate=closing_at(nominal_path,.2);
+    std::cout<<"lifting: closing at 0.2 s "<<late*1e3<<" mm/s, candidate "<<candidate*1e3<<" mm/s, floor "<<floor_at(contact,.2)*1e3<<" mm/s\n";
+    CHECK(candidate<-.05);
+    CHECK(floor_at(contact,.2)<=candidate+1e-9);                // unscaled retreat authority
+    CHECK(late<=.5*candidate);                                   // and the plan uses it
+  }
+  // C. A dispatched retreat (closing -50 mm/s) against a source 5 mm deeper is not
+  // refused: the slew admits it and brings the plan back onto the closing candidate.
+  {
+    PreviewMotionState s;s.pose=at(.35,.10,-.2141);s.linear_velocity={0.,0.,.05};
+    const auto ref=line({.35,.10,-.2191},{0.,0.,0.});
+    PreviewContactConstraint contact;PreviewPolynomialTrajectory nominal_path,path;
+    CHECK(solve("dispatched retreat",s,ref,.5,contact,nominal_path,path));
+    CHECK(contact.knots[0].lower_velocity_m_s<=-.05);
+    CHECK(closing_at(path,.2)>=.5*closing_at(nominal_path,.2)-1e-6);
+    CHECK(closing_at(path,.2)>0.);
+  }
+  // A floor above the ceiling or a NaN floor is malformed authority, refused by both.
+  {
+    PreviewContactConstraint contact;contact.enabled=true;contact.normal_stand=n;contact.count=2;
+    contact.knots[0]={0.,.01,.02};contact.knots[1]={.24,.01,.02};
+    CHECK(!slewContactAuthority(contact,.0,0.,tc,.002));
+    PreviewTrajectoryTracker tracker(tc);PreviewMotionState s;s.pose=at(.35,.10,-.2141);
+    CHECK(tracker.plan(line({.35,.10,-.2141},{0.,0.,0.}),s,contact,PreviewContactSolveMode::Automatic,.05).status==PreviewSolveStatus::InvalidReference);
+    contact.knots[0].lower_velocity_m_s=contact.knots[1].lower_velocity_m_s=std::numeric_limits<double>::quiet_NaN();
+    CHECK(tracker.plan(line({.35,.10,-.2141},{0.,0.,0.}),s,contact,PreviewContactSolveMode::Automatic,.05).status==PreviewSolveStatus::InvalidReference);
+  }
+  return true;
+}
+
 int main(int argc,char** argv) {
   if(argc==2 && std::string(argv[1])=="--wall-clock-benchmark")return wallClockBenchmark()?0:1;
-  const bool okay=testContactSlewKeepsClosingNearScaledNominal()&&testContactRestrictionConvergesToTheFreeCandidate()&&testSnapshotAndExport()&&testWorkerSpliceAndAdmission()&&testRefusalsAndBoundedSnapshots()&&
+  const bool okay=testContactTubeStopsDiscretionaryRetreat()&&testContactSlewKeepsClosingNearScaledNominal()&&testContactRestrictionConvergesToTheFreeCandidate()&&testSnapshotAndExport()&&testWorkerSpliceAndAdmission()&&testRefusalsAndBoundedSnapshots()&&
       testPhysicalContactAndBrakePredecessor()&&testClampedDispatchSplice()&&testVelocityAuthorityAtSourceZeroCrossing()&&testGaugeTransportPreservesC2AndIdentity();
   setExternalSteadyNs(0);
   if (!okay) return 1;

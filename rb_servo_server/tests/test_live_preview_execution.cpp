@@ -36,7 +36,7 @@ RuckigFollowerConfig config(bool recovery=false,double leash_start=.025) {
   if(recovery)p.recovery={true,.25,3};
   auto& t=p.tracker;t.planning_dt_sec=.01;t.horizon_steps=24;
   t.max_linear_velocity_m_s=.6;t.max_linear_acceleration_m_s2=12;t.max_linear_jerk_m_s3=2000;
-  t.contact_slew_jerk_m_s3=400;t.trusted_future_sec=0;
+  t.contact_slew_jerk_m_s3=400;t.trusted_future_sec=0;t.contact_realign_sec=.1;t.contact_retreat_slack_m_s=.005;
   t.max_angular_velocity_rad_s=1.4;t.max_angular_acceleration_rad_s2=40;t.max_angular_jerk_rad_s3=4000;
   t.linear_tracking_scale_m=.01;t.angular_tracking_scale_rad=.03;
   t.jerk_weight=2000;t.jerk_difference_weight=.01;
@@ -1037,10 +1037,55 @@ bool executorDoesNotClampTheLead() {
   return true;
 }
 
+// SOURCE-BASED RETIREMENT (2026-09-16). While closing authority holds, the source's
+// refused closing advance (1-g) x closing and a deeper source's gap / realign are
+// retired along the normal every tick, so the source stays beside the executor at the
+// contact instead of running 48-53 mm ahead (14:38 run: five backlog recoveries, all in
+// held contacts). Nothing is retired in free space.
+bool sourceRetirementFollowsTheSource() {
+  setExternalSteadyNs(kStartNs);Fixture f;CHECK(f.engage());
+  const Eigen::Vector3d n=Eigen::Vector3d::UnitX();const double g=.2;
+  const double realign=config().preview_execution.tracker.contact_realign_sec;
+  int retired_ticks=0,bound_ticks=0;double worst_gap=0.,worst_late_gap=0.;
+  for(int i=0;i<200;++i) {
+    letWorkerRun();const auto out=f.step(true,g,n);
+    CHECK(!out.fault&&!f.exec.braking());CHECK(f.accept(out));
+    const auto raw=f.raw.outputKinematics();
+    const Eigen::Vector3d retired=f.exec.retiredSourceAdvance();
+    if(f.exec.telemetry().contact_bound_active) {
+      ++bound_ticks;
+      const double gap=n.dot(Eigen::Vector3d(raw.pose.x,raw.pose.y,raw.pose.z)-
+                             Eigen::Vector3d(f.exec.sample().pose.x,f.exec.sample().pose.y,f.exec.sample().pose.z));
+      const double closing=std::max(0.,raw.velocity.x);
+      // Never less than the refused advance plus the realign pull, and only along n.
+      CHECK(retired.x()>=kDt*(1.-g)*(closing+std::max(0.,gap)/realign)-1e-9);
+      CHECK(retired.y()==0.&&retired.z()==0.);
+      if(retired.x()>0.)++retired_ticks;
+      worst_gap=std::max(worst_gap,gap);
+      if(i>=100)worst_late_gap=std::max(worst_late_gap,gap);
+    } else CHECK(retired.isZero(0.));
+    // The servo loop applies the retirement to the raw source; do the same here.
+    if(!retired.isZero(0.))CHECK(f.raw.absorbOffset(-retired,Eigen::Quaterniond::Identity()));
+  }
+  std::cout<<"retirement: bound ticks "<<bound_ticks<<", retired ticks "<<retired_ticks
+           <<", worst gap "<<worst_gap*1e3<<" mm, worst late gap "<<worst_late_gap*1e3<<" mm\n";
+  CHECK(bound_ticks>100);CHECK(retired_ticks>bound_ticks/2);
+  // The source is held beside the executor: within a realign window of its 30 mm/s.
+  CHECK(worst_late_gap<.03*realign+.001);
+  // Free space: the bound is gone and nothing is retired.
+  int free_ticks=0;
+  for(int i=0;i<40;++i) {
+    letWorkerRun();const auto out=f.step();CHECK(!out.fault);CHECK(f.accept(out));
+    if(!f.exec.telemetry().contact_bound_active) {++free_ticks;CHECK(f.exec.retiredSourceAdvance().isZero(0.));}
+  }
+  CHECK(free_ticks>10);
+  return true;
+}
+
 int main() {
   const bool ok=coldAndC2Splice()&&epochsAndContinuousGateIdentity()&&acceptedTransactionGaugeAndDeviation()&&
       frameShiftAndCanonicalIndependence()&&expiryAndDispatchRefusal()&&invalidInputAndContactStop()&&
-      oldAcceptedTransactionAcrossFoldSeedsBrake()&&currentVelocityAuthority()&&coldRetreatAuthority()&&
+      oldAcceptedTransactionAcrossFoldSeedsBrake()&&currentVelocityAuthority()&&sourceRetirementFollowsTheSource()&&coldRetreatAuthority()&&
       rejectedStagedPlanRetainsBrakeClock()&&contactRetainsAngularUntilOriginalExpiry()&&
       geometryFoldsTransportPendingStagedAndQueuedDispatch()&&authorityFoldAndResetCancellationAreAccounted()&&forceFoldIsTransportedLikeGeometry()&&
       geometryFoldCannotTransportReplacedSource()&&firstPlanStarvationRecoversWithoutLatch()&&

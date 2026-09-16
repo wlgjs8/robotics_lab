@@ -444,6 +444,29 @@ class FlowMatchingActionSource:
         # the jaw cracked open. 0 = off. Absolute (non-binary) mode only. Set from
         # the `--gripper-close-snap-percent` CLI flag in main.py.
         self.gripper_close_snap_percent = 0.0
+        # Rows of LEAD the gripper takes over the pose inside the same chunk. 0 = off (the gripper
+        # reads the row the pose is executing, which is the historical behaviour).
+        #
+        # Why this exists (measured 2026-09-16 on the 21:06 rollout + its chunk log): the two
+        # columns of an `anchored` chunk have opposite shapes. The tool-z is FRONT-loaded -- rows
+        # 0-3 carry 40% of the chunk's z displacement against a flat-ramp 16.7% -- so an execute
+        # limit of 4 over-serves it. The gripper is BACK-loaded: rows 0-3 carry 4.2% (left) / 9.7%
+        # (right). The model's own close is fine at 32-35 mm/s over the full horizon, against 28.5
+        # mm/s in the demonstrations, but executing only rows 0-3 and then re-planning runs the
+        # flat head of the ramp forever -- a Zeno close, measured at 7.2 / 19.1 mm/s commanded and
+        # 3.9-5.2 / 10.3-35.7 mm/s at the jaw. The ramp is steep from about row 4 on, so a lead of
+        # 4 -- one execute window -- already restores 28.0 (left) / 23.4 (right) mm/s, and bigger
+        # leads buy almost nothing while parking the setpoint further ahead of the model's current
+        # intent (1.2/2.7 mm of lead at 4, 5.6/6.4 mm at 8). Raising --chunk-execute-steps instead
+        # is strictly worse: it needs 12 to match what a lead of 4 gives, and adds 0.7 mm of pose
+        # plan staleness on the way.
+        #
+        # A lead is sound for the gripper and would NOT be for the pose: the gripper column is an
+        # ABSOLUTE per-frame opening (openpi `_anchor_relative_chunk` leaves col 6/13 untouched),
+        # so reading a later row asks for a setpoint the model itself predicted, with no anchor to
+        # drift from. Only applies in absolute gripper mode; in delta mode the rows must be
+        # integrated in order, so the lead is refused at parse time.
+        self.gripper_lookahead_steps = 0
         # Re-hold the last SENT gripper command until the target moves more than
         # this (opening percent), so per-step model jitter does not re-target the
         # jaw at 30 Hz. 0 = off. The fully-closed (0%) state is exempt in both
@@ -1148,8 +1171,9 @@ class FlowMatchingActionSource:
         chunk_step_index = int(self._chunk_index)
         step = self._chunk[chunk_step_index]
         self._chunk_index += 1
-        gripper_targets = self._integrate_gripper_targets(step, payload)
-        self._dispatch_gripper_step(step)
+        grip_step = self._gripper_step_row(self._chunk, chunk_step_index)
+        gripper_targets = self._integrate_gripper_targets(grip_step, payload)
+        self._dispatch_gripper_step(grip_step)
         intent = self._emit_step_intent(step, payload, gripper_targets)
         self._log_rollout_policy_step(
             step=step,
@@ -1450,8 +1474,9 @@ class FlowMatchingActionSource:
         if advanced and self._chunk is not None:
             self._log_chunk_tracking(payload, now_monotonic, int(self._chunk_index))
             step = self._chunk[self._chunk_index]
-            gripper_targets = self._integrate_gripper_targets(step, payload)
-            self._dispatch_gripper_step(step)
+            grip_step = self._gripper_step_row(self._chunk, int(self._chunk_index))
+            gripper_targets = self._integrate_gripper_targets(grip_step, payload)
+            self._dispatch_gripper_step(grip_step)
             self._current_gripper_targets = gripper_targets
             if foh:
                 # On a fresh chunk activation (index 0) install its FOH knots, then emit
@@ -2856,8 +2881,10 @@ class FlowMatchingActionSource:
         return int(self.gripper_runtime.dropped_count)
 
     def _gripper_close_bias(self, arm: str | None = None) -> float:
-        """Percent subtracted from the ABSOLUTE gripper opening target so grasps
-        close more firmly (e.g. 1.0 turns an 18% command into 17%). 0 in delta
+        """Subtracted from the ABSOLUTE gripper opening target so grasps close more
+        firmly (e.g. 1.0 turns an 18 command into 17). The unit is whatever
+        `gripper.units` is: MILLIMETRES of jaw opening by default (sdk_mm), percent of
+        the motor range under the legacy motor_fraction. 0 in delta
         mode (the action is a relative change, biasing it would compound), and 0
         in binary mode (the value snaps to the open/close presets).
 
@@ -2909,6 +2936,15 @@ class FlowMatchingActionSource:
         if getattr(self, "gripper_binary", False):
             return float(np.clip(getattr(self, "gripper_open_percent", 50.0), 0.0, 100.0))
         return 100.0
+
+    def _gripper_step_row(self, chunk, index: int) -> np.ndarray:
+        """The chunk row the GRIPPER reads this tick: `index` plus `gripper_lookahead_steps`,
+        clamped to the last row. Identical to the pose row when the lead is 0 or the gripper is in
+        delta mode (where rows must be integrated in order)."""
+        lead = int(getattr(self, "gripper_lookahead_steps", 0) or 0)
+        if lead <= 0 or not getattr(self, "gripper_action_absolute", True):
+            return chunk[index]
+        return chunk[min(int(index) + lead, len(chunk) - 1)]
 
     def _dispatch_gripper_step(self, step: np.ndarray) -> None:
         # RAW action debug is terminal-heavy; keep it opt-in so live flow-infer

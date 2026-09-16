@@ -62,6 +62,19 @@ struct PreviewTrackerConfig {
   // Rows beyond the window still cannot pull the command (they are not sampled).
   // Nonnegative, at most the horizon; no default.
   double trusted_future_sec{0.0};
+  // CONTACT REALIGN (2026-09-16). Time constant on which a source that is DEEPER than
+  // the executor along the contact normal is retired back to it while authority holds:
+  // (1-g) x gap / realign on top of the refused share of its closing advance,
+  // (1-g) x closing (LivePreviewExecution). Positive, at most the horizon; no default.
+  double contact_realign_sec{0.0};
+  // CONTACT RETREAT SLACK (2026-09-16). How far below the free candidate's scaled lower
+  // envelope the constrained plan may sit along the contact normal (m/s). The tube
+  // around g x candidate is otherwise exact, and at g ~ 0 it is micrometres per
+  // second wide: qpOASES then thrashes between the two sides of every row and hits
+  // the working-set limit (executor test, 2026-09-16). 5 mm/s of slack is 0.5 mm of
+  // discretionary retreat per 100 ms against the 8 mm the one-sided authority allowed.
+  // Nonnegative, at most max_linear_velocity_m_s; no default.
+  double contact_retreat_slack_m_s{0.0};
   // REFERENCE TRUST (2026-09-10). The reference is the source rolled forward over the
   // whole horizon, but only its first ~100-133 ms is a chunk the policy has committed
   // to executing: everything past that is replaced by the next inference. Taking the
@@ -126,7 +139,20 @@ struct PreviewReference {
 // is granted: a seed faster into contact must first use the separate brake.
 struct PreviewContactConstraint {
   static constexpr std::size_t kCapacity = 384;
-  struct Knot { double time_sec{0.0}; double upper_velocity_m_s{0.0}; };
+  struct Knot {
+    double time_sec{0.0};
+    double upper_velocity_m_s{0.0};
+    // RETREAT FLOOR (2026-09-16) on the same closing velocity: n . v >= lower.
+    // -infinity = no floor (the one-sided authority of 2026-09-15). The producer
+    // (buildContactEnvelope) sets it to min(g x min, min) of the free candidate's
+    // Bernstein controls: the plan closes at no less than g x the free candidate and
+    // retreats only when that candidate retreats, then at full authority. On the 14:38
+    // run (left, 317.69-317.80 s) the plan left a 46 N contact at -86 mm/s with the
+    // bound at 0 and the source 8 mm DEEPER - the jerk-weighted unwinding of its
+    // braking acceleration - lost the force, and re-dived 16 mm at 130 mm/s into a
+    // second 55 N impact. Between knots the floor is piecewise linear like the bound.
+    double lower_velocity_m_s{-std::numeric_limits<double>::infinity()};
+  };
   bool enabled{false};
   Eigen::Vector3d normal_stand{Eigen::Vector3d::Zero()};
   std::array<Knot, kCapacity> knots{};

@@ -1232,15 +1232,26 @@ bool testGateIsJudgedOnThePhysicalVector() {
     double removed = 0.0;
     cutAlong(-0.001 * gate.contactNormal(), gate.contactNormal(), gate.translation(), &removed);
     CHECK(removed > 0.0009);
-    // Both 1 N and 0.4 N are below the 2 N confidence band.
+    // Both 1 N and 0.4 N are below the 2 N confidence band: no NEW normal is formed
+    // from them. Since 2026-09-16 the contact just seen is REMEMBERED - its normal and
+    // physical gate persist while that gate re-opens (see
+    // testGateKeepsClosingAuthorityReducedAfterContactLoss) - so the published normal
+    // is still the 12.4 N press's, not the 1 N residual's direction.
+    const Vector3 pressed = gate.contactNormal();
     gate.update(Vector3(0.0, 0.0, 1.0), zero, 0.200);
     CHECK(near(gate.forceN(), 1.0));
-    CHECK(gate.contactNormal().isZero(0.0));
-    gate.update(Vector3(0.0, 0.0, 0.4), zero, 0.200);
+    CHECK(gate.confidence() == 0.0);
+    CHECK((gate.contactNormal() - pressed).norm() == 0.0);
+    gate.update(Vector3(0.0, 0.4, 0.0), zero, 0.200);
     CHECK(near(gate.forceN(), 0.4));
-    CHECK(gate.contactNormal().isZero(0.0));
+    CHECK((gate.contactNormal() - pressed).norm() == 0.0);   // not the residual's direction
     CHECK(!gate.forceDirection().isZero(0.0));   // the direction is still known ...
-    CHECK(gate.forceDirection().z() == 1.0);      // ... just not published as a normal
+    CHECK(gate.forceDirection().y() == 1.0);      // ... just not published as a normal
+    // A gate that never saw the band has nothing to remember.
+    rb_servo::control::ForceGate fresh;
+    fresh.configure(cfg, kDt);
+    fresh.update(Vector3(0.0, 0.0, 1.0), zero, 0.200);
+    CHECK(fresh.contactNormal().isZero(0.0));
     return true;
 }
 
@@ -1476,6 +1487,69 @@ bool testContactNormalNeverSwitchesAcrossTheOperatingForce() {
 
 }  // namespace
 
+// CONTACT MEMORY (2026-09-16). Losing the force after a contact used to open the
+// closing authority to 1.0 on that very tick (confidence 0 -> no normal), and the
+// executor re-dived at 100-139 mm/s into the surface it had just bounced off (14:38
+// run, left 317.87-318.07 s, second impact 55 N). A seen contact now keeps its normal
+// and its physical gate until that gate has re-opened on gate_open_tau_s.
+bool testGateKeepsClosingAuthorityReducedAfterContactLoss() {
+    rb_servo::ForceControlConfig cfg = oneLaw();
+    rb_servo::control::ForceGate gate;
+    gate.configure(cfg, kDt);
+    const Vector3 zero = Vector3::Zero();
+    const Vector3 push(0.0, 0.0, cfg.target_force_n);   // at target: physical gate -> 0
+    for (int i = 0; i < 500; ++i) gate.update(push, zero, 0.2);
+    CHECK(gate.translation() < 0.02);
+    const Vector3 normal = gate.contactNormal();
+    CHECK((normal - push.normalized()).norm() < 1e-12);
+    // Force gone: confidence 0, but the authority stays the physical gate along the
+    // remembered normal and only ramps open on the slow time constant.
+    gate.update(zero, zero, 0.2);
+    CHECK(gate.confidence() == 0.0);
+    CHECK(std::abs(gate.translation() - gate.physicalGate()) < 1e-12);
+    CHECK(gate.translation() < 0.05);
+    CHECK((gate.contactNormal() - normal).norm() < 1e-12);
+    double previous = gate.translation();
+    int ticks = 1;
+    double at_200ms = -1.0;
+    while (gate.translation() < 1.0 && ticks < 5000) {
+        gate.update(zero, zero, 0.2);
+        CHECK(gate.translation() >= previous);
+        previous = gate.translation();
+        ++ticks;
+        if (ticks == 100) at_200ms = gate.translation();
+    }
+    // 0.2 s after the loss the re-approach is still cut to ~40 % (1 - e^-0.5).
+    CHECK(at_200ms > 0.3 && at_200ms < 0.5);
+    // Released to exactly 1.0 with the normal dropped, later than tau, well within 2 s.
+    CHECK(gate.translation() == 1.0);
+    CHECK(gate.contactNormal().isZero(0.0));
+    CHECK(ticks * kDt > cfg.gate_open_tau_s);
+    CHECK(ticks * kDt < 2.0);
+    // A fresh confident contact in another direction re-arms the memory on its normal.
+    const Vector3 side(cfg.target_force_n, 0.0, 0.0);
+    for (int i = 0; i < 50; ++i) gate.update(side, zero, 0.2);
+    CHECK((gate.contactNormal() - side.normalized()).norm() < 1e-12);
+    gate.update(zero, zero, 0.2);
+    CHECK((gate.contactNormal() - side.normalized()).norm() < 1e-12);
+    CHECK(gate.translation() < 0.5);
+    // A contact that only grazed the band remembers only its small peak: the band
+    // edge stays continuous (a 2 N + eps reading is a ~0 cut, exactly as before).
+    rb_servo::control::ForceGate grazed;
+    grazed.configure(cfg, kDt);
+    const Vector3 graze(0.0, 0.0, cfg.contact_noise_low_n + 1e-3);
+    for (int i = 0; i < 200; ++i) grazed.update(graze, zero, 0.2);
+    grazed.update(zero, zero, 0.2);
+    CHECK(grazed.translation() > 1.0 - 1e-4);
+    // Never contacted: free space stays exactly free (no memory to hold).
+    rb_servo::control::ForceGate fresh;
+    fresh.configure(cfg, kDt);
+    for (int i = 0; i < 100; ++i) fresh.update(zero, zero, 0.2);
+    CHECK(fresh.translation() == 1.0);
+    CHECK(fresh.contactNormal().isZero(0.0));
+    return true;
+}
+
 int main() {
     testTareNoiseIsSeparateFromBias();
     testExternallyVerifiedSensorDoesNotGrantTareOrAcceptInvalidWrench();
@@ -1507,6 +1581,7 @@ int main() {
     testGateIsAsymmetric();
     testGateIsOpenInFreeSpace();
     testGateReopensToExactlyOneAfterRelease();
+    testGateKeepsClosingAuthorityReducedAfterContactLoss();
     testHoldFoldDeltaFloorAndCap();
     testFreezeHoldsTheDeviationWhileTheCommandIsNotExecuted();
     testResumeContinuesFromTheFrozenDeviation();

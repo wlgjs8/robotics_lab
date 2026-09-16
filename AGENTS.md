@@ -146,7 +146,11 @@ this revision is pending; historical hardware evidence does not qualify these ne
   below target existing velocity decays, and yielded position is retained by source folds.
 - The law reads the 25 Hz compensated pre-deadzone stand vector; the gate reads the 3 Hz
   vector. Confidence is zero through 2 N, smooth from 2 to 3 N, full at 3 N. It is not
-  subtracted from the 20 N physical target. Demand is diagnostic, not gate feedback.
+  subtracted from the 20 N physical target. Demand is diagnostic, not gate feedback. A
+  contact that was seen is REMEMBERED (2026-09-16): its normal and peak confidence keep
+  scaling the physical gate after the force drops out of the band, until that gate has
+  re-opened past 0.98 on the 0.40 s constant - losing the force no longer opens the closing
+  authority to 1.0 on that tick (the 55 N re-impact of the 14:38 run).
 - Enabled configs require target, mass, damping, noise band, gate enabled and rigid rotation;
   `0 < noise_low < noise_full < target`, finite positive values and `m >= 2*b*0.002`.
   Deleted rest/peak/peak-velocity keys and mixed schemas fail loading. No guessed migration.
@@ -158,8 +162,15 @@ this revision is pending; historical hardware evidence does not qualify these ne
   Actual execution/splices/brakes are in wall time; the SIGNED along-track lead
   (`plan_lead_along_m`) leashes the future QP reference, a lagging plan is never leashed.
   The follower forecast is trusted for `tracker.trusted_future_sec` (0.10 s, the execute
-  window; 0 = the selected segment only), then continued at constant velocity. Unexecuted
-  closing travel is retired from the source, never clamped out of the physical command.
+  window; 0 = the selected segment only), then continued at constant velocity. Since
+  2026-09-16 the bound is a TWO-SIDED tube around `g` x the free candidate (closing scaled by
+  `g`, retreat at full authority, floor slack `tracker.contact_retreat_slack_m_s` 5 mm/s), the
+  candidate is solved from a de-braked splice, and the slew lands on the scaled candidate's
+  state: a plan never backs out of a contact on the objective's own account (the -86 mm/s
+  lift-off and 55 N re-impact of the 14:38 run). Source retirement is source-based: the
+  refused share `(1-g)` of the source's closing advance plus a deeper source's
+  `gap / tracker.contact_realign_sec` (0.10 s) is retired from the source every tick, never
+  clamped out of the physical command, so the source stays beside the executor at a contact.
   A finite brake accepts a seed up to 25 % above a cap (it brakes, it does not fault).
 - A non-emergency latch delivers its decelerate-then-latch ramp under send policy
   `fault_brake` until the sent velocity is zero, then goes silent (`fault_latched`);

@@ -8,6 +8,8 @@ from policy_runner.config import config_from_mapping
 from policy_runner.action_sources.tcp_pose_target import tcp_pose_target_stand_intent
 from policy_runner.gripper import (
     GripperCommand,
+    sdk_jaw_mm,
+    sdk_jaw_mm_to_rad,
     GripperRuntime,
     NoopGripperBackend,
     PikaSerialGripperBackend,
@@ -187,10 +189,14 @@ class GripperRuntimeTest(unittest.TestCase):
 
 
 class PikaSerialGripperBackendTest(unittest.TestCase):
-    # Command values are dataset PERCENT units over [min_rad, max_rad]:
-    # delta_rad = pct/100 * (1.75 - 0.0).
+    """Target integration / clamping / rate / deadband mechanics.
+
+    These pin the LEGACY `units="motor_fraction"` arithmetic (delta_rad = pct/100 * (max-min))
+    because its numbers are readable by hand. The default `units="sdk_mm"` runs the same mechanics
+    through a non-linear unit map and is covered by PikaGripperSdkMmUnitsTest below."""
+
     def test_delta_integrates_from_seeded_motor_position(self) -> None:
-        backend = _pika_backend()
+        backend = _pika_backend(units="motor_fraction", max_rad=1.75)
 
         result = backend.send(GripperCommand("left", 20.0))
 
@@ -203,7 +209,7 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
         self.assertAlmostEqual(angles[0], 0.5 + 0.35)
 
     def test_target_command_is_absolute_percent_and_clamped(self) -> None:
-        backend = _pika_backend(min_rad=0.0, max_rad=1.75)
+        backend = _pika_backend(min_rad=0.0, max_rad=1.75, units="motor_fraction")
 
         backend.send(GripperCommand("right", 200.0, command_type="target"))
         backend._test_clock["now"] = 1.0
@@ -215,7 +221,7 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
         self.assertAlmostEqual(angles[1], 0.875)  # 50% of range
 
     def test_delta_clamps_at_range_and_does_not_wind_up(self) -> None:
-        backend = _pika_backend(min_rad=0.0, max_rad=1.75, deadband_rad=0.0)
+        backend = _pika_backend(min_rad=0.0, max_rad=1.75, deadband_rad=0.0, units="motor_fraction")
         backend._test_clock["now"] = 1.0
         backend.send(GripperCommand("left", 1000.0))
         backend._test_clock["now"] = 2.0
@@ -229,7 +235,7 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
         self.assertAlmostEqual(angles[1], 1.75 - 0.875)
 
     def test_rate_limit_holds_serial_write_but_keeps_integrated_target(self) -> None:
-        backend = _pika_backend(max_hz=10.0, deadband_rad=0.0)
+        backend = _pika_backend(max_hz=10.0, deadband_rad=0.0, units="motor_fraction", max_rad=1.75)
         backend.send(GripperCommand("left", 20.0))
 
         held = backend.send(GripperCommand("left", 20.0))
@@ -324,7 +330,7 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
         self.assertEqual(seen, [frame])
 
     def test_current_percent_reads_live_motor(self) -> None:
-        backend = _pika_backend(min_rad=0.0, max_rad=1.75)
+        backend = _pika_backend(min_rad=0.0, max_rad=1.75, units="motor_fraction")
         backend._grippers["left"].position = 0.875
 
         self.assertAlmostEqual(backend.current_percent("left"), 50.0)
@@ -377,6 +383,59 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
             backend.connect()
 
 
+class PikaGripperSdkMmUnitsTest(unittest.TestCase):
+    """The DEFAULT units: millimetres of jaw opening, as pika_sdk get_gripper_distance() defines
+    them, which is what the collection rig wrote into every dataset."""
+
+    # Straight off the real grippers, tools/measure_gripper_units.py 2026-09-16 20:45.
+    MEASURED = ((0.0004, 0.02), (0.4888, 23.08), (0.9900, 54.63), (1.2902, 74.80), (1.6741, 96.90))
+
+    def test_linkage_matches_the_measured_hardware_sweep(self) -> None:
+        for rad, mm in self.MEASURED:
+            self.assertAlmostEqual(sdk_jaw_mm(rad), mm, delta=0.05)
+
+    def test_mm_round_trips_through_the_inverse(self) -> None:
+        for mm in (0.0, 5.0, 12.0, 23.08, 40.0, 74.8, 95.0):
+            self.assertAlmostEqual(sdk_jaw_mm(sdk_jaw_mm_to_rad(mm)), mm, places=4)
+
+    def test_motor_fraction_over_reports_the_opening(self) -> None:
+        """Regression pin for the bug this unit map replaced: the legacy percent called a physical
+        23.08 mm jaw '27.9', and that +4.85 mm sat inside the grasp band."""
+        rad, mm = 0.4888, 23.08
+        legacy = rad / 1.75 * 100.0
+        self.assertAlmostEqual(legacy - mm, 4.85, delta=0.05)
+
+    def test_target_command_is_absolute_millimetres(self) -> None:
+        backend = _pika_backend()
+        backend.send(GripperCommand("right", 23.08, command_type="target"))
+        self.assertAlmostEqual(backend._grippers["right"].sent_angles[0], 0.4888, delta=1e-3)
+
+    def test_target_clamps_to_the_open_stop(self) -> None:
+        backend = _pika_backend(max_rad=1.66)
+        backend.send(GripperCommand("right", 500.0, command_type="target"))
+        self.assertAlmostEqual(backend._grippers["right"].sent_angles[0], 1.66)
+
+    def test_delta_is_applied_in_mm_not_radians(self) -> None:
+        """A +10 mm delta must land 10 mm further open, not a fixed number of radians -- the map
+        is a four-bar, so a constant delta_rad would mean different mm at every opening."""
+        backend = _pika_backend(deadband_rad=0.0)
+        start_rad = backend._grippers["left"].position  # seeded target, 0.5 rad
+        backend.send(GripperCommand("left", 10.0))
+        sent = backend._grippers["left"].sent_angles[0]
+        self.assertAlmostEqual(sdk_jaw_mm(sent) - sdk_jaw_mm(start_rad), 10.0, places=3)
+
+    def test_current_percent_reports_millimetres(self) -> None:
+        backend = _pika_backend()
+        backend._grippers["left"].position = 0.4888
+        self.assertAlmostEqual(backend.current_percent("left"), 23.08, delta=0.05)
+
+    def test_unknown_units_are_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            PikaSerialGripperBackend(
+                ports={"left": "/dev/ttyFAKE0"}, gripper_cls=FakePikaGripper, units="percent"
+            )
+
+
 class PikaGripperHomingTest(unittest.TestCase):
     # home_poll_sec=0.0 keeps the settle loop fast; the fake reports a constant
     # position so it settles on the second poll regardless.
@@ -395,7 +454,8 @@ class PikaGripperHomingTest(unittest.TestCase):
     def test_homing_makes_a_full_open_command_reach_max_rad(self) -> None:
         # After homing, a 100% target maps to true max_rad on each identical arm.
         backend = _pika_backend(
-            min_rad=0.0, max_rad=2.3738, home_on_connect=True, home_poll_sec=0.0
+            min_rad=0.0, max_rad=2.3738, home_on_connect=True, home_poll_sec=0.0,
+            units="motor_fraction",
         )
         backend.send(GripperCommand("right", 100.0, command_type="target"))
         # Homing write (0.0) then the open write (max_rad).

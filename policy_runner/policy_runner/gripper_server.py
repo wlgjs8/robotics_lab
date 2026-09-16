@@ -232,7 +232,15 @@ class GripperServerConfig:
     )
     sdk_path: str | None = None
     min_rad: float = 0.0
-    max_rad: float = 1.75
+    # Measured open mechanical stop 2026-09-16 (tools/measure_gripper_units.py): left 1.6741 rad,
+    # right 1.6687 rad. The previous 1.75 sat past the stop, so a full-open command pressed on it.
+    max_rad: float = 1.66
+    # Unit of every gripper number this server speaks -- the incoming command, the published
+    # state, and therefore what the policy sees as proprio. 'sdk_mm' (default) is millimetres of
+    # jaw opening per the pika SDK, which is what the collection rig recorded into the datasets.
+    # 'motor_fraction' is the pre-2026-09-16 percent of [min_rad, max_rad]; it over-reports the
+    # opening by up to +4.85 mm around a 23 mm jaw. See policy_runner/gripper.py sdk_jaw_mm.
+    units: str = "sdk_mm"
     deadband_rad: float = 0.005
     backend_max_hz: float = 60.0
     # Millisecond command->jaw latency decomposition (see LatencyProbe).
@@ -345,6 +353,7 @@ class GripperServer:
             sdk_path=cfg.sdk_path,
             min_rad=cfg.min_rad,
             max_rad=cfg.max_rad,
+            units=cfg.units,
             deadband_rad=cfg.deadband_rad,
             max_hz=cfg.backend_max_hz,
             gripper_cls=gripper_cls,
@@ -417,7 +426,9 @@ class GripperServer:
         """Per-arm percent to drive, after stale / deadman handling.
 
         Fresh + deadman engaged -> the commanded percent. Otherwise the on_stale
-        policy: hold (keep last commanded position), open (100), or close (0).
+        policy: hold (keep last commanded position), open (100 -> clamped to the
+        open mechanical stop), or close (0). The numbers are in `gripper.units`
+        (millimetres of jaw opening by default), not a percentage.
         None means "never commanded, nothing to send"."""
         out: dict[str, float | None] = {}
         for arm in ARMS:
@@ -444,10 +455,23 @@ class GripperServer:
             actual = self._backend.current_percent(arm)
             self.stats.last_actual[arm] = None if actual is None else float(actual)
             target = targets.get(arm)
+            # Compare against the setpoint the backend is actually HOLDING, not the number that
+            # came in: a command past the open mechanical stop is clamped, and comparing the raw
+            # command against a measurement that can never reach it latches `moving` forever.
+            # Only reachable under units="sdk_mm", where the command is millimetres and the stop
+            # is ~96 mm rather than a range fraction that tops out at exactly 100.
+            held = None
+            reader = getattr(self._backend, "target_units", None)
+            if callable(reader):
+                try:
+                    held = reader(arm)
+                except Exception:  # noqa: BLE001 - state publication must not raise
+                    held = None
+            reference = held if (held is not None and target is not None) else target
             moving = (
                 actual is not None
-                and target is not None
-                and abs(actual - target) > _MOVING_EPS_PERCENT
+                and reference is not None
+                and abs(actual - reference) > _MOVING_EPS_PERCENT
             )
             msg[arm] = {
                 "percent": None if actual is None else round(float(actual), 2),
@@ -641,6 +665,7 @@ def _build_config_from_args(
         home_on_connect=args.home_on_connect,
         debug_stats=args.debug_stats,
         debug_stats_period_sec=args.debug_stats_period,
+        units=args.units,
         latency_probe=bool(getattr(args, "latency_probe", False)),
     )
 
@@ -726,6 +751,16 @@ def _monitor(endpoint: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="robotics_lab gripper server (Phase 1)")
     p.add_argument("--backend", choices=("sim", "pika"), default="sim")
+    p.add_argument(
+        "--units",
+        choices=("sdk_mm", "motor_fraction"),
+        default="sdk_mm",
+        help=(
+            "unit of every gripper number on the wire. sdk_mm (default) = millimetres of jaw "
+            "opening, matching what the collection rig recorded; motor_fraction = the "
+            "pre-2026-09-16 percent of the motor range, kept only to reproduce old runs"
+        ),
+    )
     p.add_argument("--bind", default="0.0.0.0:50410", help="command listen endpoint")
     p.add_argument("--state-endpoint", action="append", help="state publish endpoint (repeatable)")
     p.add_argument(

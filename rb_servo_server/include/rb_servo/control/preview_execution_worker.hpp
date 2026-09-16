@@ -168,9 +168,21 @@ bool transportPreviewExecutionResult(PreviewExecutionResult& result,
 // servo-grid chord margin of the slew's quadratic pieces; nothing below the original
 // envelope is ever admitted, and beyond the slew the envelope is untouched. Returns
 // false on invalid input or knot overflow. See PreviewTrackerConfig::contact_slew_jerk_m_s3.
+// With `nominal_path` given (and the envelope built by buildContactEnvelope from it
+// at `gate`), the slew lands exactly on the scaled candidate's state at T, which makes
+// the two-sided tube feasible by construction; without it the landing follows the
+// one-sided rule (ceiling / floor / coast).
 bool slewContactAuthority(PreviewContactConstraint& contact, double closing_velocity_m_s,
     double closing_acceleration_m_s2, const PreviewTrackerConfig& tracker,
-    double servo_period_sec);
+    double servo_period_sec, const PreviewPolynomialTrajectory* nominal_path = nullptr,
+    double gate = 1.0);
+// Two-sided certified envelope of the free candidate's closing velocity along
+// contact.normal_stand (2026-09-16): ceiling g x max(0, controls), floor
+// min(g x min, min) - retreat_slack_m_s per servo subinterval, end knots taking the
+// adjacent extrema.
+bool buildContactEnvelope(PreviewContactConstraint& contact,
+    const PreviewPolynomialTrajectory& nominal_path, double gate, double servo_period_sec,
+    double retreat_slack_m_s);
 
 struct PreviewExecutionWorkerDiagnostics {
   std::array<std::uint64_t, 8> worker_status_counts{}, solve_status_counts{};

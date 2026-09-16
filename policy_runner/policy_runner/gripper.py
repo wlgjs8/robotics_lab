@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 import threading
@@ -115,16 +116,73 @@ def _import_pika_gripper_class(sdk_path: str | None) -> type:
     return Gripper
 
 
+# --- pika SDK jaw geometry -------------------------------------------------------------------
+# The COLLECTION rig writes `sense.get_gripper_distance()` into every dataset -- millimetres of jaw
+# opening (pika_sdk/pika/sense.py:162), NOT a fraction of anything. The deploy runtime used to
+# report `(rad - min_rad)/(max_rad - min_rad) * 100` instead, and the SDK linkage between motor
+# angle and opening is a four-bar, so the two numbers are not proportional. Measured on the real
+# grippers 2026-09-16 (tools/measure_gripper_units.py): the old percent OVER-reported the opening by
+# up to +4.85 mm, peaking at a physical 23 mm jaw -- i.e. squarely inside the band the jaw crosses
+# while grasping, and squarely inside the band where the policy's commanded z has its step. Both
+# arms agreed to 0.05 mm, so this is geometry, not per-arm calibration drift.
+#
+# These reimplement pika_sdk/pika/gripper.py:220-237 rather than calling the SDK's own
+# get_gripper_distance()/set_gripper_distance(), so the target integration, deadband, rate gate and
+# rad-space clamp below stay in one place and keep working on a mock gripper in tests.
+_SDK_MAX_ANGLE_RAD = (180.0 - 43.99) / 180.0 * math.pi
+
+
+def _sdk_half_span_mm(angle_rad: float) -> float:
+    """pika_sdk get_distance(angle): half of the jaw span, in mm."""
+    a = _SDK_MAX_ANGLE_RAD - float(angle_rad)
+    height = 0.0325 * math.sin(a)
+    width_d = 0.0325 * math.cos(a)
+    return (math.sqrt(0.058**2 - (height - 0.01456) ** 2) + width_d) * 1000.0
+
+
+def sdk_jaw_mm(angle_rad: float) -> float:
+    """pika_sdk get_gripper_distance(): jaw opening in mm, zero at motor angle 0.
+
+    Valid because `_home_one` re-zeroes the motor on the CLOSED mechanical stop, so angle 0 is a
+    physically closed jaw on both arms."""
+    return (_sdk_half_span_mm(angle_rad) - _sdk_half_span_mm(0.0)) * 2.0
+
+
+def sdk_jaw_mm_to_rad(jaw_mm: float, lo: float = 0.0, hi: float = _SDK_MAX_ANGLE_RAD) -> float:
+    """Inverse of sdk_jaw_mm by bisection (the SDK's set_gripper_distance does the same search).
+    Monotonic over [0, _SDK_MAX_ANGLE_RAD], so bisection is exact to the tolerance."""
+    target = float(jaw_mm)
+    if target <= sdk_jaw_mm(lo):
+        return lo
+    if target >= sdk_jaw_mm(hi):
+        return hi
+    for _ in range(64):
+        mid = 0.5 * (lo + hi)
+        if sdk_jaw_mm(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+GRIPPER_UNITS = ("sdk_mm", "motor_fraction")
+
+
 class PikaSerialGripperBackend:
     """Drives the robot-mounted Pika grippers over local serial POSITION_CTRL.
 
-    Policy gripper actions are per-step deltas in the dataset's gripper units:
-    PERCENT of the open/close range (0 = closed = min_rad, 100 = open =
-    max_rad; pika UMI conversion uses gripper_open_close_units: percent).
+    Policy gripper actions are per-step deltas in the DATASET's gripper units.
+    Those units are `units="sdk_mm"` (default): millimetres of jaw opening as
+    the pika SDK's get_gripper_distance() defines them, which is exactly what
+    the collection rig recorded. `units="motor_fraction"` restores the previous
+    behaviour (percent of [min_rad, max_rad]) for reproducing pre-2026-09-16
+    runs; it is WRONG against every pika dataset -- see sdk_jaw_mm above.
+
     Deltas integrate onto a per-arm target seeded from the live motor position
     at connect(), clamped to [min_rad, max_rad]; 'target' commands set the
-    percent absolutely. current_percent() exposes the live motor angle in the
-    same percent units for proprio feedback.
+    opening absolutely. current_percent() reports the live opening in the same
+    units for proprio feedback (the name is kept for its callers; under
+    units="sdk_mm" it is millimetres, not percent).
 
     send() never raises into the control loop: serial errors are reported as
     dropped dispatch results.
@@ -136,7 +194,12 @@ class PikaSerialGripperBackend:
         *,
         sdk_path: str | None = None,
         min_rad: float = 0.0,
-        max_rad: float = 1.75,
+        # Measured open mechanical stop 2026-09-16: left 1.6741 rad (96.90 mm), right 1.6687 rad
+        # (96.65 mm). The previous 1.75 sat PAST the stop, so a full-open command just pressed on
+        # it. 1.66 keeps a small margin below the tighter arm; the collection rig, bolted at
+        # 74-76 mm, never demonstrates anything near it.
+        max_rad: float = 1.66,
+        units: str = "sdk_mm",
         deadband_rad: float = 0.005,
         max_hz: float = 60.0,
         supports_controller_simulation: bool = False,
@@ -150,6 +213,8 @@ class PikaSerialGripperBackend:
     ) -> None:
         if max_rad <= min_rad:
             raise ValueError("gripper max_rad must be greater than min_rad")
+        if units not in GRIPPER_UNITS:
+            raise ValueError(f"gripper units must be one of {GRIPPER_UNITS}, got {units!r}")
         if deadband_rad < 0.0:
             raise ValueError("gripper deadband_rad must be non-negative")
         self.ports = {str(arm): str(port) for arm, port in ports.items()}
@@ -159,6 +224,7 @@ class PikaSerialGripperBackend:
         self.sdk_path = sdk_path
         self.min_rad = float(min_rad)
         self.max_rad = float(max_rad)
+        self.units = str(units)
         self.deadband_rad = float(deadband_rad)
         self.min_period_sec = 1.0 / float(max_hz) if max_hz > 0 else 0.0
         self.supports_controller_simulation = bool(supports_controller_simulation)
@@ -323,32 +389,54 @@ class PikaSerialGripperBackend:
     def _clamp(self, value: float) -> float:
         return max(self.min_rad, min(self.max_rad, float(value)))
 
-    def _percent_to_rad(self, percent: float) -> float:
-        return self.min_rad + (self.max_rad - self.min_rad) * float(percent) / 100.0
+    def _units_to_rad(self, value: float) -> float:
+        if self.units == "sdk_mm":
+            return sdk_jaw_mm_to_rad(value)
+        return self.min_rad + (self.max_rad - self.min_rad) * float(value) / 100.0
 
-    def _rad_to_percent(self, rad: float) -> float:
+    def _rad_to_units(self, rad: float) -> float:
+        if self.units == "sdk_mm":
+            return sdk_jaw_mm(rad)
         return (float(rad) - self.min_rad) / (self.max_rad - self.min_rad) * 100.0
 
     def current_percent(self, arm: str) -> float | None:
-        """Live motor angle in dataset percent units (proprio feedback)."""
+        """Live jaw opening in DATASET units (proprio feedback).
+
+        Millimetres under the default units="sdk_mm"; percent of [min_rad, max_rad] under
+        units="motor_fraction". The method name predates the unit fix and is kept for its callers
+        (gripper_server, the rollout step log's gripper_meas_pct / gripper_proprio_pct)."""
         gripper = self._grippers.get(arm)
         if gripper is None:
             return None
         try:
-            return self._rad_to_percent(float(gripper.get_motor_position()))
+            return self._rad_to_units(float(gripper.get_motor_position()))
         except Exception:
             return None
+
+    def target_units(self, arm: str) -> float | None:
+        """The integrated setpoint this backend is actually HOLDING, in dataset units.
+
+        Not the same as the number the caller sent: a command past the open mechanical stop is
+        clamped to the stop. Consumers that compare a target against the measured opening
+        (gripper_server's `moving` flag) must use this one, or a command that cannot be reached
+        latches "moving" forever."""
+        rad = self._targets.get(arm)
+        return None if rad is None else self._rad_to_units(rad)
 
     def send(self, command: GripperCommand) -> GripperDispatchResult:
         gripper = self._grippers.get(command.arm)
         if gripper is None:
             return self._result(command, accepted=False, sent=False, dropped=True, reason="gripper_arm_not_connected")
-        # Command values are in dataset percent units; motors take rad.
+        # Command values are in dataset units; motors take rad. The delta is applied in UNITS
+        # space and converted once, because under units="sdk_mm" the unit->rad map is a four-bar
+        # and a delta does NOT convert to a fixed number of radians. (Under "motor_fraction" the
+        # map is linear, so this is algebraically the same as the old fixed delta_rad.)
         if command.command_type == "target":
-            target = self._clamp(self._percent_to_rad(command.value))
+            target_units = float(command.value)
         else:
-            delta_rad = (self.max_rad - self.min_rad) * float(command.value) / 100.0
-            target = self._clamp(self._targets.get(command.arm, self.min_rad) + delta_rad)
+            current_units = self._rad_to_units(self._targets.get(command.arm, self.min_rad))
+            target_units = current_units + float(command.value)
+        target = self._clamp(self._units_to_rad(target_units))
         # The integrated target always advances; deadband/rate gates only skip
         # the serial write so small deltas accumulate instead of being lost.
         self._targets[command.arm] = target

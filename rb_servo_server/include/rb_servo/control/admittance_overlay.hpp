@@ -205,6 +205,18 @@ private:
     double confidence_ = 0.0;
     double physical_gate_ = 1.0;
     double demand_ = 0.0;
+    // CONTACT MEMORY (2026-09-16). The PEAK confidence a contact reached is kept, with
+    // its normal, after the force drops out of the noise band, until the physical gate
+    // has re-opened past kContactMemoryRelease on gate_open_tau_s; the authority is
+    // max(confidence now, remembered peak) x (1 - physical gate). A contact that only
+    // grazed the band remembers a small peak, so the band edge stays continuous.
+    // Without it, losing the force (confidence 0) opened the closing authority to 1.0
+    // on that very tick, and the executor re-dived at 100-139 mm/s into the surface it
+    // had just bounced off (14:38 run, left 317.87-318.07 s: g 0.41 -> 1.00 in 30 ms,
+    // second impact 55 N). Not a config value: it only decides when a <= 2 % cut is
+    // dropped; the reopening rate itself is gate_open_tau_s.
+    static constexpr double kContactMemoryRelease = 0.98;
+    double contact_memory_confidence_ = 0.0;
 };
 
 }  // namespace control

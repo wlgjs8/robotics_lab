@@ -18,6 +18,12 @@ CHUNK_ACTIVATION_MODE="${FLOW_INFER_CHUNK_ACTIVATION_MODE:-fixed_steps}"
 TCP_TARGET_PROFILE="${FLOW_INFER_TCP_TARGET_PROFILE:-flow_infer_smooth}"
 CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"
 SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"
+# Per-row linear clamp of the policy's ee_local deltas (m/s). policy_runner's own
+# default is 0.45; 0.55 since 2026-09-16 - the model's fastest rows reached 422 mm/s
+# and the servo's flow_infer_preview executor cap is 0.75 m/s, so the runner's clamp
+# stays the tighter of the two with catch-up headroom above it. The angular clamp
+# keeps policy_runner's 2.0 rad/s default (model peak 79 deg/s, servo cap 2.5 rad/s).
+MAX_LINEAR_VELOCITY_M_S="${FLOW_INFER_MAX_LINEAR_VELOCITY_M_S:-0.55}"
 CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
 TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
 TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-2}"
@@ -27,6 +33,11 @@ VELPROPRIO_SOURCE="${FLOW_INFER_VELPROPRIO_SOURCE:-measured}"
 # measured jaw = pre-2026-08-19 behaviour) | command | hybrid. Sweep it with
 # FLOW_INFER_GRIPPER_PROPRIO_SOURCE so the .meta sidecar records which arm ran.
 GRIPPER_PROPRIO_SOURCE="${FLOW_INFER_GRIPPER_PROPRIO_SOURCE:-actual}"
+# Rows of lead the gripper takes over the pose inside the chunk. 0 = off. See
+# --gripper-lookahead-steps: an anchored chunk is front-loaded in tool-z and back-loaded in the
+# gripper, so one execute window cannot serve both. Measured starting point: 4 (one execute
+# window). Larger leads buy almost no extra close rate and only add setpoint lead.
+GRIPPER_LOOKAHEAD_STEPS="${FLOW_INFER_GRIPPER_LOOKAHEAD_STEPS:-0}"
 STEP_LOG="${FLOW_INFER_STEP_LOG:-}"
 # Wall-clock duration of ONE action-chunk row. MUST equal the training converter's
 # --action-step-frames / dataset fps: 1/30 = 0.0334 for the legacy per-frame-delta checkpoints,
@@ -310,6 +321,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --tcp-target-profile "$TCP_TARGET_PROFILE" \
   --chunk-overlay-runway-steps "$CHUNK_OVERLAY_RUNWAY_STEPS" \
   --speed-scale "$SPEED_SCALE" \
+  --max-linear-velocity-m-s "$MAX_LINEAR_VELOCITY_M_S" \
   "${POLICY_DT_ARGS[@]}" \
   --chunk-crossfade-steps "$CHUNK_CROSSFADE_STEPS" \
   --tcp-target-pose-conditioning foh_se3 \
@@ -322,6 +334,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   "${DEPTH_ARGS[@]}" \
   --gripper-action-mode absolute \
   --gripper-proprio-source "$GRIPPER_PROPRIO_SOURCE" \
+  --gripper-lookahead-steps "$GRIPPER_LOOKAHEAD_STEPS" \
   --rollout-summary "$ROLLOUT_SUMMARY" \
   "${STEP_LOG_ARGS[@]}" \
   "$@"

@@ -563,7 +563,27 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
         fraction*(b.upper_velocity_m_s-a.upper_velocity_m_s);
     // Retire unexecuted source travel, not the physical yield (a separate gauge
     // fold). Only the source is moved; the accepted trajectory stays untouched.
-    const double blocked=std::max(0.0,n.dot(nominal.linear_velocity-sample_.linear_velocity));
+    //
+    // SOURCE-BASED SINCE 2026-09-16. The nominal-minus-executed term alone retired
+    // micrometres per tick while the source pushed 100-150 mm/s into a held contact
+    // (gate 0.55-0.7): the source ran 48-53 mm ahead along the normal, the cursor
+    // leash slowed the clock, the backlog hit its 100 ms cap and the executor was
+    // stopped for a recovery brake - five times in the 14:38 run (101.7-140.4 s), all
+    // during sustained 8-15 N contacts. Now the AUTHORITY-REFUSED share of the
+    // source's own closing advance, (1-g) x closing, is retired, plus (1-g) x gap /
+    // contact_realign_sec for a source already deeper than the executor, so the
+    // source stays beside the executor at the contact and the policy's later rows are
+    // built on the pose the arm actually holds (yield-and-stay for the plan, as the
+    // force fold is for the arm). At g = 1 nothing is retired. The nominal term is
+    // kept as a floor for the case where the executor is behind its own free plan.
+    const Eigen::Vector3d raw_velocity(raw_sample.velocity.x,raw_sample.velocity.y,raw_sample.velocity.z);
+    const double refused=1.0-contact_gate;
+    const double source_closing=std::max(0.0,n.dot(raw_velocity));
+    const double gap=n.dot(xyz(raw_sample.pose)-xyz(sample_.pose));   // > 0: the source is deeper
+    const double realign=config_.preview_execution.tracker.contact_realign_sec;
+    const double pull=std::max(0.0,gap)/realign;
+    const double blocked=std::max(std::max(0.0,n.dot(nominal.linear_velocity-sample_.linear_velocity)),
+                                  refused*(source_closing+pull));
     retired_source_advance_=step_dt*blocked*n;
     telemetry_.retired_source_advance_m=retired_source_advance_.norm();
   }

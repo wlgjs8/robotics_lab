@@ -248,6 +248,7 @@ void ForceGate::reset() {
     force_n_ = 0.0;
     torque_nm_ = 0.0;
     demand_ = 0.0;
+    contact_memory_confidence_ = 0.0;
 }
 
 void ForceGate::update(const math::Vector3& force_phys_stand, const math::Vector3& torque_phys_stand,
@@ -268,15 +269,30 @@ void ForceGate::update(const math::Vector3& force_phys_stand, const math::Vector
         gate_t_=physical_gate_=0.0;confidence_=1.0;contact_normal_=force_dir_;return;
     }
     confidence_=smooth((fv-cfg_.contact_noise_low_n)/width);
-    contact_normal_=confidence_>0 ? force_dir_ : math::Vector3::Zero();
-    if(!cfg_.gate_enable) {gate_t_=physical_gate_=1.0;return;}
+    if(confidence_>0) {
+        contact_normal_=force_dir_;
+        contact_memory_confidence_=std::max(contact_memory_confidence_,confidence_);
+    }
+    if(!cfg_.gate_enable) {
+        gate_t_=physical_gate_=1.0;contact_memory_confidence_=0.0;
+        if(confidence_<=0)contact_normal_.setZero();
+        return;
+    }
     // At target, both inward nominal speed and excess-force drive are zero.
     // No source-speed feedback: slowing the output cannot reopen its own gate.
     const double desired=1.0-smooth(fv/cfg_.target_force_n);
     const double tau=desired<physical_gate_ ? cfg_.gate_close_tau_s : cfg_.gate_open_tau_s;
     physical_gate_+=std::min(dt_/tau,1.0)*(desired-physical_gate_);
     physical_gate_=clamp(physical_gate_,0.0,1.0);
-    gate_t_=snapOpen(1.0-confidence_*(1.0-physical_gate_));
+    // CONTACT MEMORY (see the header): while a seen contact's physical gate is still
+    // re-opening, its peak confidence keeps scaling that gate along the remembered
+    // normal, whatever the confidence reads now - the re-approach after a lost contact
+    // ramps on gate_open_tau_s instead of snapping to full speed at 2 N. Released once
+    // the physical gate is nearly open; a fresh confident reading re-arms it.
+    if(physical_gate_>=kContactMemoryRelease)contact_memory_confidence_=0.0;
+    const double authority=std::max(confidence_,contact_memory_confidence_);
+    if(authority<=0)contact_normal_.setZero();
+    gate_t_=snapOpen(1.0-authority*(1.0-physical_gate_));
 }
 
 // A FIRST-ORDER SLEW ONLY EVER APPROACHES 1.0. Left alone, a gate that closed once

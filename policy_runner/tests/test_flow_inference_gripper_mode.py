@@ -399,3 +399,50 @@ class ChunkKnotFilterTest(unittest.TestCase):
         s = self._source(np.ones(7) / 7.0)
         c = np.ones((2, 14), dtype=np.float32)
         np.testing.assert_allclose(s._band_limit_chunk(c), c)
+
+
+@unittest.skipIf(FlowMatchingActionSource is None, "torch is not installed")
+class GripperLookaheadTest(unittest.TestCase):
+    """The gripper may read a LATER chunk row than the pose.
+
+    An `anchored` chunk is front-loaded in tool-z and back-loaded in the gripper (measured
+    2026-09-16: rows 0-3 carry 40% of the z displacement but only 4.2%/9.7% of the close), so a
+    single execute window starves the jaw while over-serving the pose."""
+
+    @staticmethod
+    def _source(lead: int, absolute: bool = True):
+        src = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        src.gripper_lookahead_steps = lead
+        src.gripper_action_absolute = absolute
+        return src
+
+    def _chunk(self):
+        # 6 rows; column 6 is the left gripper, column 13 the right.
+        chunk = np.zeros((6, 14), dtype=np.float64)
+        chunk[:, 6] = [40.0, 39.0, 37.0, 30.0, 20.0, 10.0]
+        chunk[:, 13] = [50.0, 49.0, 47.0, 40.0, 30.0, 20.0]
+        return chunk
+
+    def test_zero_lead_reads_the_pose_row(self) -> None:
+        src = self._source(0)
+        chunk = self._chunk()
+        for i in range(len(chunk)):
+            # numpy returns a fresh view per index, so compare values, not identity
+            self.assertTrue(np.array_equal(src._gripper_step_row(chunk, i), chunk[i]))
+
+    def test_lead_reads_a_later_row(self) -> None:
+        src = self._source(3)
+        chunk = self._chunk()
+        self.assertEqual(src._gripper_step_row(chunk, 0)[6], 30.0)   # row 3, not row 0
+        self.assertEqual(src._gripper_step_row(chunk, 1)[13], 30.0)  # row 4
+
+    def test_lead_clamps_to_the_last_row(self) -> None:
+        src = self._source(10)
+        chunk = self._chunk()
+        self.assertEqual(src._gripper_step_row(chunk, 2)[6], 10.0)   # last row, not an IndexError
+
+    def test_delta_mode_ignores_the_lead(self) -> None:
+        """Delta rows are per-step increments: skipping ahead would drop the rows jumped over."""
+        src = self._source(3, absolute=False)
+        chunk = self._chunk()
+        self.assertEqual(src._gripper_step_row(chunk, 0)[6], 40.0)

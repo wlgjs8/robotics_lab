@@ -72,11 +72,20 @@ g_physical += min(dt/tau,1)*(g_desired-g_physical)
 g_effective = 1-c*(1-g_physical)
 ```
 
-`tau` is 0.10 s when closing, 0.40 s when opening. Below 2 N, confidence and directional force
-authority are zero; between 2 and 3 N they rise smoothly; at 3 N confidence is full. The band is
+`tau` is 0.10 s when closing, 0.40 s when opening. Below 2 N no new confidence or normal is
+formed; between 2 and 3 N they rise smoothly; at 3 N confidence is full. The band is
 not subtracted from physical force and does not turn 20 N into 22–23 N. A unit direction becoming
 available must never be used as a binary stop. Source demand is logged but does not control the
 new curve; zero nominal demand can coexist with a closed gate and a yielding arm.
+
+**Contact memory (2026-09-16).** A contact that was seen is remembered: its normal and the PEAK
+confidence it reached persist after `|F_gate|` drops out of the band, and the authority is
+`1-max(c, c_peak)*(1-g_physical)` until `g_physical` has re-opened past 0.98 on the 0.40 s
+time constant (~1.5 s from a closed gate), when the memory and the normal are dropped. A
+contact that only grazed the band remembers only its small peak, so the band edge stays
+continuous. Without it the loss of force after an impact opened the closing authority to 1.0
+on that tick and the executor re-dived into the surface it had just bounced off (14:38 run,
+left 317.87–318.07 s: `g` 0.41 → 1.00 in 30 ms, re-approach 100–139 mm/s, second impact 55 N).
 
 Evidence for the initial band: the right-arm post-stop 3 Hz residual in
 `servo_log_20260915_172801.csv` reached 0.641 N, crossing 0.5 N 718 times in about 35.7 s;
@@ -95,19 +104,37 @@ noise statistics. No online bias adaptation or automatic contact tare was added.
 
 1. The raw chunk source receives geometry authority but no ForceGate attenuation while preview
    owns force execution. The worker solves a physically feasible nominal candidate from the
-   current source and the same splice state, then solves the constrained candidate.
-2. The constraint points into contact (`n=-F_gate/|F_gate|`) and limits `n dot v`. Its upper bound
-   is `g_effective` times a certified upper envelope of the nominal candidate's positive closing
-   velocity. Quadratic-velocity Bernstein controls on servo subintervals bound the full interval;
-   adjacent maxima form a continuous piecewise-linear envelope. It is slightly conservative in
-   allowing velocity, not an equality to raw follower velocity. At `g -> 1`, the result approaches
-   the same nominal optimum. At `g=0` the steady closing bound is zero.
+   current source and the same splice state, then solves the constrained candidate. Since
+   2026-09-16 the candidate's splice is **de-braked**: any acceleration component along the
+   normal that points away from the contact is dropped from its initial state (the constrained
+   plan still starts from the true splice). The candidate measures demand; the braking
+   acceleration a constrained plan carries after an impact is contact-induced, and from
+   (+8 mm/s, -3.5 m/s^2) a free plan retreats for 100 ms before it turns (offline -48 mm/s) even
+   with its source 8 mm deeper, which collapsed the bound to zero exactly when it was needed.
+2. The constraint points into contact (`n=-F_gate/|F_gate|`) and bounds `n dot v` on BOTH
+   sides. The ceiling is `g_effective` times a certified upper envelope of the nominal
+   candidate's positive closing velocity; the floor (2026-09-16) is `min(g*min, min)` of the
+   same Bernstein controls minus `tracker.contact_retreat_slack_m_s` (5 mm/s): closing is
+   scaled by the authority, retreat keeps full authority, and the plan may not back out of a
+   contact on the objective's own account. Quadratic-velocity Bernstein controls on servo
+   subintervals bound the full interval; adjacent extrema form continuous piecewise-linear
+   envelopes, and one two-sided qpOASES row per control carries both. The scaled candidate
+   `g*v_nominal` lies inside the tube at every sample, and the slew (3.) lands on exactly its
+   state, so the constrained problem is feasible by construction; the slack exists because an
+   exact tube at `g ~ 0` is micrometres per second wide and thrashed the working set. At
+   `g -> 1`, the result approaches the same nominal optimum. At `g=0` the steady closing
+   bound is zero. Measured need: on the 14:38 run (left 317.69–317.80 s) the plan left a 46 N
+   contact at -86 mm/s with the ceiling at 0 and the source 8 mm deeper, lost the force, and
+   re-dived 16 mm at 130 mm/s into a second 55 N impact; offline the same state gave 4.5 mm
+   of retreat with the one-sided authority and 0.16 mm with the tube.
 3. A newly tightened bound cannot instantaneously stop existing momentum. Since 2026-09-15
    night the authority is **slewed** from the dispatched closing state (velocity and
    acceleration along the normal) to the envelope along the smoothest two-planning-interval
    jerk profile within `tracker.contact_slew_jerk_m_s3` (400 m/s^3; longer slews for larger
    cuts, escalating to the physical jerk limit only if that fails), then follows the envelope.
-   The earlier widening along the fastest brake reached zero in ~3 ms and, because the
+   With the two-sided tube the landing is the scaled candidate's own (velocity, acceleration)
+   at T, and during the slew the plan is held within one Bernstein margin of the profile on
+   both sides. The earlier widening along the fastest brake reached zero in ~3 ms and, because the
    planning jerk is constant per 10 ms interval, demanded a cut the QP could only meet by
    overshooting into a retreat: reproduced offline on the 19:54 run's inputs, `g=0.9` alone
    turned a 10 mm/s approach into a -69 mm/s retreat, `g=0.5` into -183 mm/s, and each replan
@@ -132,10 +159,18 @@ noise statistics. No online bias adaptation or automatic contact tare was added.
    241-243 s: every leash-limited tick was behind, cursor backlog at its 100 ms cap, three
    recovery brakes). This replaces the draft's variable-clock derivative approach and removes
    its `g_dot`/`g_ddot` mismatch entirely. Legacy `plan_clock_gate` telemetry is always 1.
-6. Removed closing travel is integrated from nominal-minus-constrained velocity and retired
-   from the raw source only. Physical output is never position-clamped for this retirement.
-   Force yielding remains a separate common-frame fold. The raw source's existing safety and
-   recovery pacing still applies; no old worker result may outlive its authority/deadline.
+6. Source retirement is **source-based** (2026-09-16): every tick the authority-refused share
+   of the source's own closing advance, `(1-g)*max(0, n dot v_source)`, plus
+   `(1-g)*max(0, gap)/tracker.contact_realign_sec` for a source already deeper than the
+   executor (`gap = n dot (p_source - p_executor)`, realign 0.10 s), is retired from the raw
+   source only; the older nominal-minus-constrained term is kept as a floor. At `g=1` nothing
+   is retired. The source therefore stays beside the executor at the contact instead of
+   running ahead: on the 14:38 run it ran 48–53 mm ahead at `g` 0.55–0.7, the cursor leash
+   slowed the plan clock, the backlog hit its 100 ms cap and the executor was stopped for a
+   recovery brake five times (101.7–140.4 s), all in sustained 8–15 N contacts. Physical
+   output is never position-clamped for this retirement. Force yielding remains a separate
+   common-frame fold. The raw source's existing safety and recovery pacing still applies; no
+   old worker result may outlive its authority/deadline.
 
 ## Source lifecycle and folds
 

@@ -145,7 +145,7 @@ struct PreviewTrajectoryTracker::Impl {
   };
   struct ContactQp {
     Matrix H, C, previous_C, full_C;
-    Vector g, lower, upper, lower_c, upper_c, solution, row_scale, full_upper;
+    Vector g, lower, upper, lower_c, upper_c, solution, row_scale, full_upper, full_lower;
     std::array<int,kCapacity> endpoint_rows{};
     std::array<int,kMaxContactRows> row_interval{};
     std::unique_ptr<qpOASES::SQProblem> qp;
@@ -256,6 +256,7 @@ struct PreviewTrajectoryTracker::Impl {
     q.C = Matrix::Zero(constraints,variables);
     q.full_C=Matrix::Zero(kMaxContactRows,variables);
     q.full_upper=Vector::Constant(kMaxContactRows,qpOASES::INFTY);
+    q.full_lower=Vector::Constant(kMaxContactRows,-qpOASES::INFTY);
     q.g = Vector::Zero(variables); q.solution = Vector::Zero(variables);
     q.row_scale=Vector::Ones(kMaxContactRows);
     q.lower = Vector::Constant(variables,-1.0); q.upper = Vector::Constant(variables,1.0);
@@ -293,6 +294,7 @@ struct PreviewTrajectoryTracker::Impl {
     normal.H=axes[0].H;normal.C=Matrix::Zero(3*n,n);normal.previous_C=normal.C;
     normal.full_C=Matrix::Zero(kMaxContactRows,n);
     normal.full_upper=Vector::Constant(kMaxContactRows,qpOASES::INFTY);
+    normal.full_lower=Vector::Constant(kMaxContactRows,-qpOASES::INFTY);
     normal.g=Vector::Zero(n);normal.solution=Vector::Zero(n);normal.row_scale=Vector::Ones(kMaxContactRows);
     // Rotating a stand-axis box does not produce independent normal/tangent
     // boxes. The relaxation imposes NONE of those artificial rotated limits.
@@ -364,7 +366,7 @@ struct PreviewTrajectoryTracker::Impl {
   int contactBounds(const PreviewContactConstraint& authority,
                     const Axes& v0,const Axes& a0) {
     auto& q=contact;
-    q.full_C.setZero();q.full_upper.setConstant(qpOASES::INFTY);
+    q.full_C.setZero();q.full_upper.setConstant(qpOASES::INFTY);q.full_lower.setConstant(-qpOASES::INFTY);
     q.endpoint_rows.fill(-1);
     for(int axis=0;axis<3;++axis) {
       q.g.segment(axis*n,n)=axes[axis].g;
@@ -378,12 +380,18 @@ struct PreviewTrajectoryTracker::Impl {
     // almost equal jerk coefficients. The first interval's B0/B1 depend only
     // on fixed initial v/a. Normalize nonzero rows for qpOASES while retaining
     // their m/s scale for independent feasibility diagnostics.
+    // Two-sided since 2026-09-16: the same Bernstein control row carries the ceiling
+    // (upper_c) and, when the knot has a finite retreat floor, the floor (lower_c).
+    // qpOASES takes both sides of one row, so the floor costs no extra rows.
     const auto add = [&](double t,double a_weight,double j_weight,
-                         int active_jerk,double bound,bool endpoint=false) {
+                         int active_jerk,double bound,double floor_bound,bool endpoint=false) {
       if(rows>=kMaxContactRows)return false;
       const int row=rows;
       const Eigen::Vector3d free_velocity=v0.head<3>()+(t+a_weight)*a0.head<3>();
-      q.full_upper[row]=bound-authority.normal_stand.dot(free_velocity);
+      const double free_closing=authority.normal_stand.dot(free_velocity);
+      q.full_upper[row]=bound-free_closing;
+      const bool floored=std::isfinite(floor_bound);
+      q.full_lower[row]=floored?floor_bound-free_closing:-qpOASES::INFTY;
       for(int axis=0;axis<3;++axis)for(int l=0;l<n;++l) {
         const double t1=std::max(0.0,t-l*h),t0=std::max(0.0,t-(l+1)*h);
         const double v=.5*(t1*t1-t0*t0);
@@ -393,11 +401,13 @@ struct PreviewTrajectoryTracker::Impl {
       }
       const double norm=q.full_C.row(row).norm();
       if(norm==0.0) {
-        if(q.full_upper[row]<-cfg.feasibility_tolerance)impossible=true;
-        q.full_upper[row]=qpOASES::INFTY;
+        if(q.full_upper[row]<-cfg.feasibility_tolerance ||
+           (floored && q.full_lower[row]>cfg.feasibility_tolerance))impossible=true;
+        q.full_upper[row]=qpOASES::INFTY;q.full_lower[row]=-qpOASES::INFTY;
         return true;
       }
       q.row_scale[rows]=norm;q.full_C.row(row)/=norm;q.full_upper[row]/=norm;
+      if(floored)q.full_lower[row]/=norm;
       q.row_interval[rows]=active_jerk;if(endpoint)q.endpoint_rows[active_jerk]=rows;
       ++rows;
       return true;
@@ -407,6 +417,9 @@ struct PreviewTrajectoryTracker::Impl {
       if(a.time_sec>=n*h)break;
       const double end=std::min(b.time_sec,n*h);
       const double slope=(b.upper_velocity_m_s-a.upper_velocity_m_s)/(b.time_sec-a.time_sec);
+      const bool floored=std::isfinite(a.lower_velocity_m_s)&&std::isfinite(b.lower_velocity_m_s);
+      const double floor_slope=floored?(b.lower_velocity_m_s-a.lower_velocity_m_s)/(b.time_sec-a.time_sec):0.0;
+      constexpr double kNoFloor=-std::numeric_limits<double>::infinity();
       double begin=a.time_sec;
       while(begin<end) {
         // Split at BOTH force-reference and jerk-grid boundaries. Tiny floating
@@ -415,12 +428,15 @@ struct PreviewTrajectoryTracker::Impl {
         while(next*h<=begin)++next;
         const double finish=std::min(end,next*h);
         const double span=finish-begin;
-        const double lower_bound=a.upper_velocity_m_s+slope*(begin-a.time_sec);
-        const double upper_bound=a.upper_velocity_m_s+slope*(finish-a.time_sec);
+        const double ceiling_begin=a.upper_velocity_m_s+slope*(begin-a.time_sec);
+        const double ceiling_finish=a.upper_velocity_m_s+slope*(finish-a.time_sec);
+        const double floor_begin=floored?a.lower_velocity_m_s+floor_slope*(begin-a.time_sec):kNoFloor;
+        const double floor_finish=floored?a.lower_velocity_m_s+floor_slope*(finish-a.time_sec):kNoFloor;
         const int active_jerk=std::min(next-1,n-1);
-        if(!add(begin,0,0,active_jerk,lower_bound)||
-           !add(begin,.5*span,0,active_jerk,lower_bound+.5*slope*span)||
-           !add(begin,span,.5*span*span,active_jerk,upper_bound,finish==next*h))return -1;
+        if(!add(begin,0,0,active_jerk,ceiling_begin,floor_begin)||
+           !add(begin,.5*span,0,active_jerk,ceiling_begin+.5*slope*span,
+                floored?floor_begin+.5*floor_slope*span:kNoFloor)||
+           !add(begin,span,.5*span*span,active_jerk,ceiling_finish,floor_finish,finish==next*h))return -1;
         begin=finish;
       }
     }
@@ -490,15 +506,25 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
        authority.knots[authority.count-1].time_sec<durationSec())
       return finish(PreviewSolveStatus::InvalidReference);
     for(std::size_t k=0;k<authority.count;++k) {
-      if(!std::isfinite(authority.knots[k].time_sec) || !nonnegative(authority.knots[k].upper_velocity_m_s) ||
-         (k && authority.knots[k].time_sec<=authority.knots[k-1].time_sec))
+      const auto& knot=authority.knots[k];
+      // The floor is -infinity (none) or finite and at most the ceiling; NaN and
+      // +infinity are refused like any other malformed authority.
+      const bool floor_ok=knot.lower_velocity_m_s==-std::numeric_limits<double>::infinity() ||
+          (std::isfinite(knot.lower_velocity_m_s) &&
+           knot.lower_velocity_m_s<=knot.upper_velocity_m_s+cfg.feasibility_tolerance);
+      if(!std::isfinite(knot.time_sec) || !nonnegative(knot.upper_velocity_m_s) || !floor_ok ||
+         (k && knot.time_sec<=authority.knots[k-1].time_sec))
         return finish(PreviewSolveStatus::InvalidReference);
     }
     // A new velocity authority cannot change the accepted C2 splice. A seed
-    // moving too fast into contact must first use the separate finite brake.
-    const double excess=authority.normal_stand.dot(initial.linear_velocity)-authority.knots[0].upper_velocity_m_s;
-    result.diagnostics.max_contact_velocity_violation_m_s=std::max(0.0,excess);
-    if(excess>cfg.feasibility_tolerance)return finish(PreviewSolveStatus::Infeasible);
+    // moving too fast into contact must first use the separate finite brake; a
+    // seed retreating faster than the floor must have been admitted by the slew.
+    const double seed_closing=authority.normal_stand.dot(initial.linear_velocity);
+    const double excess=seed_closing-authority.knots[0].upper_velocity_m_s;
+    const double deficit=std::isfinite(authority.knots[0].lower_velocity_m_s)?
+        authority.knots[0].lower_velocity_m_s-seed_closing:0.0;
+    result.diagnostics.max_contact_velocity_violation_m_s=std::max({0.0,excess,deficit});
+    if(std::max(excess,deficit)>cfg.feasibility_tolerance)return finish(PreviewSolveStatus::Infeasible);
   }
   const double h=cfg.planning_dt_sec;
   // REFERENCE TRUST (see PreviewTrackerConfig): past the committed window the target is
@@ -595,6 +621,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         q.upper_c.tail(3*x.n).setConstant(qpOASES::INFTY);
         for(int k=0;k<cut_count;++k) {
           q.C.row(base_rows+k)=q.full_C.row(cuts[k]);q.upper_c[base_rows+k]=q.full_upper[cuts[k]];
+          q.lower_c[base_rows+k]=q.full_lower[cuts[k]];
         }
         double remaining=solve_budget-elapsed();
         if(remaining<=0.0)return PreviewSolveStatus::TimeBudgetExceeded;
@@ -633,7 +660,8 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         std::array<double,kCapacity> worst;worst.fill(cfg.feasibility_tolerance);
         double contact_violation=0;
         for(int r=0;r<rows;++r) {
-          const double excess=q.row_scale[r]*(q.full_C.row(r).dot(q.solution)-q.full_upper[r]);
+          const double value=q.full_C.row(r).dot(q.solution);
+          const double excess=q.row_scale[r]*std::max(value-q.full_upper[r],q.full_lower[r]-value);
           contact_violation=std::max(contact_violation,excess);
           if(selected[r] && excess>cfg.feasibility_tolerance)return PreviewSolveStatus::NumericalFailure;
           const int segment=q.row_interval[r];
@@ -667,7 +695,7 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
       reduced.full_C.setZero();
       for(int axis=0;axis<3;++axis)
         reduced.full_C.topRows(rows)+=normal[axis]*q.full_C.block(0,axis*x.n,rows,x.n);
-      reduced.full_upper=q.full_upper;reduced.row_scale=q.row_scale;
+      reduced.full_upper=q.full_upper;reduced.full_lower=q.full_lower;reduced.row_scale=q.row_scale;
       reduced.endpoint_rows=q.endpoint_rows;reduced.row_interval=q.row_interval;
       const auto status=solve_contact(reduced,0);
       if(status!=PreviewSolveStatus::Solved)return finish(status);
@@ -683,8 +711,10 @@ PreviewSolveResult PreviewTrajectoryTracker::plan(const PreviewReference& ref,
         const double value=axis_q.C.row(r).dot(q.solution.segment(axis*x.n,x.n));
         violation=std::max({violation,axis_q.lower_c[r]-value,value-axis_q.upper_c[r]});
       }
-      for(int r=0;r<rows;++r)
-        violation=std::max(violation,q.row_scale[r]*(q.full_C.row(r).dot(q.solution)-q.full_upper[r]));
+      for(int r=0;r<rows;++r) {
+        const double value=q.full_C.row(r).dot(q.solution);
+        violation=std::max(violation,q.row_scale[r]*std::max(value-q.full_upper[r],q.full_lower[r]-value));
+      }
       relaxed_feasible=violation<=cfg.feasibility_tolerance;
       result.diagnostics.contact_decomposed=relaxed_feasible;
       result.diagnostics.contact_coupled_fallback=!relaxed_feasible;

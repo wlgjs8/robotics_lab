@@ -178,7 +178,16 @@ class GripperConfig:
     # Directory containing the 'pika' package (AgileX SDK copy).
     pika_sdk_path: str = ""
     min_rad: float = 0.0
-    max_rad: float = 1.75
+    # Measured open mechanical stop 2026-09-16 (tools/measure_gripper_units.py): left 1.6741 rad,
+    # right 1.6687 rad. The previous 1.75 sat past the stop.
+    max_rad: float = 1.66
+    # Units of the gripper numbers exchanged with the policy (state AND action).
+    # 'sdk_mm' (default, correct): millimetres of jaw opening per the pika SDK's
+    #   get_gripper_distance(), which is literally what the collection rig recorded into every
+    #   dataset (openpi examples/pika_umi/convert_pika_umi_storage_video.py:716).
+    # 'motor_fraction' (legacy): percent of [min_rad, max_rad]. Kept only to reproduce runs from
+    #   before 2026-09-16. It over-reports the opening by up to +4.85 mm around a 23 mm jaw.
+    units: str = "sdk_mm"
     deadband_rad: float = 0.005
     max_hz: float = 60.0
     suppress_sdk_logs: bool = True
@@ -199,6 +208,8 @@ class GripperConfig:
     def __post_init__(self) -> None:
         if self.backend not in {"none", "pika_serial"}:
             raise ValueError("gripper.backend must be 'none' or 'pika_serial'")
+        if self.units not in {"sdk_mm", "motor_fraction"}:
+            raise ValueError("gripper.units must be 'sdk_mm' or 'motor_fraction'")
         if self.max_rad <= self.min_rad:
             raise ValueError("gripper.max_rad must be greater than gripper.min_rad")
         if self.deadband_rad < 0.0:
@@ -693,7 +704,7 @@ def _camera_config(raw: dict[str, Any]) -> CameraConfig:
 
 
 def _gripper_config(raw: dict[str, Any]) -> GripperConfig:
-    for key in ("backend", "left_port", "right_port", "pika_sdk_path"):
+    for key in ("backend", "left_port", "right_port", "pika_sdk_path", "units"):
         if key in raw:
             raw[key] = str(raw[key])
     for key in ("min_rad", "max_rad", "deadband_rad", "max_hz"):

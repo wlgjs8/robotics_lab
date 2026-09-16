@@ -700,7 +700,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # Close-bias (percent subtracted from the absolute opening target so a
         # marginal grasp clamps); main.py overrides from --gripper-close-bias.
         # Shared base + per-arm overrides (None -> use base). main.py resolves the
-        # per-arm values from --gripper-close-bias-left/right (defaults 2.0/6.0).
+        # per-arm values from --gripper-close-bias-left/right. BOTH DEFAULT TO 0.0
+        # (DEFAULT_GRIPPER_CLOSE_BIAS_LEFT/RIGHT in main.py): the policy's own opening
+        # is commanded as-is unless an operator asks otherwise. (This comment said
+        # 2.0/6.0 until 2026-09-16; those values were never the defaults.)
         self.gripper_close_bias = 0.0
         self.gripper_close_bias_left = None
         self.gripper_close_bias_right = None

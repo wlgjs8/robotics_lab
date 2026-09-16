@@ -411,6 +411,11 @@ def build_rollout_step_record(
                 else (cmd_pose[2] - meas_pose[2]) * 1000.0
             ),
             "raw_delta_ee_local": _finite_vector(raw_delta, 6),
+            # The three gripper_*_pct fields carry the DATASET's gripper unit, which since
+            # 2026-09-16 is MILLIMETRES of jaw opening (`gripper.units: sdk_mm` -- the pika SDK's
+            # get_gripper_distance(), the same quantity the collection rig recorded). The `_pct`
+            # suffix predates that and is kept so existing analysis scripts keep parsing; logs from
+            # before that date carry percent of the motor range and are NOT comparable.
             "gripper_cmd_pct": _finite_float(gripper_cmd),
             "gripper_meas_pct": _measured_gripper_pct(payload, arm),
             # TRANSPORT age only: publish->receive of the gripper_state.v1 message

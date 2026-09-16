@@ -1003,7 +1003,11 @@ safety:
       # 62 mm edge is 0.615 m/s -- above the 0.60 m/s command ceiling, so the row is
       # inert there. A 0.15 m/s approach is unrestricted down to 22.5 mm. The band is
       # where the check is ARMED, not where braking starts.
-      d_slow_m: 0.062
+      # 2026-09-16: 0.062 -> 0.085 with the flow_infer_preview executor ceiling 0.60 -> 0.75 m/s
+      # (need d_hard + v^2/(2 a_brake) = 0.020 + 0.5625/9 = 0.0825). Inert for slower motion,
+      # as before: the allowance sqrt(2 a (d - d_hard)) at the 85 mm edge is 0.765 m/s, above
+      # the ceiling, and a 0.15 m/s approach is still unrestricted down to 22.5 mm.
+      d_slow_m: 0.085
       # 2026-09-06: 3.0 -> 4.5 m/s^2 (both self-collision families). The loader requires
       # d_slow >= d_hard + v_max^2 / (2 a_brake) against the highest commanded TCP
       # ceiling; that ceiling rose 0.50 -> 0.60 m/s (flow_infer max_linear_velocity),
@@ -1088,7 +1092,11 @@ safety:
         # oracle still misses by 5.4 mm at the TCP. Invariant: 0.020 + 0.040 = 0.060
         # <= 0.062. covered_d_hard_m (5 mm) is unchanged.
         d_hard_m: 0.020
-        d_slow_m: 0.062
+        # 2026-09-16: 0.062 -> 0.085 with the flow_infer_preview executor ceiling 0.60 -> 0.75 m/s
+        # (need d_hard + v^2/(2 a_brake) = 0.020 + 0.5625/9 = 0.0825). Inert for slower motion,
+        # as before: the allowance sqrt(2 a (d - d_hard)) at the 85 mm edge is 0.765 m/s, above
+        # the ceiling, and a 0.15 m/s approach is still unrestricted down to 22.5 mm.
+        d_slow_m: 0.085
         a_brake_m_s2: 4.5   # 3.0 -> 4.5 (2026-09-06, see the mesh note: v_max 0.60 needs d_hard + v^2/2a = 0.060 <= 0.062)
         hyst_m: 0.010
       # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
@@ -1140,7 +1148,11 @@ safety:
       # 0.020 + 0.60^2/9 = 0.060 <= 0.062.
       environment:
         d_hard_m: 0.020
-        d_slow_m: 0.062
+        # 2026-09-16: 0.062 -> 0.085 with the flow_infer_preview executor ceiling 0.60 -> 0.75 m/s
+        # (need d_hard + v^2/(2 a_brake) = 0.020 + 0.5625/9 = 0.0825). Inert for slower motion,
+        # as before: the allowance sqrt(2 a (d - d_hard)) at the 85 mm edge is 0.765 m/s, above
+        # the ceiling, and a 0.15 m/s approach is still unrestricted down to 22.5 mm.
+        d_slow_m: 0.085
         recover_speed_m_s: 0.0
       # ARM <-> STAND (2026-09-10). Split out of the self set above so the two can be
       # tuned independently. They are not the same problem: an arm<->arm clearance is
@@ -1190,7 +1202,9 @@ safety:
       # RE-MEASURE THE DH ORACLE before going below 10.
       arm_stand:
         d_hard_m: 0.010
-        d_slow_m: 0.052
+        # 2026-09-16: 0.052 -> 0.075 with the flow_infer_preview executor ceiling 0.60 -> 0.75 m/s
+        # (need d_hard + v^2/(2 a_brake) = 0.010 + 0.5625/9 = 0.0725); inert for slower motion.
+        d_slow_m: 0.075
         recover_speed_m_s: 0.0
       extra_collision: []
       #   - { name: left_wrist_camera,  shape: box, parent_frame: dual_rb3_730e_left_attachment_site,
@@ -2827,7 +2841,14 @@ cartesian_control:
       ruckig_follower:
         enable: true
         controller: delta_preview
-        max_linear_velocity_m_s: 0.6
+        # 0.6 -> 0.75 m/s (2026-09-16, jhkim). The policy runner clamps its rows at
+        # --max-linear-velocity-m-s (0.55 since today, 0.45 before); the executor
+        # needs headroom above that to close a lag (measured 14:38 run: commanded
+        # 336/377 mm/s max against source rows up to 422 mm/s, executor/source speed
+        # ratio 0.94-0.97 in every speed bin, QP acceleration p99 1.6 m/s^2 of 12).
+        # Joint dq_max 170 deg/s at 0.85 m reach is ~2.5 m/s TCP; the barrier's slow
+        # zone d_slow >= v^2 / (2 a_brake) is re-checked by --check-config.
+        max_linear_velocity_m_s: 0.75
         max_linear_accel_m_s2: 12.0
         max_linear_jerk_m_s3: 2000.0
         # 1.4 -> 2.5 rad/s (2026-09-16, jhkim). The faster-collected bolt data asks
@@ -2962,6 +2983,29 @@ cartesian_control:
             # the four-row execute window; the fourth row's central-difference velocity
             # already reads the first uncommitted row. Set 0 to A/B the evening rule.
             trusted_future_sec: 0.10
+            # CONTACT REALIGN (2026-09-16, jhkim). Time constant on which a source
+            # that is DEEPER than the executor along the contact normal is retired
+            # back to it while authority holds: (1-g) x gap / realign on top of the
+            # refused share of its closing advance, (1-g) x closing. The old
+            # nominal-minus-executed term retired micrometres per tick while the
+            # source pushed 100-150 mm/s into a held contact at g 0.55-0.7, ran 48-53 mm
+            # ahead, and the cursor backlog then hit its 100 ms cap: five recovery
+            # stops in the 14:38 run (101.7-140.4 s), all in sustained 8-15 N contacts.
+            # The plan's own retreat is bounded elsewhere (the two-sided contact tube
+            # in the worker, no config). 0.10 s = the execute window; at most the
+            # horizon.
+            contact_realign_sec: 0.10
+            # CONTACT RETREAT SLACK (2026-09-16, jhkim). The constrained plan is held in
+            # a two-sided tube around g x the free candidate along the contact normal
+            # (closing scaled by g, retreat at full authority; the candidate is solved
+            # from a de-braked splice so an impact's braking acceleration is not read
+            # as a retreat demand). This is how far below that tube's floor the plan
+            # may still sit, in m/s: 0 makes the tube exact, and at g ~ 0 an exact
+            # tube is micrometres per second wide - qpOASES then hits the working-set
+            # limit (executor test). 5 mm/s = 0.5 mm of discretionary retreat per
+            # 100 ms, against the 8 mm the one-sided authority allowed on the 14:38
+            # run (left 317.69-317.80 s, -86 mm/s, contact lost, 55 N re-impact).
+            contact_retreat_slack_m_s: 0.005
           # Offline execution_cursor_v1.json: bounded lag, no target-origin fold.
           cursor:
             enable: true

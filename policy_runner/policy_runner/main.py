@@ -1920,6 +1920,26 @@ def _main_with_subcommands(argv: list[str]) -> int:
         "arm and put it in the gray box' (left phase).",
     )
     flow_infer.add_argument(
+        "--gripper-lookahead-steps",
+        type=int,
+        default=0,
+        help="Rows of LEAD the gripper takes over the pose INSIDE the same chunk (absolute gripper "
+             "mode only; refused in delta mode, where rows must be integrated in order). 0 = OFF "
+             "(default, historical behaviour). Measured 2026-09-16: an `anchored` chunk is "
+             "FRONT-loaded in tool-z (rows 0-3 carry 40%% of the z displacement, flat would be "
+             "16.7%%) and BACK-loaded in the gripper (rows 0-3 carry 4.2%% left / 9.7%% right). With "
+             "--chunk-execute-steps 4 the jaw therefore runs the flat head of the ramp forever and "
+             "closes at 7.2/19.1 mm/s commanded against 28.5 mm/s in the demonstrations, while the "
+             "pose is already over-served. START AT 4 -- a lead of one execute window. Measured "
+             "executed close rate by lead (left/right mm/s): 0 -> 7.2/19.1, 2 -> 15.3/21.1, "
+             "4 -> 28.0/23.4, 8 -> 27.3/23.2, against 28.5 mm/s demonstrated. The ramp is steep "
+             "from about row 4 on, so a bigger lead buys almost no rate and only parks the "
+             "setpoint further ahead of the model's current intent (1.2/2.7 mm of lead at 4, "
+             "5.6/6.4 mm at 8). The gripper column is an ABSOLUTE per-frame "
+             "opening, so a later row is a setpoint the model itself predicted -- there is no "
+             "anchor to drift from, which is why the same lead would NOT be sound for the pose.",
+    )
+    flow_infer.add_argument(
         "--gripper-close-snap-percent",
         type=float,
         default=DEFAULT_GRIPPER_CLOSE_SNAP_PERCENT,
@@ -2805,6 +2825,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     sdk_path=config.gripper.pika_sdk_path or None,
                     min_rad=config.gripper.min_rad,
                     max_rad=config.gripper.max_rad,
+                    units=config.gripper.units,
                     deadband_rad=config.gripper.deadband_rad,
                     max_hz=config.gripper.max_hz,
                     suppress_sdk_logs=config.gripper.suppress_sdk_logs,
@@ -3197,6 +3218,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
             ) = resolve_gripper_close_bias(args)
             # Close-snap deadzone: collapse a near-closed absolute opening to fully
             # closed (0%) so small jitter doesn't leave the jaw cracked open.
+            lookahead = int(getattr(args, "gripper_lookahead_steps", 0) or 0)
+            if lookahead < 0:
+                parser.error("--gripper-lookahead-steps must be >= 0")
+            if lookahead > 0 and gripper_mode == "delta":
+                parser.error(
+                    "--gripper-lookahead-steps needs an ABSOLUTE gripper action mode: in delta "
+                    "mode the chunk rows are per-step increments and must be integrated in order, "
+                    "so skipping ahead would silently drop the rows it jumped over"
+                )
+            source.gripper_lookahead_steps = lookahead
             source.gripper_close_snap_percent = float(
                 getattr(args, "gripper_close_snap_percent", 0.0) or 0.0
             )
