@@ -44,6 +44,14 @@ struct GripperArmFeedback {
     // grid, so the measured percent is 27 ms old on average, ~54 ms at worst).
     // NaN when the publisher is too old to stamp it -- never a fabricated 0.
     double sample_age_ms = std::numeric_limits<double>::quiet_NaN();
+    // Motor phase current in mA, negative while squeezing. The gripper server has published
+    // this since the sdk_mm unit fix, but nothing here parsed it, so `gripper_current_ma` was
+    // null on every step of every rollout -- indistinguishable from "the server does not send
+    // it". It is the ONLY grip-effort signal in the cell (the collection rig is a passive
+    // handheld with no force sensor), and with the compliant TPU tips the jaw POSITION alone
+    // cannot separate "closed on the bolt" from "closed on air": both settle at the commanded
+    // opening. NaN when the payload carried no usable value -- never a fabricated 0.
+    double current_ma = std::numeric_limits<double>::quiet_NaN();
 };
 
 // Bridge to the out-of-process gripper_server (docs/plans/gripper_server_design.md).

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import sys
 import unittest
 
 from policy_runner.config import config_from_mapping
@@ -15,6 +16,7 @@ from policy_runner.gripper import (
     PikaSerialGripperBackend,
     REAL_GRIPPER_ENV,
     gripper_commands_from_flow_step,
+    install_pika_frame_resync,
     suppress_pika_sdk_logging,
 )
 from policy_runner.servo_command_client import CommandIntent
@@ -24,6 +26,7 @@ class FakePikaGripper:
     def __init__(self, port: str):
         self.port = port
         self.position = 0.5
+        self.current_ma = 0.0
         self.sent_angles: list[float] = []
         self.closed_calls: list[str] = []
         self.zero_calls = 0
@@ -36,6 +39,9 @@ class FakePikaGripper:
 
     def get_motor_position(self) -> float:
         return self.position
+
+    def get_motor_current(self) -> float:
+        return self.current_ma
 
     def set_motor_angle(self, rad: float) -> bool:
         self.sent_angles.append(float(rad))
@@ -436,6 +442,54 @@ class PikaGripperSdkMmUnitsTest(unittest.TestCase):
             )
 
 
+class PikaGripperHomingCurrentGuardTest(unittest.TestCase):
+    """Homing must not silently accept a zero set against an OBJECT.
+
+    `set_motor_angle(min_rad)` + settle + `set_zero()` cannot tell the jaw's own stop from a bolt
+    between the fingers. If it is a bolt, every reported opening for the rest of the session is
+    shifted by the bolt's width AND the gripper can never squeeze past it, because the SDK clamps
+    rad < 0 to 0. Measured on hardware 2026-09-16: a 12 mm shank homed to a reported 1.3-1.6 mm at
+    -580/-720 mA and then stalled at the command floor. The motor current is the only way to tell."""
+
+    def _backend(self, current_ma):
+        backend = PikaSerialGripperBackend(
+            ports={"left": "/dev/ttyFAKE0"},
+            gripper_cls=FakePikaGripper,
+            home_on_connect=False,
+            home_poll_sec=0.0,
+        )
+        backend.connect()
+        backend._grippers["left"].current_ma = current_ma
+        return backend
+
+    def test_clean_home_is_not_flagged(self) -> None:
+        # -203 mA is the MEASURED peak of an empty jaw pressing its own stop on this cell; the
+        # threshold has to clear it (a 200 mA default false-positived on the right arm by 3 mA).
+        backend = self._backend(-203.0)
+        backend._home_one("left", backend._grippers["left"])
+        self.assertEqual(backend._home_suspect, {})
+        self.assertEqual(backend._grippers["left"].zero_calls, 1)
+
+    def test_home_against_an_object_is_flagged(self) -> None:
+        backend = self._backend(-720.0)
+        err = io.StringIO()
+        stderr, sys.stderr = sys.stderr, err
+        try:
+            backend._home_one("left", backend._grippers["left"])
+        finally:
+            sys.stderr = stderr
+        self.assertIn("left", backend._home_suspect)
+        self.assertAlmostEqual(backend._home_suspect["left"], -720.0)
+        self.assertIn("pressing on SOMETHING", err.getvalue())
+        # it still homes -- the operator is told, not blocked mid-rollout
+        self.assertEqual(backend._grippers["left"].zero_calls, 1)
+
+    def test_motor_current_is_exposed_and_safe(self) -> None:
+        backend = self._backend(-333.0)
+        self.assertAlmostEqual(backend.motor_current_ma("left"), -333.0)
+        self.assertIsNone(backend.motor_current_ma("missing"))
+
+
 class PikaGripperHomingTest(unittest.TestCase):
     # home_poll_sec=0.0 keeps the settle loop fast; the fake reports a constant
     # position so it settles on the second poll regardless.
@@ -561,3 +615,69 @@ class GripperConfigTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeSerialComm:
+    """Minimal stand-in for pika.serial_comm.SerialComm's parser surface."""
+
+    def __init__(self) -> None:
+        self.buffer = ""
+
+    def _find_json(self):  # replaced by install_pika_frame_resync
+        raise AssertionError("stock parser should not run in these tests")
+
+
+def _pika_frame(position: float) -> str:
+    return (
+        '{\r\n"motor":{\r\n"Speed":0.000,\r\n"Current":-93,\r\n'
+        f'"Position":{position}\r\n'
+        '}\r\n,\r\n"motorstatus":{\r\n"Voltage":23.9,\r\n"DriverTemp":42,\r\n'
+        '"MotorTemp":36,\r\n"Status":"0x40",\r\n"BusCurrent":0\r\n}\r\n\r\n}\r\n'
+    )
+
+
+class PikaFrameResyncTest(unittest.TestCase):
+    """A serial write truncates the frame in flight; the vendor parser then loses ~78 ms of
+    telemetry because one unmatched '{' blocks it until the buffer is dumped at 2000 bytes.
+    Captured from the real device 2026-09-17: '{\\r\\n"motor":{\\r' + the next frame."""
+
+    def _comm(self) -> _FakeSerialComm:
+        comm = _FakeSerialComm()
+        self.assertTrue(install_pika_frame_resync(_FakeGripperWithComm(comm)))
+        return comm
+
+    def test_clean_stream_yields_every_frame(self):
+        comm = self._comm()
+        comm.buffer = _pika_frame(0.1) + _pika_frame(0.2)
+        self.assertEqual(comm._find_json()["motor"]["Position"], 0.1)
+        self.assertEqual(comm._find_json()["motor"]["Position"], 0.2)
+        self.assertIsNone(comm._find_json())
+
+    def test_truncated_frame_costs_one_frame_not_the_buffer(self):
+        comm = self._comm()
+        comm.buffer = '\r\n{\r\n"motor":{\r' + _pika_frame(0.3) + _pika_frame(0.4)
+        # the half frame is dropped, both intact frames still arrive
+        self.assertEqual(comm._find_json()["motor"]["Position"], 0.3)
+        self.assertEqual(comm._find_json()["motor"]["Position"], 0.4)
+
+    def test_incomplete_tail_is_kept_for_the_next_read(self):
+        comm = self._comm()
+        whole = _pika_frame(0.5)
+        comm.buffer = whole[:40]
+        self.assertIsNone(comm._find_json())
+        comm.buffer += whole[40:]
+        self.assertEqual(comm._find_json()["motor"]["Position"], 0.5)
+
+    def test_buffer_never_grows_without_a_frame_start(self):
+        comm = self._comm()
+        comm.buffer = "x" * 9000
+        self.assertIsNone(comm._find_json())
+        self.assertLessEqual(len(comm.buffer), 4096)
+
+    def test_install_reports_false_on_unknown_sdk_shape(self):
+        self.assertFalse(install_pika_frame_resync(object()))
+
+
+class _FakeGripperWithComm:
+    def __init__(self, comm) -> None:
+        self.serial_comm = comm

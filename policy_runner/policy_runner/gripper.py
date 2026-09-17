@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import time
+import types
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol
 
@@ -95,6 +98,84 @@ class NoopGripperBackend:
             dropped=True,
             reason=self.reason,
         )
+
+
+# --- pika SDK telemetry framing ---------------------------------------------------------------
+# Every POSITION_CTRL write truncates the telemetry frame in flight, which the vendor parser then
+# turns into a 78 ms outage. Measured 2026-09-17 on this cell:
+#
+#   the write leaves a half frame in the stream -> `{\r\n"motor":{\r` + the next frame's `{`, i.e.
+#   TWO unmatched '{'. serial_comm._find_json brace-matches from the FIRST '{' in the buffer, so it
+#   can never balance again; it returns None for every subsequent read while perfectly good frames
+#   pile up behind the poison, until `len(buffer) > 2000` makes the SDK discard the WHOLE buffer.
+#   Net: ~3 ms of real corruption on the wire costs ~12 frames / 78 ms of jaw feedback.
+#
+#   stock parser, 20 Hz writes: 77.0 Hz frames, write->frame p95 83.4 ms
+#   stock parser, 60 Hz writes: 13.7 Hz frames, write->frame p95 117.1 ms   <- gripper.max_hz
+#   with this resync,   20 Hz:  155.3 Hz frames, write->frame p95 11.7 ms
+#   with this resync,   60 Hz:  126.3 Hz frames, write->frame p95 11.6 ms
+#   no writes (either):        ~167 Hz
+#
+# It matters because the jaw opening is the policy's only non-visual input on the griponly
+# checkpoints, and the outage lands exactly on the grasp: measured over 31 rollout logs, the
+# published sample is 3.5 ms old while the jaw is parked and 21 ms (p90 80, p99 141) while it moves.
+#
+# Fixed here rather than in the vendor tree: policy_runner already wraps the SDK from this side
+# (suppress_pika_sdk_logging, _install_sample_clock), and the COLLECTION rig never writes to its
+# Sense, so it never hits this and must not be perturbed.
+_PIKA_FRAME_MARK = '{\r\n"motor":'
+_PIKA_TRAILING_COMMA = re.compile(r",\s*([}\]])")
+
+
+def _find_json_resync(self: Any) -> Any:
+    """serial_comm._find_json, but anchored on a FRAME START and able to resync.
+
+    Differences from the vendor version, both required:
+      * scans from `_PIKA_FRAME_MARK`, not from any '{', so a half frame cannot capture the match;
+      * when a candidate does not close (or does not parse), drops up to the NEXT frame start
+        instead of keeping it -- one truncated frame costs one frame, not the whole buffer.
+    """
+    while True:
+        start = self.buffer.find(_PIKA_FRAME_MARK)
+        if start == -1:
+            # No frame start at all: keep a tail in case one is straddling the read boundary.
+            if len(self.buffer) > 4096:
+                self.buffer = self.buffer[-512:]
+            return None
+        depth = 0
+        end = -1
+        for i in range(start, len(self.buffer)):
+            char = self.buffer[i]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end == -1:
+            nxt = self.buffer.find(_PIKA_FRAME_MARK, start + 1)
+            if nxt == -1:
+                # Genuinely incomplete (still arriving) -> wait for more bytes.
+                return None
+            self.buffer = self.buffer[nxt:]  # truncated frame -> discard just it
+            continue
+        raw = self.buffer[start:end + 1]
+        self.buffer = self.buffer[end + 1:]
+        try:
+            return json.loads(_PIKA_TRAILING_COMMA.sub(r"\1", raw))
+        except Exception:  # noqa: BLE001 - malformed frame is data, not a control-flow error
+            continue
+
+
+def install_pika_frame_resync(gripper: Any) -> bool:
+    """Swap the resync parser onto ONE gripper's serial reader. Returns False if the SDK
+    shape does not match (age/feedback stays exactly as before; nothing is fabricated)."""
+    comm = getattr(gripper, "serial_comm", None)
+    if comm is None or not hasattr(comm, "buffer") or not hasattr(comm, "_find_json"):
+        return False
+    comm._find_json = types.MethodType(_find_json_resync, comm)
+    return True
 
 
 def _import_pika_gripper_class(sdk_path: str | None) -> type:
@@ -210,6 +291,11 @@ class PikaSerialGripperBackend:
         home_timeout_sec: float = 3.0,
         home_settle_eps_rad: float = 0.01,
         home_poll_sec: float = 0.05,
+        # Measured 2026-09-16 on this cell: pressing the EMPTY jaw onto its own stop peaks at
+        # ~203 mA (right arm; left stayed lower), while homing onto a 12 mm shank sat at 580-720 mA.
+        # 400 sits between them with ~2x margin either way. 200 was tried first and false-positived
+        # on the empty right arm by 3 mA.
+        home_max_current_ma: float = 400.0,
     ) -> None:
         if max_rad <= min_rad:
             raise ValueError("gripper max_rad must be greater than min_rad")
@@ -233,6 +319,7 @@ class PikaSerialGripperBackend:
         self.home_timeout_sec = float(home_timeout_sec)
         self.home_settle_eps_rad = float(home_settle_eps_rad)
         self.home_poll_sec = float(home_poll_sec)
+        self.home_max_current_ma = float(home_max_current_ma)
         self._gripper_cls = gripper_cls
         self._clock = clock
         self._grippers: dict[str, Any] = {}
@@ -241,6 +328,8 @@ class PikaSerialGripperBackend:
         # Arrival time of the most recent pika telemetry frame per arm, stamped
         # by _install_sample_clock so consumers can report a real sensor age.
         self._sample_time: dict[str, float] = {}
+        # Arms whose homing ended pressing on something; the reported scale is not trustworthy.
+        self._home_suspect: dict[str, float] = {}
 
     def connect(self) -> "PikaSerialGripperBackend":
         if self.suppress_sdk_logs:
@@ -264,6 +353,7 @@ class PikaSerialGripperBackend:
             if not gripper.enable():
                 self.close()
                 raise RuntimeError(f"pika gripper {arm} enable failed on {port}")
+            install_pika_frame_resync(gripper)
             self._grippers[arm] = gripper
             self._targets[arm] = self._seed_target(gripper)
             self._install_sample_clock(arm, gripper)
@@ -351,6 +441,27 @@ class PikaSerialGripperBackend:
             self._wait_until_settled(gripper)
             # 3. Define the closed stop as zero. Subsequent set_motor_angle(rad) is
             #    now consistent across both grippers; max_rad == true full open.
+            # A homing that ended against an OBJECT rather than the jaw's own stop silently
+            # poisons the whole session: set_zero() then defines "closed" at the object's width,
+            # every reported opening is shifted by it, and -- because set_motor_angle clamps rad<0
+            # to 0 -- the gripper can never squeeze past that point no matter what the policy
+            # commands. Measured 2026-09-16: with a 12 mm shank in the jaws both arms homed to a
+            # reported 1.3-1.6 mm at -580/-720 mA and stalled at the command floor. The motor
+            # current is the only way to tell the two cases apart, so check it rather than trusting
+            # that the jaws were empty.
+            current = self.motor_current_ma(arm)
+            if current is not None and abs(current) > self.home_max_current_ma:
+                print(
+                    f"[gripper] WARN home {arm}: settled at {abs(current):.0f} mA "
+                    f"(> {self.home_max_current_ma:.0f}), i.e. pressing on SOMETHING, not on its own "
+                    "stop. The zero is being set at that object's width: every opening this session "
+                    "is offset and the jaw cannot squeeze past it. Clear the jaws and re-home.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self._home_suspect[arm] = float(current)
+            else:
+                self._home_suspect.pop(arm, None)
             if hasattr(gripper, "set_zero"):
                 gripper.set_zero()
             self._targets[arm] = self.min_rad
@@ -411,6 +522,21 @@ class PikaSerialGripperBackend:
         try:
             return self._rad_to_units(float(gripper.get_motor_position()))
         except Exception:
+            return None
+
+    def motor_current_ma(self, arm: str) -> float | None:
+        """Live motor phase current in mA (pika SDK `get_motor_current`), negative while squeezing.
+
+        This is the ONLY grip-effort signal in the cell: the collection rig cannot record force at
+        all (the Pika Sense is a passive handheld -- no motor, so no current; confirmed against its
+        whole SDK surface, the vendor API_Doc and the manual's Output Data row), so any calibration
+        of "how hard is this grip" has to come from the robot side."""
+        gripper = self._grippers.get(arm)
+        if gripper is None:
+            return None
+        try:
+            return float(gripper.get_motor_current())
+        except Exception:  # noqa: BLE001 - telemetry must never raise into the loop
             return None
 
     def target_units(self, arm: str) -> float | None:

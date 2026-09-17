@@ -424,6 +424,11 @@ def build_rollout_step_record(
             # not. This number does NOT include the age of the pika telemetry
             # SAMPLE inside that message, which is the dominant term
             # (`gripper_sample_age_ms` below).
+            # GRIP EFFORT: pika motor phase current in mA, negative while squeezing. The only
+            # force signal in the cell -- the collection rig cannot record one, so "did this close
+            # actually grip, and how hard" is answerable ONLY from this column. A close that ends
+            # near 0 mA closed on air.
+            "gripper_current_ma": _gripper_current_ma(payload, arm),
             "gripper_feedback_age_ms": _gripper_feedback_age_ms(payload, arm),
             # SENSOR age: pika serial sample -> gripper_server publish, stamped in
             # the gripper server from the SDK's own reader-thread callback. The jaw
@@ -618,6 +623,27 @@ def _gripper_command_from_intent(intent: Any | None, arm: str) -> float | None:
     if not isinstance(arm_payload, Mapping):
         return None
     return _finite_float(arm_payload.get("gripper_target"))
+
+
+def _gripper_current_ma(payload: Mapping[str, Any], arm: str) -> float | None:
+    """Motor phase current in mA, negative while squeezing.
+
+    Mirrors _measured_gripper_pct's container search: the gripper block is nested under
+    "gripper"/"gripper_state" in the state payload, never at the arm root. Reading the root
+    silently yielded null on every step of every run, which looks exactly like "the server
+    does not publish current" and hid the field for a whole day of rollouts.
+    """
+    arm_payload = _arm_mapping(payload, arm)
+    for container_name in ("gripper", "gripper_state"):
+        container = arm_payload.get(container_name)
+        if not isinstance(container, Mapping):
+            continue
+        if container.get("valid") is False or container.get("stale") is True:
+            continue
+        value = _finite_float(container.get("current_ma"))
+        if value is not None:
+            return value
+    return _finite_float(arm_payload.get("current_ma"))
 
 
 def _measured_gripper_pct(payload: Mapping[str, Any], arm: str) -> float | None:

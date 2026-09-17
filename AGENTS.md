@@ -168,8 +168,9 @@ this revision is pending; historical hardware evidence does not qualify these ne
   candidate is solved from a de-braked splice, and the slew lands on the scaled candidate's
   state: a plan never backs out of a contact on the objective's own account (the -86 mm/s
   lift-off and 55 N re-impact of the 14:38 run). Source retirement is source-based: the
-  refused share `(1-g)` of the source's closing advance plus a deeper source's
-  `gap / tracker.contact_realign_sec` (0.10 s) is retired from the source every tick, never
+  source's closing advance plus a deeper source's `gap / tracker.contact_realign_sec`
+  (0.10 s), weighted `(1-g)^2` (linear retired free travel in the 2-6 N band), is retired
+  from the source every tick, never
   clamped out of the physical command, so the source stays beside the executor at a contact.
   A finite brake accepts a seed up to 25 % above a cap (it brakes, it does not fault).
 - A non-emergency latch delivers its decelerate-then-latch ramp under send policy

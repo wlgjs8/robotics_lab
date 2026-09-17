@@ -159,12 +159,16 @@ noise statistics. No online bias adaptation or automatic contact tare was added.
    241-243 s: every leash-limited tick was behind, cursor backlog at its 100 ms cap, three
    recovery brakes). This replaces the draft's variable-clock derivative approach and removes
    its `g_dot`/`g_ddot` mismatch entirely. Legacy `plan_clock_gate` telemetry is always 1.
-6. Source retirement is **source-based** (2026-09-16): every tick the authority-refused share
-   of the source's own closing advance, `(1-g)*max(0, n dot v_source)`, plus
-   `(1-g)*max(0, gap)/tracker.contact_realign_sec` for a source already deeper than the
-   executor (`gap = n dot (p_source - p_executor)`, realign 0.10 s), is retired from the raw
-   source only; the older nominal-minus-constrained term is kept as a floor. At `g=1` nothing
-   is retired. The source therefore stays beside the executor at the contact instead of
+6. Source retirement is **source-based** (2026-09-16): every tick
+   `(1-g)^2*max(0, n dot v_source)`, the source's own closing advance weighted by the square
+   of the refused authority, plus `(1-g)^2*max(0, gap)/tracker.contact_realign_sec` for a
+   source already deeper than the executor (`gap = n dot (p_source - p_executor)`, realign
+   0.10 s), is retired from the raw source only; the older nominal-minus-constrained term is
+   kept as a floor. At `g=1` nothing is retired. The square (evening revision) keeps the
+   confidence band, where `g` sits at 0.75–0.98 on residual force, from retiring the policy's
+   own travel (a linear share took 86 / 28 mm over the 25-minute 16:45 run, 4–22 µm per
+   tick); a real contact reaches `g <= 0.1` within ~0.2 s and still retires almost the whole
+   refused advance. The source therefore stays beside the executor at the contact instead of
    running ahead: on the 14:38 run it ran 48–53 mm ahead at `g` 0.55–0.7, the cursor leash
    slowed the plan clock, the backlog hit its 100 ms cap and the executor was stopped for a
    recovery brake five times (101.7–140.4 s), all in sustained 8–15 N contacts. Physical

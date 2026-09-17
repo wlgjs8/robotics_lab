@@ -1360,6 +1360,10 @@ nlohmann::json gripperFeedbackJson(const GripperArmFeedback& fb) {
         // feedback_age_ms does not cover. Consumers add the two for the real age
         // of `percent`. null when the gripper server did not stamp it.
         {"sample_age_ms", finiteDoubleJson(fb.sample_age_ms)},
+        // Motor phase current in mA, negative while squeezing. With compliant tips the jaw
+        // position settles at the command whether or not it holds anything, so this is the
+        // only field that separates a grasp from a close on air. null when unstamped.
+        {"current_ma", finiteDoubleJson(fb.current_ma)},
     };
 }
 

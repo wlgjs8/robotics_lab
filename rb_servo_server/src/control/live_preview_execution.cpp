@@ -576,8 +576,17 @@ LivePreviewOutput LivePreviewExecution::step(double now,const CartesianChunkFoll
     // built on the pose the arm actually holds (yield-and-stay for the plan, as the
     // force fold is for the arm). At g = 1 nothing is retired. The nominal term is
     // kept as a floor for the case where the executor is behind its own free plan.
+    //
+    // WEIGHTED (1-g)^2, NOT (1-g) (2026-09-16 evening). In the confidence band the
+    // gate sits at 0.75-0.98 on residual force with no contact at all, and a linear
+    // share retired 4-22 um per tick of the policy's own travel there: 86 mm on the
+    // left / 28 mm on the right over the 25-minute 16:45 run against 17 / 27 mm
+    // before. Squaring leaves the band at <= 6 % of that (1 % at g = 0.9) while a
+    // real contact, where g reaches 0.1 or less within ~0.2 s, still retires almost
+    // the whole refused advance; the source runs ahead by at most g(1-g) x closing
+    // during the closing transient (5 mm at 100 mm/s) and the gap pull recovers it.
     const Eigen::Vector3d raw_velocity(raw_sample.velocity.x,raw_sample.velocity.y,raw_sample.velocity.z);
-    const double refused=1.0-contact_gate;
+    const double refused=(1.0-contact_gate)*(1.0-contact_gate);
     const double source_closing=std::max(0.0,n.dot(raw_velocity));
     const double gap=n.dot(xyz(raw_sample.pose)-xyz(sample_.pose));   // > 0: the source is deeper
     const double realign=config_.preview_execution.tracker.contact_realign_sec;

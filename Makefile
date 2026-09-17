@@ -5,7 +5,7 @@ POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 FLOW_INFER_ARGS ?=
 
-.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-up-wrists cam-status cam-down cloud-up cloud-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-up-wrists cam-up-wrists-60 cam-status cam-down cloud-up cloud-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -125,7 +125,12 @@ cam-up:
 # (camera_server/config/realsense_d405_advanced.json — 노출/게인/zunits 등 파일의 모든
 # 값). cam-up 의 기본값은 __no_advanced__.json(프리셋 없음)이라 여기서 덮어써야 한다.
 # 이 리그 YAML 에는 controls: 블록을 두지 않는다 — apply_controls() 가 프리셋 로드보다
-# 나중에 돌아서 프리셋을 조용히 덮어쓰기 때문. 프리셋이 단일 소유자다.
+# 나중에 돌아서 프리셋을 조용히 덮어쓰기 때문(realsense_device.cpp: maybe_load_advanced_json()
+# 다음에 apply_controls()). 프리셋이 단일 소유자다.
+# 예외는 60 fps 리그 하나뿐이고, 그건 "덮어쓴다"를 의도한 것이다: D405 는 센서가 하나라
+# advanced-mode 프리셋의 controls-autoexposure-* 가 컬러 노출에 닿지 못해서, 프리셋만으로는
+# 노출을 고정할 방법이 아예 없다. 그 YAML 의 controls: 는 프리셋이 못 쓰는 두 옵션
+# (RS2_OPTION_EXPOSURE/GAIN)만 소유한다 — 자세한 건 그 파일 주석.
 # 2026-09-02: 손목 리그 기본이 90 fps 로 전환됐다(수집·추론 공간/조명 통일, AE 양쪽 활성).
 # 프리셋 realsense_d405_90fps.json 은 advanced.json 과 단 두 값만 다르다
 # (AE manual seed 30000->10000: AE 가 꺼져도 90fps 프레임 예산 11.1ms 를 넘지 않게,
@@ -135,11 +140,30 @@ cam-up:
 #                      WRIST_CAM_JSON=/app/config/realsense_d405_advanced.json
 WRIST_CAM_CONFIG ?= /app/config/dual_realsense_d405_90fps.yaml
 WRIST_CAM_JSON ?= /app/config/realsense_d405_90fps.json
+# 60 fps + 고정 노출로 띄우려면 `make cam-up-wrists-60` (아래에 근거).
 CLOUD ?= 1
 # 프리셋은 FAIL CLOSED 다: 지정한 파일이 없거나 두 카메라에 실제로 적용되지 않으면
 # 이 타겟이 실패한다. "프리셋을 편집했는데 사실은 안 실리고 있었다"를 한 세션 뒤가
 # 아니라 이 명령에서 알아채기 위한 것. 프리셋 없이 띄우려면 명시적으로
 # STEREO_CAM_JSON=/app/config/__no_advanced__.json 을 준다.
+# 손목 리그를 **60 fps + 고정 노출**로 띄운다.
+#
+# 90 -> 60 인 이유(2026-09-17 실측, pika 손목 팁 사이 ROI, 볼트 122 mm, 40프레임):
+#   90 fps: depth 유효 91.4 % / 안정 20.9 % / 잡음 0.189 mm
+#   60 fps: depth 유효 97.2 % / 안정 28.2 % / 잡음 0.168 mm
+# 노출 상한이 11.1 ms -> 16.6 ms 로 늘어 모든 축에서 낫다. 이 호스트의 D405 4대
+# (pika 손목 2 + 이 리그 2)가 동시에 60 fps 를 유지하는 것도 확인했다.
+#
+# 고정 노출인 이유: AE 는 세션마다 밝기가 달라지고 그게 학습 데이터의 도메인 시프트가 된다
+# (과노출 수집 세션 클리핑 15.2 % vs 배포 5.4~6.2 %). D405 는 센서가 하나라 advanced-mode
+# 프리셋으로는 컬러 노출을 못 박는다 -- YAML controls: 가 그 두 옵션만 소유한다.
+#
+# 90 fps 로 되돌리려면 그냥 `make cam-up-wrists`.
+cam-up-wrists-60:
+	@$(MAKE) --no-print-directory cam-up-wrists \
+	  WRIST_CAM_CONFIG=/app/config/dual_realsense_d405_60fps.yaml \
+	  WRIST_CAM_JSON=/app/config/realsense_d405_60fps.json
+
 cam-up-wrists:
 	@set -e; \
 	host_json="camera_server/config/$$(basename '$(WRIST_CAM_JSON)')"; \

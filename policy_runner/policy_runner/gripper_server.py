@@ -485,8 +485,22 @@ class GripperServer:
                 # message's publish->receive time (~0.05 ms) and read the feedback
                 # as instant. null when unstamped -- never a fabricated 0.
                 "sample_age_ms": self._sample_age_ms(arm),
+                # Motor phase current in mA, negative while squeezing. The only grip-EFFORT signal
+                # in the cell (the collection rig has no force sensor at all), and the only way to
+                # tell "closed on the object" from "closed on air" after the fact.
+                "current_ma": self._motor_current_ma(arm),
             }
         return msg
+
+    def _motor_current_ma(self, arm: str) -> float | None:
+        reader = getattr(self._backend, "motor_current_ma", None)
+        if not callable(reader):
+            return None
+        try:
+            value = reader(arm)
+        except Exception:  # noqa: BLE001 - state publication must not raise
+            return None
+        return None if value is None else round(float(value), 1)
 
     def _sample_age_ms(self, arm: str) -> float | None:
         reader = getattr(self._backend, "sample_age_sec", None)

@@ -2985,8 +2985,10 @@ cartesian_control:
             trusted_future_sec: 0.10
             # CONTACT REALIGN (2026-09-16, jhkim). Time constant on which a source
             # that is DEEPER than the executor along the contact normal is retired
-            # back to it while authority holds: (1-g) x gap / realign on top of the
-            # refused share of its closing advance, (1-g) x closing. The old
+            # back to it while authority holds: (1-g)^2 x gap / realign on top of the
+            # refused share of its closing advance, (1-g)^2 x closing (squared since
+            # the evening: the linear share retired 4-22 um/tick of free travel in the
+            # 2-6 N confidence band, 86/28 mm over the 16:45 run). The old
             # nominal-minus-executed term retired micrometres per tick while the
             # source pushed 100-150 mm/s into a held contact at g 0.55-0.7, ran 48-53 mm
             # ahead, and the cursor backlog then hit its 100 ms cap: five recovery

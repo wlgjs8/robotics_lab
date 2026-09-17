@@ -145,6 +145,48 @@ policy in a side-by-side OpenCV window:
 ./tools/subscribe_camera.sh
 ```
 
+Compare two 224x224 RGB preprocessing results from each same source frame with:
+
+```bash
+./tools/subscribe_camera_crop.sh
+# Optional display zoom (the preprocessing and diff remain 224x224):
+./tools/subscribe_camera_crop.sh --scale 1.5
+```
+
+The comparison window has one row per camera: A fits the entire source into
+224x224 while preserving aspect ratio and adding centered black zero padding;
+B takes an exact 480x480 center crop before resizing to 224x224. Downscaling
+uses area interpolation. A 640x480 source becomes 224x168 plus 28 zero rows at
+the top/bottom in A, while B uses source x=80..559, y=0..479.
+
+A separate overlay window shows A's central source ROI aligned to B, B itself,
+and their red detail diff. Both aligned images cover the **same 480x480 source
+region at the same center and display scale**. The alignment maps B's pixel
+centers back into A's actual resized image grid with bilinear interpolation;
+integer resize rounding and odd crop offsets are included. Black padding is
+excluded, including interpolation at its boundary. Original A/B previews stay
+unchanged in the comparison window. Labels are outside the images.
+
+For a 640x480 source, A allocates only **168x168 = 28,224 samples** to this
+central region; B allocates **224x224 = 50,176 samples**: **1.33x per axis,
+1.78x in area (+21,952 samples, +77.8%)**. These counts and gains are displayed.
+A's central region is enlarged only for visual alignment; that adds no detail.
+For other source sizes the effective sample footprint is derived from the
+actual rounded resize dimensions and may be fractional (marked `~`).
+
+The overlay uses a grayscale blend for context; red opacity is
+`min(1, diff_gain * max(abs(aligned_A-B), axis=channels) / 255)`.
+`--diff-gain` defaults to 4 to make fine differences visible; use `--diff-gain 1`
+for unamplified display. The reported mean diff is always unamplified. This
+residual includes reconstruction/interpolation effects and is not a count of
+additional independent details or proof of model-quality improvement. Sample
+allocation gain is reported separately and is independent of scene texture.
+Sources smaller than 480 on either axis show `TOO SMALL` for B and the overlay;
+missing/stale frames are labeled. `q`, Escape, or closing either window exits.
+The crop script accepts `--cameras`, `--topic`, `--zmq-endpoint`, `--max-age-ms`,
+`--refresh-hz`, `--scale`, `--diff-gain`, and `--check-gui`, and uses the same Python selection
+as the original script (`STACK_PYTHON`, then `.venv`, then `python3`).
+
 The preview subscribes read-only to `camera.bundle.policy` and its shared-memory
 ring; it does not publish robot commands or interfere with policy inference.
 Press `q`, Escape, or close the window to exit. Check the selected Python and

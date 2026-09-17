@@ -4,6 +4,7 @@ policy_runner/__init__.py
 policy_runner/__main__.py
 policy_runner/arm_init_control.py
 policy_runner/camera_bundle_client.py
+policy_runner/camera_crop_preview.py
 policy_runner/camera_diagnostics.py
 policy_runner/camera_preview.py
 policy_runner/chunk_ensemble.py
@@ -66,6 +67,7 @@ tests/test_arm_init_concurrent_single_arm.py
 tests/test_arm_init_override_profile.py
 tests/test_arm_init_tare_wait.py
 tests/test_camera_bundle_client.py
+tests/test_camera_crop_preview.py
 tests/test_camera_diagnostics.py
 tests/test_camera_preview.py
 tests/test_camera_runtime_gate.py

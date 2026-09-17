@@ -135,6 +135,24 @@ class RolloutStepLoggerTest(unittest.TestCase):
         # Measured feedback must not be replaced by the state target_percent.
         self.assertEqual(left_record["gripper_meas_pct"], 12.0)
 
+    def test_gripper_current_is_read_from_the_gripper_container(self) -> None:
+        """The grip-effort signal lives inside the nested gripper block, not at the arm root.
+
+        Reading the root returned null on every step, which is indistinguishable from a
+        gripper server that does not publish current -- the failure mode that cost a day
+        of rollouts.
+        """
+        payload = _state_payload()
+        payload["left"]["gripper"]["current_ma"] = -642.0
+        record = build_rollout_step_record(
+            state_payload=payload, command_intent=None, conditioned_targets=None,
+            raw_delta_ee_local=None, gripper_cmd_pct=None, chunk_id=1,
+            chunk_step_index=0, stall=False, hold=False, inference_latency_ms=None,
+            t_mono=1.0, t_wall=2.0,
+        )
+        self.assertAlmostEqual(record["arms"]["left"]["gripper_current_ma"], -642.0)
+        self.assertIsNone(record["arms"]["right"]["gripper_current_ma"])
+
     def test_gripper_feedback_age_is_recorded_and_never_fabricated(self) -> None:
         payload = _state_payload()
         payload["left"]["gripper"]["feedback_age_ms"] = 23.5

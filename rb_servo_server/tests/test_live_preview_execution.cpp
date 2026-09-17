@@ -1038,7 +1038,7 @@ bool executorDoesNotClampTheLead() {
 }
 
 // SOURCE-BASED RETIREMENT (2026-09-16). While closing authority holds, the source's
-// refused closing advance (1-g) x closing and a deeper source's gap / realign are
+// refused closing advance and a deeper source's gap / realign, weighted (1-g)^2, are
 // retired along the normal every tick, so the source stays beside the executor at the
 // contact instead of running 48-53 mm ahead (14:38 run: five backlog recoveries, all in
 // held contacts). Nothing is retired in free space.
@@ -1057,8 +1057,8 @@ bool sourceRetirementFollowsTheSource() {
       const double gap=n.dot(Eigen::Vector3d(raw.pose.x,raw.pose.y,raw.pose.z)-
                              Eigen::Vector3d(f.exec.sample().pose.x,f.exec.sample().pose.y,f.exec.sample().pose.z));
       const double closing=std::max(0.,raw.velocity.x);
-      // Never less than the refused advance plus the realign pull, and only along n.
-      CHECK(retired.x()>=kDt*(1.-g)*(closing+std::max(0.,gap)/realign)-1e-9);
+      // Never less than the (1-g)^2 share of the advance plus the realign pull, and only along n.
+      CHECK(retired.x()>=kDt*(1.-g)*(1.-g)*(closing+std::max(0.,gap)/realign)-1e-9);
       CHECK(retired.y()==0.&&retired.z()==0.);
       if(retired.x()>0.)++retired_ticks;
       worst_gap=std::max(worst_gap,gap);
@@ -1070,8 +1070,9 @@ bool sourceRetirementFollowsTheSource() {
   std::cout<<"retirement: bound ticks "<<bound_ticks<<", retired ticks "<<retired_ticks
            <<", worst gap "<<worst_gap*1e3<<" mm, worst late gap "<<worst_late_gap*1e3<<" mm\n";
   CHECK(bound_ticks>100);CHECK(retired_ticks>bound_ticks/2);
-  // The source is held beside the executor: within a realign window of its 30 mm/s.
-  CHECK(worst_late_gap<.03*realign+.001);
+  // The source is held beside the executor: within a realign window of its 30 mm/s
+  // (the (1-g)^2 weight leaves g(1-g) x closing of transient lead at g = 0.2).
+  CHECK(worst_late_gap<.03*realign+.002);
   // Free space: the bound is gone and nothing is retired.
   int free_ticks=0;
   for(int i=0;i<40;++i) {

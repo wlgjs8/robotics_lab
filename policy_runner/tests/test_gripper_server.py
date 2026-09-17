@@ -384,3 +384,39 @@ class CommandStampTest(unittest.TestCase):
         out = parse_command(pkt)
         self.assertNotIn("host_time_ns", out)
         self.assertAlmostEqual(out["arms"]["right"], 10.0)
+
+
+class StateCurrentTest(unittest.TestCase):
+    """The state packet must carry the motor current: it is the only grip-effort signal the cell
+    has (the collection rig cannot record force), and the only way to tell a close that gripped
+    from one that closed on air."""
+
+    def test_current_is_published_when_the_backend_has_it(self) -> None:
+        cfg = GripperServerConfig(backend="sim", home_on_connect=False)
+        srv = GripperServer(cfg)
+        srv._backend.connect()
+
+        class _WithCurrent:
+            def motor_current_ma(self, arm):
+                return -712.5 if arm == "left" else None
+
+            def current_percent(self, arm):
+                return 20.0
+
+            def target_units(self, arm):
+                return 20.0
+
+        srv._backend = _WithCurrent()
+        msg = srv.build_state({"left": 20.0, "right": 20.0}, host_time_ns=1)
+        self.assertAlmostEqual(msg["left"]["current_ma"], -712.5)
+        self.assertIsNone(msg["right"]["current_ma"])
+
+    def test_current_is_null_not_zero_when_unavailable(self) -> None:
+        """A fabricated 0 would read as 'the jaw is holding nothing', which is a claim."""
+        cfg = GripperServerConfig(backend="sim", home_on_connect=False)
+        srv = GripperServer(cfg)
+        srv._backend.connect()
+        msg = srv.build_state({"left": None, "right": None}, host_time_ns=1)
+        for arm in ("left", "right"):
+            self.assertIn("current_ma", msg[arm])
+            self.assertIsNone(msg[arm]["current_ma"])
