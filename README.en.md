@@ -101,9 +101,11 @@ safety:
   q_max_deg: [360, 360, 150, 360, 360, 360]
 ```
 
-J3 is exactly `[-165 deg, +165 deg]`, matching Rainbow's RB5-850E range and the
-URDF/Pinocchio model. The retired `+/-160 deg` margin and a widened J3 must not
-be used to mask an unreachable Cartesian target.
+J3 is exactly `[-160 deg, +160 deg]`, matching the URDF/Pinocchio model. Rainbow's
+mechanical range for the RB5-850E is `+/-165`, but its controller latches a
+self-collision at `|J3| ~ 161`, so 160 is the supported bound (see
+`docs/joint_range_policy.md`). A widened J3 must not be used to mask an unreachable
+Cartesian target.
 
 ## Servo J and control-box queue
 

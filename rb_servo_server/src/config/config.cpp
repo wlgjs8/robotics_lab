@@ -1301,9 +1301,14 @@ struct KnownArmRange {
     const char* urdf_filename;
     double elbow_deg;
 };
+// The SUPPORTED elbow bound per arm, which is the catalog mechanical range only when
+// nothing else bites first. On the RB5-850E it does: the controller's own
+// self-collision detector raises op_stat_self_collision at |J3| ~ 161 (measured
+// 2026-09-16 at 161.10 and 161.55 deg, two runs, different wrist angles), so the
+// stack is braced at 160 rather than the catalog's 165. See docs/joint_range_policy.md.
 constexpr KnownArmRange kKnownArmRanges[] = {
     {"rb3_730e.urdf", 150.0},
-    {"rb5_850e.urdf", 165.0},
+    {"rb5_850e.urdf", 160.0},
 };
 
 void warnIfRbpodoSafetyRangeDiffersFromKnownUrdf(const DualArmConfig& cfg) {

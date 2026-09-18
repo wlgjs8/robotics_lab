@@ -110,7 +110,8 @@ bool testFeedbackCachedAndGoesStale() {
     json state;
     state["schema"] = "robotics_lab.gripper_state.v1";
     state["left"] = {{"percent", 55.0}, {"target_percent", 60.0}, {"moving", true}, {"ok", true},
-                     {"fault", nullptr}, {"sample_age_ms", 27.0}, {"current_ma", -612.0}};
+                     {"fault", nullptr}, {"sample_age_ms", 27.0}, {"current_ma", -612.0},
+                     {"contact_close", "holding"}, {"grip", true}};
     // right carries neither sample_age_ms nor current_ma: an older gripper_server must leave
     // both UNKNOWN (NaN -> null downstream), not report a fresh-looking 0.
     sendTo(fb_port, state.dump());
@@ -131,11 +132,17 @@ bool testFeedbackCachedAndGoesStale() {
     // Grip EFFORT: the only field that separates a grasp from a close on air once the
     // compliant tips let the jaw reach its commanded opening either way.
     RB_CHECK(left.current_ma == -612.0);
+    RB_CHECK(left.contact_close == "holding");
+    RB_CHECK(left.grip_valid && left.grip);
 
     // right never sent -> not valid
     RB_CHECK(!bridge.latest(rb_servo::ArmId::Right).valid);
     RB_CHECK(std::isnan(bridge.latest(rb_servo::ArmId::Right).sample_age_ms));
     RB_CHECK(std::isnan(bridge.latest(rb_servo::ArmId::Right).current_ma));
+    // An older gripper_server (or contact-close off) must leave the verdict UNSET, never false:
+    // "searched and found nothing" and "never searched" are different answers.
+    RB_CHECK(bridge.latest(rb_servo::ArmId::Right).contact_close.empty());
+    RB_CHECK(!bridge.latest(rb_servo::ArmId::Right).grip_valid);
 
     // after the stale timeout the cache reads invalid again
     std::this_thread::sleep_for(std::chrono::milliseconds(90));

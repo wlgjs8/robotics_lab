@@ -4,7 +4,9 @@ import io
 import logging
 import sys
 import unittest
+import unittest.mock
 
+from policy_runner import gripper as gripper_module
 from policy_runner.config import config_from_mapping
 from policy_runner.action_sources.tcp_pose_target import tcp_pose_target_stand_intent
 from policy_runner.gripper import (
@@ -681,3 +683,58 @@ class PikaFrameResyncTest(unittest.TestCase):
 class _FakeGripperWithComm:
     def __init__(self, comm) -> None:
         self.serial_comm = comm
+
+
+class EnableSettleTest(unittest.TestCase):
+    """The motor ignores a position command issued too soon after enable().
+
+    Measured 2026-09-17 with home_on_connect=False: a set_motor_angle straight after connect()
+    returns True and the jaw never moves -- 2/2 on the right arm, 0/2 on the left. The left only
+    escaped because it is enabled first and the right arm's own connect+enable (~0.5 s) settled
+    it. The tracked stack runs --no-home-on-connect, so the last-enabled arm lost the first
+    command on every start.
+    """
+
+    def _backend(self, **kw):
+        return PikaSerialGripperBackend(
+            ports={"left": "/dev/fake-left", "right": "/dev/fake-right"},
+            gripper_cls=FakePikaGripper,
+            home_on_connect=False,
+            **kw,
+        )
+
+    def test_connect_waits_for_the_last_enable_to_settle(self):
+        slept: list[float] = []
+        # clock reads: pre-import, left enable, right enable, then the settle check
+        ticks = iter([0.0, 0.1, 0.2, 0.4])
+        backend = self._backend(clock=lambda: next(ticks, 0.4))
+        with unittest.mock.patch.object(gripper_module.time, "sleep", slept.append):
+            backend.connect()
+        self.assertEqual(len(slept), 1)
+        self.assertAlmostEqual(slept[0], 0.3, places=6)   # 0.5 settle - 0.2 already elapsed
+
+    def test_no_wait_once_the_settle_has_already_elapsed(self):
+        slept: list[float] = []
+        ticks = iter([0.0, 0.1, 0.2, 9.0])
+        backend = self._backend(clock=lambda: next(ticks, 9.0))
+        with unittest.mock.patch.object(gripper_module.time, "sleep", slept.append):
+            backend.connect()
+        self.assertEqual(slept, [])
+
+    def test_settle_can_be_disabled(self):
+        slept: list[float] = []
+        backend = self._backend(enable_settle_sec=0.0)
+        with unittest.mock.patch.object(gripper_module.time, "sleep", slept.append):
+            backend.connect()
+        self.assertEqual(slept, [])
+
+    def test_homing_provides_its_own_settle(self):
+        # home_on_connect=True moves the jaw to the stop, which already covers the dead window.
+        slept: list[float] = []
+        backend = PikaSerialGripperBackend(
+            ports={"left": "/dev/fake-left"}, gripper_cls=FakePikaGripper, home_on_connect=True
+        )
+        with unittest.mock.patch.object(gripper_module.time, "sleep", slept.append):
+            backend.connect()
+        # whatever homing slept, it is NOT the settle path (which sleeps exactly once, last)
+        self.assertNotIn(0.5, slept)

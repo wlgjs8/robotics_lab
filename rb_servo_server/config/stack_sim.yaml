@@ -99,13 +99,17 @@ safety:
   # J3 (elbow) physical range on RB3-730E is +/-150 deg (catalog); the joint cannot
   # reach +/-360. Clamped here so JointTarget/InitMotion PTP (which bypass IK) and
   # shortest-path goal selection never command an unreachable J3. Mirrors the IK URDF
-  # limit (rb5_850e.urdf: elbow +/-2.879793 rad); see docs/joint_range_policy.md.
+  # limit (rb5_850e.urdf: elbow +/-2.792527 rad); see docs/joint_range_policy.md.
   # 2026-09-02: RB3-730E -> RB5-850E, whose catalog elbow range is +/-165 (Rainbow RB
   # Series catalog p7). Mirrors stack_real.yaml, and must equal the bound in both
   # generated URDFs. This profile drives the SAME control boxes in pgmode, so it tracks
   # the physical arm, not the old one.
-  q_min_deg: [-360, -360, -165, -360, -360, -360]
-  q_max_deg: [360, 360, 165, 360, 360, 360]
+  # 2026-09-16, +/-165 -> +/-160: the box's own self-collision detector
+  # (op_stat_self_collision, item 35 -> code 1005) trips at |J3| ~ 161, measured twice
+  # on the real arms (161.10 and 161.55 deg). pgmode runs the same controllers, so the
+  # same bound applies here. See stack_real.yaml and docs/joint_range_policy.md.
+  q_min_deg: [-360, -360, -160, -360, -360, -360]
+  q_max_deg: [360, 360, 160, 360, 360, 360]
   # Halved vs the sim profile for the first physical run.
   # dq_max_deg_s: [60, 60, 60, 90, 90, 120]      # was halved [30,30,30,45,45,60] for first run
   # 2026-09-02: [170,170,170,240,240,320] -> [170]*6. RB5-850 is +/-180 deg/s on all

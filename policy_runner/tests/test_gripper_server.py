@@ -11,6 +11,8 @@ from unittest import mock
 from policy_runner.gripper_server import (
     COMMAND_SCHEMA,
     STATE_SCHEMA,
+    ContactCloseConfig,
+    ContactCloseController,
     GripperServer,
     GripperServerConfig,
     SimPikaGripper,
@@ -420,3 +422,97 @@ class StateCurrentTest(unittest.TestCase):
         for arm in ("left", "right"):
             self.assertIn("current_ma", msg[arm])
             self.assertIsNone(msg[arm]["current_ma"])
+
+
+class ContactCloseTest(unittest.TestCase):
+    """Close past the commanded opening until the motor current confirms contact.
+
+    Grounded in two hardware measurements: an EMPTY jaw reaches every commanded opening down to
+    0.1-0.3 mm with the current flat at -54..-192 mA (2026-09-17), and a held 12 mm shank drew
+    -580..-720 mA (2026-09-16). The 300 mA default sits between them.
+    """
+
+    def _ctl(self, **kw):
+        cfg = ContactCloseConfig(enable=True, **kw)
+        return ContactCloseController(cfg), cfg
+
+    def _run(self, ctl, cmd, measured, current, steps, dt=0.02):
+        """Drive `steps` loop iterations; `measured` follows the drive target instantly."""
+        t = 0.0
+        out = None
+        jaw = measured
+        for _ in range(steps):
+            t += dt
+            out = ctl.apply({"left": cmd, "right": None}, {"left": jaw, "right": None},
+                            {"left": current(jaw), "right": None}, t)
+            if out["left"] is not None:
+                jaw = out["left"]
+        return out, jaw
+
+    def test_disabled_passes_commands_through_untouched(self):
+        ctl = ContactCloseController(ContactCloseConfig(enable=False))
+        out = ctl.apply({"left": 8.0, "right": 40.0}, {"left": 8.0, "right": 40.0},
+                        {"left": -5000.0, "right": None}, 1.0)
+        self.assertEqual(out, {"left": 8.0, "right": 40.0})
+        self.assertIsNone(ctl.grip("left"))
+        self.assertEqual(ctl.state("left"), "idle")
+
+    def test_above_the_band_is_not_armed(self):
+        ctl, _ = self._ctl()
+        out, _ = self._run(ctl, 25.0, 25.0, lambda j: -50.0, 10)
+        self.assertEqual(out["left"], 25.0)
+        self.assertEqual(ctl.state("left"), "idle")
+
+    def test_empty_close_reaches_min_and_reports_no_grip(self):
+        ctl, cfg = self._ctl()
+        # Empty jaw: current stays at the measured empty level all the way down.
+        out, jaw = self._run(ctl, 8.0, 8.0, lambda j: -150.0, 120)
+        self.assertEqual(ctl.state("left"), "empty")
+        self.assertIs(ctl.grip("left"), False)
+        self.assertAlmostEqual(out["left"], cfg.min_mm, places=6)
+        self.assertLessEqual(jaw, cfg.min_mm + 1e-6)
+
+    def test_contact_latches_a_grip_and_stops_closing(self):
+        ctl, cfg = self._ctl()
+        # An object at 5 mm: the current jumps once the jaw is driven below it.
+        out, jaw = self._run(ctl, 8.0, 8.0, lambda j: (-700.0 if j <= 5.0 else -150.0), 120)
+        self.assertEqual(ctl.state("left"), "holding")
+        self.assertIs(ctl.grip("left"), True)
+        self.assertGreater(out["left"], cfg.min_mm)      # stopped on the object, not at the floor
+        self.assertLess(out["left"], 8.0)
+
+    def test_a_single_acceleration_spike_does_not_latch(self):
+        # The jaw draws -640..-1419 mA while ACCELERATING (13:58 run). One sample must not count.
+        ctl, _ = self._ctl(sustain_ms=60.0)
+        seen = {"n": 0}
+
+        def spiky(_jaw):
+            seen["n"] += 1
+            return -1400.0 if seen["n"] == 3 else -150.0
+
+        out, _ = self._run(ctl, 8.0, 8.0, spiky, 8, dt=0.02)
+        self.assertEqual(ctl.state("left"), "seeking")
+        self.assertIsNone(ctl.grip("left"))
+
+    def test_first_iteration_cannot_latch_on_one_sample(self):
+        # dt is unknown on the very first apply(); a count-based gate would treat that as
+        # "one sample is enough" and latch a grip off a single spike.
+        ctl, _ = self._ctl()
+        ctl.apply({"left": 8.0, "right": None}, {"left": 8.0, "right": None},
+                  {"left": -1400.0, "right": None}, 5.0)
+        self.assertEqual(ctl.state("left"), "seeking")
+        self.assertIsNone(ctl.grip("left"))
+
+    def test_command_back_above_the_band_releases_immediately(self):
+        ctl, _ = self._ctl()
+        self._run(ctl, 8.0, 8.0, lambda j: -700.0, 20)
+        self.assertEqual(ctl.state("left"), "holding")
+        out = ctl.apply({"left": 40.0, "right": None}, {"left": 4.0, "right": None},
+                        {"left": -700.0, "right": None}, 99.0)
+        self.assertEqual(ctl.state("left"), "idle")
+        self.assertEqual(out["left"], 40.0)
+
+    def test_never_opens_the_jaw_wider_than_commanded(self):
+        ctl, _ = self._ctl()
+        out, _ = self._run(ctl, 8.0, 8.0, lambda j: -150.0, 5)
+        self.assertLessEqual(out["left"], 8.0)

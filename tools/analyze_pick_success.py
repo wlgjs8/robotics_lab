@@ -73,6 +73,14 @@ BOX_SIDE_Y_M = 0.05
 REST_Z_M = -0.2658
 # A hold shorter than this is a jaw twitch, not a grasp-and-carry.
 MIN_HOLD_S = 0.8
+# While the jaw is still travelling the motor current reports speed, not load.
+CLOSING_TRANSIENT_S = 0.8
+# Above this the vendor SDK is emitting garbage, not a reading.
+CURRENT_SANE_MA = 3000.0
+# Sustained current of a real squeeze on a 12 mm shank, measured 2026-09-16 with
+# tools/measure_grip_force.py. Nothing in a policy rollout comes near it -- see the module
+# docstring on why the finger cannot feel the bolt.
+SQUEEZE_REFERENCE_MA = 580.0
 # Fraction of the run's own commanded jaw range below which the jaw counts as closed. Per-run
 # because the absolute open/close percentages move with gripper units and bias settings.
 CLOSED_FRACTION = 0.25
@@ -128,8 +136,16 @@ def holds(steps: list[dict], arm: str) -> list[dict]:
         a, b = _xyz(steps[i], arm), _xyz(steps[j], arm)
         if t[j] - t[i] >= MIN_HOLD_S and a and b:
             zs = [p[2] for p in (_xyz(steps[k], arm) for k in range(i, j + 1)) if p]
-            cur = [steps[k]["arms"][arm].get("gripper_current_ma") for k in range(i, j + 1)]
-            cur = [abs(c) for c in cur if isinstance(c, (int, float))]
+            # settled part only: the first CLOSING_TRANSIENT_S is the jaw travelling, where the
+            # current reports speed rather than load. |I| > CURRENT_SANE_MA is the vendor SDK
+            # emitting garbage (one sample of 1.07e9 mA observed 2026-09-17).
+            settle_from = i
+            while settle_from < j and t[settle_from] - t[i] < CLOSING_TRANSIENT_S:
+                settle_from += 1
+            cur = [steps[k]["arms"][arm].get("gripper_current_ma")
+                   for k in range(settle_from, j + 1)]
+            cur = [abs(c) for c in cur
+                   if isinstance(c, (int, float)) and abs(c) <= CURRENT_SANE_MA]
             delivered = b[0] > DELIVERY_X_M
             out.append({
                 "step_index": i,
@@ -221,10 +237,13 @@ def main() -> None:
                   if r["delivered"] and r["grip_current_ma_p50"] != ""]
             mc = [r["grip_current_ma_p50"] for r in a
                   if not r["delivered"] and r["grip_current_ma_p50"] != ""]
-            print(f"   grip current mA  delivered p50 "
+            print(f"   settled grip current mA  delivered p50 "
                   f"{statistics.median(dc) if dc else float('nan'):.0f} (n={len(dc)})   "
                   f"not delivered p50 {statistics.median(mc) if mc else float('nan'):.0f} "
                   f"(n={len(mc)})")
+            squeezes = sum(c >= SQUEEZE_REFERENCE_MA for c in cur)
+            print(f"   holds with a real squeeze (>= {SQUEEZE_REFERENCE_MA:.0f} mA sustained): "
+                  f"{squeezes}/{len(cur)} -- expected ~0, the bolt rides in the finger seat")
         else:
             print("   grip current: not logged in these runs "
                   "(pre-2026-09-17 runner, or gripper server without --units)")

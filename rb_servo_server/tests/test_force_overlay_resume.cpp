@@ -828,7 +828,9 @@ bool testHoldFoldSinkIsWalledAtTheRoi() {
 }
 
 // Use the real URDF bound, not a fabricated failed-solver response: this elbow
-// starts inside +165 deg and the first chunk asks it to cross the actual bound.
+// starts inside the supported +160 deg and the first chunk asks it to cross the
+// actual bound (the bound moved 165 -> 160 on 2026-09-16 with the controller's
+// self-collision trip; see docs/joint_range_policy.md).
 // A second chunk returns toward the reachable side during the refusal debounce.
 // This covers the servo coordinator, packet cache, Pinocchio IK, downstream joint
 // safety, output SMD and the memory plant together. The plant itself has no delay.
@@ -845,8 +847,8 @@ bool testFreshChunkResumesAfterActualJointLimitRefusal(bool fresh_execution = tr
         cfg.force_control.enable = false;
         // This fixture constructs config directly, bypassing the loader's
         // fitted-arm normalization of the generic +/-360 deg defaults.
-        cfg.safety.q_min_deg[2] = -165.0;
-        cfg.safety.q_max_deg[2] = 165.0;
+        cfg.safety.q_min_deg[2] = -160.0;
+        cfg.safety.q_max_deg[2] = 160.0;
         // Keep the real URDF/catalog limit and the default strict IK failure
         // policy. No best-effort acceptance, branch-clamp or mocked IK result.
         cfg.kinematics.ik.joint_limit_track_feasible = false;
@@ -885,9 +887,9 @@ bool testFreshChunkResumesAfterActualJointLimitRefusal(bool fresh_execution = tr
                 rf.deadline_jerk_minimization = selected_follower->deadline_jerk_minimization;
             }
         }
-    }, {10.0, -20.0, 164.9, 5.0, 25.0, -15.0});
-    require(std::abs(f.cfg.safety.q_max_deg[2] - 165.0) < 1e-9,
-            "joint-limit fixture must preserve the RB5-850E catalog elbow bound");
+    }, {10.0, -20.0, 159.9, 5.0, 25.0, -15.0});
+    require(std::abs(f.cfg.safety.q_max_deg[2] - 160.0) < 1e-9,
+            "joint-limit fixture must preserve the RB5-850E supported elbow bound");
     const auto toward = [&](const JointArray& q, double elbow_delta_deg) {
         JointArray goal_q = q;
         goal_q[2] += elbow_delta_deg;

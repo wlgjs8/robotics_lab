@@ -288,6 +288,14 @@ class PikaSerialGripperBackend:
         gripper_cls: type | None = None,
         clock: Callable[[], float] = time.monotonic,
         home_on_connect: bool = True,
+        # Seconds the motor needs after enable() before it will ACT on a position command.
+        # Measured 2026-09-17: with home_on_connect=False, a set_motor_angle issued straight
+        # after connect() is accepted (returns True, the bytes go out) and silently ignored --
+        # reproduced 2/2 on the right arm, while the left moved every time. The left only worked
+        # because it is enabled FIRST and the right arm's own connect+enable (~0.5 s) served as
+        # its settle. Homing used to hide this for both arms; the tracked stack runs
+        # --no-home-on-connect, so the last-enabled arm lost its first command on every start.
+        enable_settle_sec: float = 0.5,
         home_timeout_sec: float = 3.0,
         home_settle_eps_rad: float = 0.01,
         home_poll_sec: float = 0.05,
@@ -316,6 +324,7 @@ class PikaSerialGripperBackend:
         self.supports_controller_simulation = bool(supports_controller_simulation)
         self.suppress_sdk_logs = bool(suppress_sdk_logs)
         self.home_on_connect = bool(home_on_connect)
+        self.enable_settle_sec = max(0.0, float(enable_settle_sec))
         self.home_timeout_sec = float(home_timeout_sec)
         self.home_settle_eps_rad = float(home_settle_eps_rad)
         self.home_poll_sec = float(home_poll_sec)
@@ -339,6 +348,7 @@ class PikaSerialGripperBackend:
                 if not os.path.exists(port):
                     self.close()
                     raise RuntimeError(f"pika gripper {arm} serial port not found: {port}")
+        last_enable = self._clock()
         gripper_cls = self._gripper_cls or _import_pika_gripper_class(self.sdk_path)
         if self.suppress_sdk_logs:
             suppress_pika_sdk_logging()
@@ -353,13 +363,25 @@ class PikaSerialGripperBackend:
             if not gripper.enable():
                 self.close()
                 raise RuntimeError(f"pika gripper {arm} enable failed on {port}")
+            last_enable = self._clock()
             install_pika_frame_resync(gripper)
             self._grippers[arm] = gripper
             self._targets[arm] = self._seed_target(gripper)
             self._install_sample_clock(arm, gripper)
         if self.home_on_connect and self._grippers:
-            self._home_all_concurrent()
+            self._home_all_concurrent()   # its own motion already covers the settle
+        elif self._grippers:
+            self._await_enable_settle(last_enable)
         return self
+
+    def _await_enable_settle(self, last_enable: float) -> None:
+        """Hold off the first command until every motor will actually act on it.
+
+        Only the time since the LAST enable matters: the arms are enabled in sequence, so the
+        earlier ones have already settled while the final one has not."""
+        remaining = self.enable_settle_sec - (self._clock() - last_enable)
+        if remaining > 0.0:
+            time.sleep(remaining)
 
     def _install_sample_clock(self, arm: str, gripper: Any) -> bool:
         """Stamp the arrival time of each pika telemetry frame for `arm`.

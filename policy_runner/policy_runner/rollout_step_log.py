@@ -429,6 +429,12 @@ def build_rollout_step_record(
             # actually grip, and how hard" is answerable ONLY from this column. A close that ends
             # near 0 mA closed on air.
             "gripper_current_ma": _gripper_current_ma(payload, arm),
+            # The contact-close controller's OWN verdict, not a reconstruction. Re-deriving it
+            # from jaw position + current is wrong in both directions: the jaw passes through
+            # 4-20 mm on every close (over-counts), and the hold current drops the moment
+            # contact-close latches (under-counts). null = still seeking, or feature off.
+            "gripper_contact_close": _gripper_str_field(payload, arm, "contact_close"),
+            "gripper_grip": _gripper_bool_field(payload, arm, "grip"),
             "gripper_feedback_age_ms": _gripper_feedback_age_ms(payload, arm),
             # SENSOR age: pika serial sample -> gripper_server publish, stamped in
             # the gripper server from the SDK's own reader-thread callback. The jaw
@@ -644,6 +650,30 @@ def _gripper_current_ma(payload: Mapping[str, Any], arm: str) -> float | None:
         if value is not None:
             return value
     return _finite_float(arm_payload.get("current_ma"))
+
+
+def _gripper_container(payload: Mapping[str, Any], arm: str) -> Mapping[str, Any] | None:
+    arm_payload = _arm_mapping(payload, arm)
+    for container_name in ("gripper", "gripper_state"):
+        container = arm_payload.get(container_name)
+        if not isinstance(container, Mapping):
+            continue
+        if container.get("valid") is False or container.get("stale") is True:
+            continue
+        return container
+    return None
+
+
+def _gripper_str_field(payload: Mapping[str, Any], arm: str, key: str) -> str | None:
+    container = _gripper_container(payload, arm)
+    value = None if container is None else container.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _gripper_bool_field(payload: Mapping[str, Any], arm: str, key: str) -> bool | None:
+    container = _gripper_container(payload, arm)
+    value = None if container is None else container.get(key)
+    return value if isinstance(value, bool) else None
 
 
 def _measured_gripper_pct(payload: Mapping[str, Any], arm: str) -> float | None:

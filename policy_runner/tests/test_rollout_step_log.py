@@ -153,6 +153,41 @@ class RolloutStepLoggerTest(unittest.TestCase):
         self.assertAlmostEqual(record["arms"]["left"]["gripper_current_ma"], -642.0)
         self.assertIsNone(record["arms"]["right"]["gripper_current_ma"])
 
+    def test_contact_close_verdict_is_recorded_verbatim(self) -> None:
+        """The controller's OWN held/empty answer, not a reconstruction.
+
+        Re-deriving it from the log is wrong in both directions: the jaw passes through the
+        4-20 mm band on every close (over-counts grips), and the hold current drops the moment
+        contact-close latches (under-counts). Both mistakes were made on real data 2026-09-17.
+        """
+        payload = _state_payload()
+        payload["left"]["gripper"]["contact_close"] = "holding"
+        payload["left"]["gripper"]["grip"] = True
+        payload["right"]["gripper"]["contact_close"] = "seeking"
+        record = build_rollout_step_record(
+            state_payload=payload, command_intent=None, conditioned_targets=None,
+            raw_delta_ee_local=None, gripper_cmd_pct=None, chunk_id=1,
+            chunk_step_index=0, stall=False, hold=False, inference_latency_ms=None,
+            t_mono=1.0, t_wall=2.0,
+        )
+        self.assertEqual(record["arms"]["left"]["gripper_contact_close"], "holding")
+        self.assertIs(record["arms"]["left"]["gripper_grip"], True)
+        # Still seeking -> no verdict yet. NOT False: "searched and found nothing" and
+        # "has not finished searching" are different answers.
+        self.assertEqual(record["arms"]["right"]["gripper_contact_close"], "seeking")
+        self.assertIsNone(record["arms"]["right"]["gripper_grip"])
+
+    def test_contact_close_off_leaves_both_fields_null(self) -> None:
+        record = build_rollout_step_record(
+            state_payload=_state_payload(), command_intent=None, conditioned_targets=None,
+            raw_delta_ee_local=None, gripper_cmd_pct=None, chunk_id=1,
+            chunk_step_index=0, stall=False, hold=False, inference_latency_ms=None,
+            t_mono=1.0, t_wall=2.0,
+        )
+        for arm in ("left", "right"):
+            self.assertIsNone(record["arms"][arm]["gripper_contact_close"])
+            self.assertIsNone(record["arms"][arm]["gripper_grip"])
+
     def test_gripper_feedback_age_is_recorded_and_never_fabricated(self) -> None:
         payload = _state_payload()
         payload["left"]["gripper"]["feedback_age_ms"] = 23.5

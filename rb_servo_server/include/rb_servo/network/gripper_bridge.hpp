@@ -52,6 +52,14 @@ struct GripperArmFeedback {
     // cannot separate "closed on the bolt" from "closed on air": both settle at the commanded
     // opening. NaN when the payload carried no usable value -- never a fabricated 0.
     double current_ma = std::numeric_limits<double>::quiet_NaN();
+    // gripper_server's contact-close verdict: "idle" | "seeking" | "holding" | "empty", and the
+    // held/empty answer itself. Without these the rollout log has to RE-DERIVE the verdict from
+    // jaw position + current, which is easy to get wrong in both directions (counting the 4-20 mm
+    // the jaw passes THROUGH while closing as a grip, or judging on the hold current, which drops
+    // as soon as contact-close latches). Empty string / unset grip = the feature is off.
+    std::string contact_close;
+    bool grip_valid = false;
+    bool grip = false;
 };
 
 // Bridge to the out-of-process gripper_server (docs/plans/gripper_server_design.md).

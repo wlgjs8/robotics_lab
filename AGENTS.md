@@ -49,12 +49,18 @@ hardware-free validation; the retired software-simulator backend and raw script
 TCP comparison backends are no longer part of the active code, config, gate, or
 runbook surface.
 
-The supported J3/elbow range is the fitted arm's catalog range: exactly
-`[-165 deg, +165 deg]` on the RB5-850E in service since 2026-09-02 (`[-150, +150]`
-on the RB3-730E it replaced), matching the Rainbow documentation and the Pinocchio
-URDF. Tracked safety limits, joint-limit barriers, IK, examples, and runbooks must
-use that same range. Do not restore the retired `+/-160 deg` margin or widen J3 to
-hide an unreachable Cartesian target.
+The supported J3/elbow range is whichever of the fitted arm's two elbow limits binds
+first: exactly `[-160 deg, +160 deg]` on the RB5-850E since 2026-09-16 (`[-150, +150]`
+on the RB3-730E it replaced). The Rainbow catalog's mechanical range for this arm is
+`+/-165`, but the CONTROLLER's own self-collision detector latches the run at
+`|J3| ~ 161` (measured twice, `161.10` and `161.55 deg`, wrist angles unrelated —
+`op_stat_self_collision` item 35 -> code 1005, no joint-limit code), so 165 is
+reachable and unusable. Tracked safety limits, joint-limit barriers, both generated
+URDFs, `kKnownArmRanges`, examples, and runbooks must all carry the same `160`.
+Do not widen J3 to hide an unreachable Cartesian target, and do not narrow the safety
+clamp alone — that is the mirror of the retired RB3 `+/-160` site margin (which was
+WIDER than its URDF) and makes IK solve elbow angles the clamp then cuts.
+See `docs/joint_range_policy.md`.
 
 ## Target Topology
 

@@ -1364,6 +1364,11 @@ nlohmann::json gripperFeedbackJson(const GripperArmFeedback& fb) {
         // position settles at the command whether or not it holds anything, so this is the
         // only field that separates a grasp from a close on air. null when unstamped.
         {"current_ma", finiteDoubleJson(fb.current_ma)},
+        // contact-close verdict, straight from the controller that made it. null grip = still
+        // seeking, or the feature is off -- never a fabricated false.
+        {"contact_close", fb.contact_close.empty() ? nlohmann::json(nullptr)
+                                                   : nlohmann::json(fb.contact_close)},
+        {"grip", fb.grip_valid ? nlohmann::json(fb.grip) : nlohmann::json(nullptr)},
     };
 }
 

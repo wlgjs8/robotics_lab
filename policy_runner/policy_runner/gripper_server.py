@@ -222,6 +222,150 @@ class LatencyProbe:
                 time.sleep(self._period)
 
 
+class ContactCloseController:
+    """Per-arm state machine for ContactCloseConfig. Pure logic: the caller supplies the
+    measured opening and motor current, so this is testable without hardware.
+
+    States per arm:
+        idle    - command above the arm band; the commanded target passes through untouched
+        seeking - creeping closed past the command, watching the current
+        holding - contact confirmed and latched (grip=True)
+        empty   - reached min_mm with no contact (grip=False), held there
+
+    Never opens the jaw: the returned target is always <= the commanded one. Releasing is the
+    policy's job -- when its command rises above the band this resets and stops interfering.
+    """
+
+    STATES = ("idle", "seeking", "holding", "empty")
+
+    def __init__(self, config: ContactCloseConfig) -> None:
+        self.config = config
+        self._state: dict[str, str] = {arm: "idle" for arm in ARMS}
+        self._seek: dict[str, float] = {arm: 0.0 for arm in ARMS}
+        self._latched: dict[str, float | None] = {arm: None for arm in ARMS}
+        # SECONDS of sustained over-threshold current, not a sample count: the loop period is
+        # not guaranteed (and is 0 on the first call, which a count-based gate would treat as
+        # "one sample is enough" and latch on a single acceleration spike).
+        self._hold_sec: dict[str, float] = {arm: 0.0 for arm in ARMS}
+        self._last: float | None = None
+
+    def reset(self, arm: str) -> None:
+        self._state[arm] = "idle"
+        self._latched[arm] = None
+        self._hold_sec[arm] = 0.0
+
+    def state(self, arm: str) -> str:
+        return self._state[arm]
+
+    def grip(self, arm: str) -> bool | None:
+        """True/False once the search has concluded; None while idle or still seeking."""
+        st = self._state[arm]
+        if st == "holding":
+            return True
+        if st == "empty":
+            return False
+        return None
+
+    def seek_target(self, arm: str) -> float | None:
+        return None if self._state[arm] == "idle" else self._seek[arm]
+
+    def apply(
+        self,
+        targets: Mapping[str, float | None],
+        measured: Mapping[str, float | None],
+        current_ma: Mapping[str, float | None],
+        now: float,
+    ) -> dict[str, float | None]:
+        cfg = self.config
+        dt = 0.0 if self._last is None else max(0.0, now - self._last)
+        self._last = now
+        if not cfg.enable:
+            return dict(targets)
+        out: dict[str, float | None] = {}
+        for arm in ARMS:
+            cmd = targets.get(arm)
+            out[arm] = cmd
+            if cmd is None:
+                self.reset(arm)
+                continue
+            if self._state[arm] == "idle":
+                if float(cmd) > cfg.arm_below_mm:
+                    continue
+                self._state[arm] = "seeking"
+                self._seek[arm] = float(cmd)
+                self._hold_sec[arm] = 0.0
+            elif float(cmd) > cfg.arm_below_mm + cfg.release_hysteresis_mm:
+                # The policy asked for the jaw back open -> hand it straight back.
+                self.reset(arm)
+                continue
+            if self._state[arm] == "seeking":
+                amps = current_ma.get(arm)
+                over = amps is not None and abs(float(amps)) >= cfg.current_ma
+                self._hold_sec[arm] = self._hold_sec[arm] + dt if over else 0.0
+                if over and self._hold_sec[arm] >= cfg.sustain_ms / 1000.0:
+                    here = measured.get(arm)
+                    base = float(here) if here is not None else self._seek[arm]
+                    self._latched[arm] = max(cfg.min_mm, base - cfg.squeeze_mm)
+                    self._state[arm] = "holding"
+                else:
+                    self._seek[arm] = max(cfg.min_mm, self._seek[arm] - cfg.creep_mm_s * dt)
+                    here = measured.get(arm)
+                    if self._seek[arm] <= cfg.min_mm and here is not None and (
+                        float(here) <= cfg.min_mm + 1.0
+                    ):
+                        self._state[arm] = "empty"
+                        self._latched[arm] = cfg.min_mm
+            target = (
+                self._latched[arm] if self._state[arm] in ("holding", "empty") else self._seek[arm]
+            )
+            if target is not None:
+                # Only ever CLOSER than what the policy asked for.
+                out[arm] = min(float(cmd), float(target))
+        return out
+
+
+@dataclass
+class ContactCloseConfig:
+    """Close past the commanded opening until the MOTOR CURRENT says something is there.
+
+    Why it can work at all, measured empty on this cell 2026-09-17: the jaw reaches every
+    commanded opening down to 0.1-0.3 mm with the current flat at -54..-192 mA the whole way --
+    the TPU tips never meet before 0 mm. A held 12 mm shank drew -580..-720 mA (2026-09-16). So
+    below the ~7-9 mm the policy commands there are ~8 mm of unused travel and a clean 3x gap
+    between "empty" and "holding" to threshold on.
+
+    What it does NOT do: it cannot reach a bolt the tips are ABOVE. In the 13:58 run every close
+    was on air with the arm 20 mm (right) short of the table; seeking to 0 mm would have found
+    nothing. This buys a firm grip when the object IS between the tips, and -- either way -- a
+    definite held/empty verdict on every attempt, which the position alone cannot give once the
+    tips are compliant.
+
+    Off by default: with enable=false the server behaves exactly as before.
+    """
+
+    enable: bool = False
+    # Commanded opening (dataset units, mm under sdk_mm) below which this arms. The policy's
+    # committed-close band measured 7.1-8.6 mm, so 10 mm arms on a real grasp intent and not on
+    # the 25-35 mm the chunk passes through on the way down.
+    arm_below_mm: float = 10.0
+    # Released this far ABOVE arm_below_mm, so a command hovering on the edge cannot chatter.
+    release_hysteresis_mm: float = 3.0
+    # Sits between the measured empty ceiling (192 mA) and a held 12 mm shank (580-720 mA).
+    current_ma: float = 300.0
+    # The current spikes to -640..-1419 mA while the jaw ACCELERATES (measured in the 13:58 run),
+    # so a single-sample threshold false-triggers on every close. Contact must persist.
+    sustain_ms: float = 60.0
+    # How fast the setpoint creeps closed past the command. Slow enough that the creep itself
+    # does not produce an acceleration transient worth filtering.
+    creep_mm_s: float = 25.0
+    # Floor of the search. 0.0 gives the definite verdict (nothing can hide below it); raise it
+    # to ~5 mm to keep the jaw inside the checkpoint's training range (q01 5.9-7.2 mm) at the
+    # cost of missing anything thinner.
+    min_mm: float = 0.0
+    # Extra bite once contact is confirmed.
+    squeeze_mm: float = 0.5
+
+
 @dataclass
 class GripperServerConfig:
     command_bind: tuple[str, int] = ("0.0.0.0", 50410)
@@ -251,6 +395,7 @@ class GripperServerConfig:
     on_stale: str = "hold"  # hold | open | close
     debug_stats: bool = False
     debug_stats_period_sec: float = 1.0
+    contact_close: ContactCloseConfig = field(default_factory=ContactCloseConfig)
 
 
 @dataclass
@@ -323,6 +468,8 @@ class GripperServer:
         self._state_sock: socket.socket | None = None
         self._running = False
         self.stats = GripperServerStats()
+        self._contact = ContactCloseController(config.contact_close)
+        self._contact_last_logged: dict[str, str] = {arm: "idle" for arm in ARMS}
         self._probe = (
             LatencyProbe(self._backend, clock=clock)
             if config.latency_probe else None
@@ -489,8 +636,40 @@ class GripperServer:
                 # in the cell (the collection rig has no force sensor at all), and the only way to
                 # tell "closed on the object" from "closed on air" after the fact.
                 "current_ma": self._motor_current_ma(arm),
+                # Contact-close verdict. null/"idle" whenever the feature is off, so a consumer
+                # cannot mistake "not enabled" for "searched and found nothing".
+                "contact_close": self._contact.state(arm),
+                "grip": self._contact.grip(arm),
             }
         return msg
+
+    def _log_contact_verdicts(self) -> None:
+        """One line per contact-close conclusion. This is the operator's only live signal that a
+        grasp actually took hold: the jaw POSITION settles at the commanded opening either way."""
+        if not self.config.contact_close.enable:
+            return
+        for arm in ARMS:
+            state = self._contact.state(arm)
+            if state == self._contact_last_logged.get(arm):
+                continue
+            self._contact_last_logged[arm] = state
+            if state in ("holding", "empty"):
+                actual = self._safe_percent(arm)
+                amps = self._motor_current_ma(arm)
+                print(
+                    f"[contact-close] {arm} {'GRIP' if state == 'holding' else 'EMPTY'} "
+                    f"jaw={'-' if actual is None else f'{actual:.2f}'}mm "
+                    f"current={'-' if amps is None else f'{amps:.0f}'}mA",
+                    flush=True,
+                )
+
+    def _safe_percent(self, arm: str) -> float | None:
+        """Live opening in dataset units, or None. Never raises into the control loop."""
+        try:
+            value = self._backend.current_percent(arm)
+        except Exception:  # noqa: BLE001
+            return None
+        return None if value is None else float(value)
 
     def _motor_current_ma(self, arm: str) -> float | None:
         reader = getattr(self._backend, "motor_current_ma", None)
@@ -533,7 +712,17 @@ class GripperServer:
         now = self._clock()
         self._drain_commands(now)
         targets = self.effective_targets(now)
-        for arm, pct in targets.items():
+        # Contact-close (off by default) may drive the jaw CLOSER than the policy asked, to find
+        # the object with the motor current. `targets` keeps the policy's numbers for the state
+        # block's `target_percent`; `drive` is what actually goes to the motor.
+        drive = self._contact.apply(
+            targets,
+            {arm: self._safe_percent(arm) for arm in ARMS},
+            {arm: self._motor_current_ma(arm) for arm in ARMS},
+            now,
+        )
+        self._log_contact_verdicts()
+        for arm, pct in drive.items():
             if pct is None:
                 continue
             try:
@@ -681,6 +870,15 @@ def _build_config_from_args(
         debug_stats_period_sec=args.debug_stats_period,
         units=args.units,
         latency_probe=bool(getattr(args, "latency_probe", False)),
+        contact_close=ContactCloseConfig(
+            enable=bool(getattr(args, "contact_close", False)),
+            arm_below_mm=float(getattr(args, "contact_close_arm_below_mm", 10.0)),
+            current_ma=float(getattr(args, "contact_close_current_ma", 300.0)),
+            sustain_ms=float(getattr(args, "contact_close_sustain_ms", 60.0)),
+            creep_mm_s=float(getattr(args, "contact_close_creep_mm_s", 25.0)),
+            min_mm=float(getattr(args, "contact_close_min_mm", 0.0)),
+            squeeze_mm=float(getattr(args, "contact_close_squeeze_mm", 0.5)),
+        ),
     )
 
 
@@ -835,6 +1033,18 @@ def main(argv: list[str] | None = None) -> int:
                    help="decompose command->jaw latency into queue (loop + max_hz rate limit) "
                         "and motor (serial + actuator) at 1 kHz; prints one line per large move")
     p.add_argument("--debug-stats-period", type=float, default=1.0)
+    p.add_argument("--contact-close", action="store_true",
+                   help="below --contact-close-arm-below-mm, keep closing past the commanded "
+                        "opening until the motor current confirms contact (default OFF)")
+    p.add_argument("--contact-close-arm-below-mm", type=float, default=10.0)
+    p.add_argument("--contact-close-current-ma", type=float, default=300.0,
+                   help="empty jaw measured <=192 mA anywhere; a held 12 mm shank -580..-720 mA")
+    p.add_argument("--contact-close-sustain-ms", type=float, default=60.0)
+    p.add_argument("--contact-close-creep-mm-s", type=float, default=25.0)
+    p.add_argument("--contact-close-min-mm", type=float, default=0.0,
+                   help="floor of the search; raise to ~5 to stay inside the checkpoint's "
+                        "training range at the cost of missing thin objects")
+    p.add_argument("--contact-close-squeeze-mm", type=float, default=0.5)
     p.add_argument("--send", default=None, help="one-shot send, e.g. 'left=50,right=80'")
     p.add_argument("--monitor", action="store_true", help="print published gripper state")
     args = p.parse_args(argv)

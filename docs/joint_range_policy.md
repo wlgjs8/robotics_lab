@@ -25,26 +25,68 @@ scope is represented as explicit per-joint raw limits:
 
 ```yaml
 safety:
-  q_min_deg: [-360, -360, -165, -360, -360, -360]
-  q_max_deg: [360, 360, 165, 360, 360, 360]
+  q_min_deg: [-360, -360, -160, -360, -360, -360]
+  q_max_deg: [360, 360, 160, 360, 360, 360]
 ```
 
-J3 (elbow) is **not** `+/-360`: it is bounded by the arm's catalog elbow range, and
-the tracked stack configs clamp to exactly that. The IK URDF model carries the same
-bound, so the raw safety clamp and the kinematic model agree and there is no band
-where one permits what the other refuses. The other joints stay at the broad
-`+/-360` raw controller range.
+J3 (elbow) is **not** `+/-360`: it is bounded by whichever of the arm's two elbow
+limits binds first, and the tracked stack configs clamp to exactly that. The IK URDF
+model carries the same bound, so the raw safety clamp and the kinematic model agree
+and there is no band where one permits what the other refuses. The other joints stay
+at the broad `+/-360` raw controller range.
 
 **The bound is per-robot. It is a property of the arm, not a tuning knob:**
 
-| arm | J3 catalog range | in service |
-| --- | --- | --- |
-| RB5-850E | `+/-165 deg` (`+/-2.879793 rad`) | since 2026-09-02 |
-| RB3-730E | `+/-150 deg` (`+/-2.618 rad`) | until 2026-09-02 |
+| arm | J3 catalog (mechanical) | supported bound | in service |
+| --- | --- | --- | --- |
+| RB5-850E | `+/-165 deg` | `+/-160 deg` (`+/-2.792527 rad`) — controller self-collision | since 2026-09-02 |
+| RB3-730E | `+/-150 deg` | `+/-150 deg` (`+/-2.618 rad`) — mechanical | until 2026-09-02 |
 
-Source: Rainbow RB Series catalog, p6 (RB3-730) and p7 (RB5-850). `config.cpp`
-carries the same table in `kKnownArmRanges` and warns at startup if
-`kinematics.urdf` is an arm it does not know, rather than skipping the check.
+Source for the mechanical column: Rainbow RB Series catalog, p6 (RB3-730) and p7
+(RB5-850), which lists `J3 : +/- 165 deg` for every RB5/RB10/RB16 and `+/-150` for
+RB3-730/RB20-1900. `config.cpp` carries the **supported** bound in `kKnownArmRanges`
+and warns at startup if `kinematics.urdf` is an arm it does not know, rather than
+skipping the check.
+
+### Why the RB5-850E supported bound is 160, not the catalog 165
+
+The mechanics allow 165. The **controller does not**: its own self-collision detector
+raises `op_stat_self_collision` (data-structure item 35, lower 2 bits; our backend maps
+it to code 1005 `rbpodo_self_collision`) while the elbow is still inside the catalog
+range, and that latches the run.
+
+Measured 2026-09-16 on the left arm, two separate policy runs:
+
+| log | time | J3 at trip | J4 / J5 / J6 | our mesh clearance, link2 vs link4 |
+| --- | --- | --- | --- | --- |
+| `servo_log_20260916_171039.csv` | 576.32 s | `161.10 deg` | `-37.3 / -82.2 / 32.4` | 13.6 mm |
+| `servo_log_20260916_172135.csv` | 122.65 s | `161.55 deg` | `-28.3 / -99.4 / 47.6` | 11.8 mm |
+
+The two poses differ by 9-17 deg at every wrist joint but trip at the same J3, so the
+judgement is upper arm (`link2`) against forearm (`link4`) — a function of the elbow
+angle alone — closing at roughly 3.6 mm per degree. No joint-limit code appeared
+(`M109` EMS "Joint angle limit over", `A20`-`A31` per-joint boundary): this is the
+collision detector, not the range check, which is why the catalog value is both correct
+and unreachable in practice. The gripper was 250-290 mm from anything, so the
+Tool/TCP "tool area" self-collision zone is not involved either.
+
+`160` leaves ~1.1 deg to the measured trip, and `joint_limit_barrier` brakes into it
+from `148` (`d_slow_deg` 12). Cost, measured on the same six runs and excluding the
+post-fault hold: `|J3| > 160` for 0.11 % and 1.07 % of ticks in the two runs that
+reached it, `> 155` for 1.2 % and 3.6 %, and the other four runs never passed 148.
+
+**This is not the retired `+/-160` site margin.** That one (RB3, mid-2026) was WIDER
+than its `+/-150` URDF and created the pinning band described below. This one is
+NARROWER than the catalog and is applied to *every* layer at once — both generated
+URDFs, `safety.q_min_deg`/`q_max_deg`, `joint_limit_barrier`, `kKnownArmRanges` — so
+no layer permits what another refuses. A safety clamp narrowed *alone* would be the
+mirror trap: IK would keep solving elbow angles past 160 that the clamp then cuts, so
+the dispatched joints would stop matching the planned ones and the preview executor's
+dispatch acceptance would fault.
+
+If a 1005 is ever seen at `|J3| < 160`, the fix is not to narrow further first: raise
+`safety.self_collision.mesh.intra_arm.d_hard_m` (5 mm today, our monitor read 12-14 mm
+at both trips) so our own barrier stops the fold before the box judges it.
 
 **Why the clamp and the URDF must agree, whichever arm is fitted.** `JointTarget` /
 `InitMotion` PTP bypass IK and pass only this clamp, so any band where the clamp is
@@ -118,17 +160,19 @@ leave the Pika gripper cable wound.
 ## Kinematics Alignment
 
 The `rb5_850e.urdf` model has limits of `+/-360 deg` (`+/-6.2832 rad`) for J1, J2,
-J4, J5, J6 and `+/-165 deg` (`+/-2.879793 rad`) for `elbow_joint` (J3). The J3 value
-is the true RB5-850E elbow physical range (catalog: the elbow cannot reach
-`+/-360`), so the IK model limit, the raw safety limit (`q_min_deg`/`q_max_deg[2]`
-above), and the hardware agree. The retired `rb3_730e.urdf` carries `+/-150 deg`
+J4, J5, J6 and `+/-160 deg` (`+/-2.792527 rad`) for `elbow_joint` (J3). The J3 value
+is the RB5-850E's supported elbow range (the mechanical catalog range is `+/-165`,
+but the controller's self-collision detector trips at `~161` — see above), so the IK
+model limit, the raw safety limit (`q_min_deg`/`q_max_deg[2]` above), the barrier and
+the hardware agree. The retired `rb3_730e.urdf` carries `+/-150 deg`
 (`+/-2.618 rad`) for the same joint and remains correct for that arm.
 
 Both RB5 URDFs — the single-arm IK model and the unified collision model — are
 generated by `rb_servo_server/tools/make_rb5_850e_urdfs.py`, which sets the bound
 from one constant. Upstream's `dual_rb5_850e_ver1.urdf` (the stand revision this cell
-has, since 2026-09-06) ships `+/-179.9 deg`, which is NOT the catalog value; consuming
-it unchanged would recreate exactly the trap described above. `ver2` ships the same
+has, since 2026-09-06) ships `+/-179.9 deg`, which is neither the catalog nor the
+supported value; consuming it unchanged would recreate exactly the trap described
+above. `ver2` ships the same
 `+/-179.9`, so the elbow correction is independent of which stand is used.
 
 **History (do not repeat):** J3 was once widened to `+/-360` in the URDF to stop

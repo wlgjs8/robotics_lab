@@ -807,7 +807,9 @@ Responsiveness, smoothness, and accuracy are still primarily owned by the
   arriving at full commanded speed and pinning. Retreating is never limited. The
   joint-space twin of the floor / ROI / self-collision dampers. `q_min_deg` /
   `q_max_deg` default to `safety.q_min_deg` / `q_max_deg` and may only TIGHTEN them;
-  brace against the IK model limit. On the RB5-850E that is J3 = ±165 (RB3-730E was ±150), which
+  brace against the IK model limit. On the RB5-850E that is J3 = ±160 since 2026-09-16
+  (the catalog mechanical range is ±165, but the controller's self-collision detector
+  trips at |J3| ~ 161; RB3-730E was ±150), which
   `safety.q_min_deg`/`q_max_deg` now also carries (the wider site margin was retired
   2026-08-26 — see `docs/joint_range_policy.md`); keep the block explicit rather than
   inheriting, so a future widening of the safety clamp cannot silently move the

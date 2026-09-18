@@ -99,8 +99,9 @@ hardware-free validation surface; the old software-simulator backend and
 unsupported raw script TCP comparison paths are removed and must not be
 presented as runnable backends.
 
-The supported J3/elbow range is the fitted arm's catalog range: `[-165 deg, +165 deg]`
-on the RB5-850E in service, `[-150, +150]` on the retired RB3-730E. See
+The supported J3/elbow range is `[-160 deg, +160 deg]` on the RB5-850E in service
+(the catalog's mechanical `+/-165` is unusable: the controller's self-collision
+detector trips at `|J3| ~ 161`), `[-150, +150]` on the retired RB3-730E. See
 `docs/joint_range_policy.md`.
 Tracked safety limits, the joint-limit barrier, URDF/Pinocchio IK, examples,
 and runbooks must agree with the Rainbow range. The retired `+/-160 deg`

@@ -46,13 +46,19 @@ WHAT IT CHANGES, AND WHY
    and RB5 would have shipped 10 such geoms (5 links x 2 arms). We swap in
    precomputed hulls (link2/link3 keep upstream's CoACD sets).
 
-2. Elbow bound +/-165 deg, not upstream's +/-179.9 (ver1 and ver2 both ship
-   +/-3.14 rad). The catalog value for RB5-850
-   is +/-165 (Rainbow RB Series catalog p7). Shipping a wider URDF bound recreates
-   exactly the trap docs/joint_range_policy.md records for RB3: JointTarget and
-   InitMotion bypass IK and clear only the safety clamp, so they can park the elbow
-   in the band the URDF allows but the controller refuses, and every subsequent
-   Cartesian tick is then rejected. safety.q_min_deg/q_max_deg must agree.
+2. Elbow bound +/-160 deg, not upstream's +/-179.9 (ver1 and ver2 both ship
+   +/-3.14 rad) and not the catalog's +/-165 either. The MECHANICAL range is
+   +/-165 (Rainbow RB Series catalog p7), but the controller's own self-collision
+   detector trips first: measured 2026-09-16, the box raised op_stat_self_collision
+   (item 35 -> our code 1005) at left J3 = 161.10 deg and 161.55 deg in two separate
+   runs, at unrelated wrist angles, with our mesh monitor reading 13.6 / 11.8 mm
+   between link2 and link4. The elbow therefore cannot be USED past ~161 regardless
+   of what it can reach, so +/-160 is the supported bound and every layer carries it.
+   Shipping a wider URDF bound recreates exactly the trap docs/joint_range_policy.md
+   records for RB3: JointTarget and InitMotion bypass IK and clear only the safety
+   clamp, so they can park the elbow in the band the URDF allows but the controller
+   refuses, and every subsequent Cartesian tick is then rejected.
+   safety.q_min_deg/q_max_deg must agree.
 
 3. A stand_collision link carrying CoACD hulls of the real stand, REPLACING the raw
    stand mesh ver1 ships as its only <collision>. That mesh is 38 k non-convex
@@ -93,8 +99,10 @@ UPSTREAM_SINGLE = (REPO.parent / "mo_robot_descriptions/mo_robot_descriptions/ro
 OUT_SINGLE = REPO / "rb_servo_server/descriptions/urdf/rb5_850e.urdf"
 OUT_DISPLAY = REPO / "rb_servo_server/descriptions/urdf/rb5_850e_pika_articulated.urdf"
 
-# Rainbow RB Series catalog p7: RB5-850 J3 working range +/-165 deg.
-ELBOW_LIMIT_DEG = 165.0
+# Rainbow RB Series catalog p7 gives the RB5-850 J3 MECHANICAL range as +/-165 deg.
+# The usable bound is smaller: the controller's self-collision detector fires at
+# |J3| ~ 161 (see note 2 above), so the whole stack is braced at +/-160.
+ELBOW_LIMIT_DEG = 160.0
 
 # Tool chain below attachment_site, mirroring rb3_730e.urdf.
 #
