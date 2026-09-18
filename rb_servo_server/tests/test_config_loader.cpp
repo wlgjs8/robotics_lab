@@ -386,6 +386,15 @@ bool testRepositoryConfigsParse() {
             stack_real.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad >
             stack_real.kinematics.ik.orientation_tolerance_rad);
         const auto& real_mesh = stack_real.safety.self_collision.mesh;
+        // The gripper base is checked as THREE convex pieces, asserted on the TRACKED
+        // file because collapsing back to one hull is invisible at runtime and costs
+        // p50 5.4 / max 10.0 mm of real clearance at the gripper<->gripper holds
+        // (2026-09-18; docs/reference/pika_tool_geometry.md). Order is
+        // flange -> housing -> guide; the monitor names them _0/_1/_2 in that order.
+        RB_CHECK(real_mesh.pika_gripper_base_meshes.size() == 3);
+        RB_CHECK(real_mesh.pika_gripper_base_meshes[0].find("_flange.STL") != std::string::npos);
+        RB_CHECK(real_mesh.pika_gripper_base_meshes[1].find("_housing.STL") != std::string::npos);
+        RB_CHECK(real_mesh.pika_gripper_base_meshes[2].find("_guide.STL") != std::string::npos);
         RB_CHECK(near(real_mesh.intra_arm.d_hard_m, 0.005));
         RB_CHECK(near(real_mesh.intra_arm.d_slow_m, 0.015));
         RB_CHECK(near(real_mesh.intra_arm.a_brake_m_s2, 3.0));
@@ -1459,6 +1468,58 @@ bool testSelfCollisionConfig() {
         RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs[1].pattern_a == "*right*link0*");
         RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs[1].pattern_b == "*right*link1*");
         RB_CHECK(cfg.safety.self_collision.mesh.debug_pair_curation);
+    }
+
+    // The gripper base shell is a SEQUENCE of convex pieces, and the singular key it
+    // replaced on 2026-09-18 fails closed rather than quietly keeping the one fat hull
+    // (which over-claims p50 5.4 mm where the two grippers meet).
+    {
+        const std::string path = writeTempConfig(
+            "gripper-base-meshes-sequence",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      pika_gripper_base_meshes:\n"
+                "        - \"a_flange.STL\"\n"
+                "        - \"b_housing.STL\"\n"
+                "        - \"c_guide.STL\"\n"));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        const auto& meshes = cfg.safety.self_collision.mesh.pika_gripper_base_meshes;
+        RB_CHECK(meshes.size() == 3);
+        RB_CHECK(meshes[0].find("a_flange.STL") != std::string::npos);
+        RB_CHECK(meshes[2].find("c_guide.STL") != std::string::npos);
+    }
+    {
+        const std::string path = writeTempConfig(
+            "gripper-base-mesh-singular-refused",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      pika_gripper_base_mesh: \"one_fat_hull.STL\"\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    {
+        const std::string path = writeTempConfig(
+            "gripper-base-meshes-empty",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      pika_gripper_base_meshes: []\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
     }
 
     // external_boxes.margin_m accepts legacy scalar form and broadcasts to all axes.

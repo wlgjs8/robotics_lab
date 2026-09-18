@@ -875,11 +875,15 @@ struct CollisionMonitor::Impl {
         }
         non_convex_mesh_count_ = non_convex_kept_bvh.size();
         // Attach the Pika gripper to each arm's attachment_site frame. Two modes:
-        //  (1) ARTICULATED (base + both finger meshes set): a static base hull plus two
-        //      movable finger hulls placed at identity in the attachment_site frame
-        //      (mirrors rb3_730e_pika_articulated.urdf — no +90° Z). The finger hulls
-        //      are repositioned along local +X by setGripperOpenPercent so the checked
-        //      jaw tracks the live gripper. Default placement = OPEN (finger_pos 0).
+        //  (1) ARTICULATED (base + both finger meshes set): a static base shell of one or
+        //      more convex pieces plus two movable finger hulls placed at identity in the
+        //      attachment_site frame (mirrors rb3_730e_pika_articulated.urdf — no +90° Z).
+        //      The finger hulls are repositioned along local +X by setGripperOpenPercent
+        //      so the checked jaw tracks the live gripper. Default = OPEN (finger_pos 0).
+        //      The base is a LIST because one hull over the whole base spans the 215 mm
+        //      LM guide rail and the Ø70 flange at opposite ends of the part and claims
+        //      the cone between them (2026-09-18: 4.16x the true volume, p50 5.4 and up
+        //      to 10.0 mm of phantom on the logged gripper<->gripper holds).
         //  (2) SINGLE HULL (pika_gripper_mesh only): the legacy static convex hull at
         //      attachment_site with a +90° Z rotation (the combined-hull STL frame).
         // Load a gripper mesh as a convex shape for fast GJK — but ONLY if it is actually
@@ -901,14 +905,25 @@ struct CollisionMonitor::Impl {
                          " STL (*_hull.STL) for fast, reliable gripper self-collision.\n";
             return bvh;
         };
-        const bool articulated = !cfg.pika_gripper_base_mesh.empty() &&
+        const bool articulated = !cfg.pika_gripper_base_meshes.empty() &&
                                  !cfg.pika_finger_left_mesh.empty() &&
                                  !cfg.pika_finger_right_mesh.empty();
         if (articulated) {
             coal::MeshLoader loader;
-            auto base_hull = loadConvex(loader, cfg.pika_gripper_base_mesh);
+            std::vector<std::shared_ptr<coal::CollisionGeometry>> base_hulls;
+            base_hulls.reserve(cfg.pika_gripper_base_meshes.size());
+            for (const std::string& mesh_path : cfg.pika_gripper_base_meshes) {
+                base_hulls.push_back(loadConvex(loader, mesh_path));
+            }
             auto fl_hull = loadConvex(loader, cfg.pika_finger_left_mesh);
             auto fr_hull = loadConvex(loader, cfg.pika_finger_right_mesh);
+            // One piece keeps the historical name, so existing pair patterns, log
+            // comparisons and GUI groupings are untouched; several take pinocchio's own
+            // multi-mesh suffix -- the one link2_0..2 already wears in every log line.
+            const auto baseName = [&](std::size_t i) -> std::string {
+                return base_hulls.size() == 1 ? std::string("pika_gripper_base")
+                                              : "pika_gripper_base_" + std::to_string(i);
+            };
             const std::array<std::pair<std::string, ArmId>, 2> arms = {{
                 {cfg.left_prefix, ArmId::Left}, {cfg.right_prefix, ArmId::Right}}};
             for (const auto& [prefix, aid] : arms) {
@@ -917,8 +932,11 @@ struct CollisionMonitor::Impl {
                     "safety.self_collision.mesh.left_prefix/right_prefix");
                 const auto& fr = model.frames[fid];
                 const pinocchio::SE3 place = fr.placement;  // identity local (URDF mirror)
-                geom.addGeometryObject(pinocchio::GeometryObject(
-                    prefix + "pika_gripper_base", fr.parentJoint, fr.parentFrame, place, base_hull));
+                for (std::size_t i = 0; i < base_hulls.size(); ++i) {
+                    geom.addGeometryObject(pinocchio::GeometryObject(
+                        prefix + baseName(i), fr.parentJoint, fr.parentFrame, place,
+                        base_hulls[i]));
+                }
                 geom.addGeometryObject(pinocchio::GeometryObject(
                     prefix + "pika_finger_left", fr.parentJoint, fr.parentFrame, place, fl_hull));
                 geom.addGeometryObject(pinocchio::GeometryObject(
@@ -1031,7 +1049,8 @@ struct CollisionMonitor::Impl {
             }
             return "unknown";
         };
-        // The Pika hulls are attached by name (buildGeometry): "<prefix>pika_gripper_base",
+        // The Pika hulls are attached by name (buildGeometry): "<prefix>pika_gripper_base"
+        // (or "<prefix>pika_gripper_base_0..N-1" when the base shell is multi-piece),
         // "<prefix>pika_finger_left/right", or the legacy single "<prefix>pika_gripper".
         const auto isGripperGeometry = [&](std::size_t i) {
             return geom.geometryObjects[i].name.find("pika_") != std::string::npos;
@@ -1200,9 +1219,12 @@ struct CollisionMonitor::Impl {
         for (std::size_t i = 0; i < cfg.stand_ignore_arm_substrings.size(); ++i)
             std::cerr << (i ? "," : "") << cfg.stand_ignore_arm_substrings[i];
         std::cerr << "] swept_samples=" << cfg.swept_samples
-                  << (articulated_ ? " gripper=articulated(base+2fingers)"
-                                   : (cfg.pika_gripper_mesh.empty() ? " gripper=NONE"
-                                                                    : " gripper=hull"))
+                  << (articulated_
+                          ? " gripper=articulated(base x" +
+                                std::to_string(cfg.pika_gripper_base_meshes.size()) +
+                                " + 2 fingers)"
+                          : (cfg.pika_gripper_mesh.empty() ? std::string(" gripper=NONE")
+                                                           : std::string(" gripper=hull")))
                   << std::endl;
     }
 

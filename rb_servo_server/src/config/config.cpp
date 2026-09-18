@@ -3775,7 +3775,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "unified_urdf",
                     "package_dirs",
                     "pika_gripper_mesh",
-                    "pika_gripper_base_mesh",
+                    "pika_gripper_base_meshes",
                     "pika_finger_left_mesh",
                     "pika_finger_right_mesh",
                     "gripper_finger_travel_m",
@@ -3833,9 +3833,32 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     mc.pika_gripper_mesh = resolvePathForConfig(
                         asString(m["pika_gripper_mesh"], "safety.self_collision.mesh.pika_gripper_mesh"), path);
                 }
+                // 2026-09-18: the singular key is REFUSED, not silently accepted. It named
+                // ONE convex hull over the whole gripper base, and that hull spans the
+                // 215 mm LM guide rail and the Ø70 flange at opposite ends of the part, so
+                // it claims the cone between them: 4.16x the true volume and p50 5.4 mm of
+                // phantom exactly where the two grippers meet. A config left on the old key
+                // would keep that quietly, which is the one failure mode this repo does not
+                // accept for a safety asset -- so it fails closed with the new key named.
                 if (has(m, "pika_gripper_base_mesh")) {
-                    mc.pika_gripper_base_mesh = resolvePathForConfig(
-                        asString(m["pika_gripper_base_mesh"], "safety.self_collision.mesh.pika_gripper_base_mesh"), path);
+                    fail("safety.self_collision.mesh.pika_gripper_base_mesh was replaced by "
+                         "pika_gripper_base_meshes (a sequence of convex pieces) on 2026-09-18; "
+                         "list the *_hull_flange/_housing/_guide STLs instead",
+                         m["pika_gripper_base_mesh"]);
+                }
+                if (has(m, "pika_gripper_base_meshes")) {
+                    const YAML::Node meshes = m["pika_gripper_base_meshes"];
+                    if (!meshes.IsSequence() || meshes.size() == 0) {
+                        fail("safety.self_collision.mesh.pika_gripper_base_meshes must be a "
+                             "non-empty sequence of convex-hull mesh paths", meshes);
+                    }
+                    mc.pika_gripper_base_meshes.clear();
+                    for (std::size_t i = 0; i < meshes.size(); ++i) {
+                        mc.pika_gripper_base_meshes.push_back(resolvePathForConfig(
+                            asString(meshes[i],
+                                     "safety.self_collision.mesh.pika_gripper_base_meshes"),
+                            path));
+                    }
                 }
                 if (has(m, "pika_finger_left_mesh")) {
                     mc.pika_finger_left_mesh = resolvePathForConfig(

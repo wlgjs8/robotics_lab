@@ -76,7 +76,7 @@ CollisionMonitorConfig monitorConfigFrom(const DualArmConfig& config, int near) 
     c.unified_urdf = m.unified_urdf;
     c.package_dirs = m.package_dirs;
     c.pika_gripper_mesh = m.pika_gripper_mesh;
-    c.pika_gripper_base_mesh = m.pika_gripper_base_mesh;
+    c.pika_gripper_base_meshes = m.pika_gripper_base_meshes;
     c.pika_finger_left_mesh = m.pika_finger_left_mesh;
     c.pika_finger_right_mesh = m.pika_finger_right_mesh;
     c.gripper_finger_travel_m = m.gripper_finger_travel_m;

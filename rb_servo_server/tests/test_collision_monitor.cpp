@@ -3,6 +3,8 @@
 
 #include <array>
 #include <chrono>
+#include <limits>
+#include <tuple>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -975,7 +977,7 @@ static bool runArticulatedGripper() {
     }
     const fs::path tool =
         ws / "robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool";
-    cfg.pika_gripper_base_mesh = (tool / "pika_gripper_base.STL").string();
+    cfg.pika_gripper_base_meshes = {(tool / "pika_gripper_base.STL").string()};
     cfg.pika_finger_left_mesh = (tool / "pika_finger_left.STL").string();
     cfg.pika_finger_right_mesh = (tool / "pika_finger_right.STL").string();
     cfg.gripper_finger_travel_m = 0.047;
@@ -989,7 +991,7 @@ static bool runArticulatedGripper() {
     RB_CHECK(mon.hasArticulatedGripper());
     // RB5-850E, derived rather than guessed:
     //   per arm  11 link hulls (link0,1,4,5,6 single + link2,link3 CoACD x3)
-    //          +  3 gripper (base + 2 fingers)                    = 14
+    //          +  3 gripper (ONE base piece here + 2 fingers)     = 14
     //   stand    40 CoACD hulls + 1 env_stand_riser + 1 env_stand_spacer = 42
     //   total    14 x 2 + 42                                      = 70
     // The single-hull baseline replaces the 3 gripper geoms with 1, so 66.
@@ -1033,6 +1035,94 @@ static bool runArticulatedGripper() {
     RB_CHECK(max_delta > 0.001);
     std::cout << "articulated gripper: finger clearance delta open->closed = "
               << max_delta * 1000.0 << "mm\n";
+    return true;
+}
+
+// The base shell may be SEVERAL convex pieces (2026-09-18). Two things must hold, and
+// they are the whole reason the split is allowed to touch a safety asset:
+//   * it is a REFINEMENT, not a hole: the pieces never report MORE clearance than the
+//     true (non-convex) base mesh does at the same pose;
+//   * it is tighter than the one hull it replaces, which is where the recovered
+//     millimetres come from -- the single hull has to span the 215 mm LM guide rail and
+//     the flange at opposite ends of the part and claims the cone between them.
+static bool runMultiPieceGripperBase() {
+    const fs::path ws = workspaceRoot();
+    CollisionMonitorConfig base_cfg = makeConfig(ws);
+    if (!fs::is_regular_file(base_cfg.unified_urdf)) {
+        std::cout << "SKIP: unified URDF not found (multi-piece gripper base test)\n";
+        return true;
+    }
+    const fs::path tool =
+        ws / "robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool";
+    const std::vector<std::string> pieces = {
+        (tool / "pika_gripper_base_hull_flange.STL").string(),
+        (tool / "pika_gripper_base_hull_housing.STL").string(),
+        (tool / "pika_gripper_base_hull_guide.STL").string(),
+    };
+    for (const auto& p : pieces) {
+        if (!fs::is_regular_file(p)) {
+            std::cout << "SKIP: " << p << " missing (run make_pika_tool_meshes.py)\n";
+            return true;
+        }
+    }
+    auto build = [&](const std::vector<std::string>& base_meshes) {
+        CollisionMonitorConfig c = base_cfg;
+        c.pika_gripper_base_meshes = base_meshes;
+        c.pika_finger_left_mesh = (tool / "pika_finger_left_hull.STL").string();
+        c.pika_finger_right_mesh = (tool / "pika_finger_right_hull.STL").string();
+        c.gripper_finger_travel_m = 0.049;
+        c.max_near_pairs = 600;
+        return c;
+    };
+    // The truth: the raw base mesh is not convex, so the monitor keeps it as a BVH --
+    // correct distances, just slow. That is exactly what this comparison wants.
+    CollisionMonitor truth(build({(tool / "pika_gripper_base.STL").string()}));
+    CollisionMonitor single(build({(tool / "pika_gripper_base_hull.STL").string()}));
+    CollisionMonitor shell(build(pieces));
+    RB_CHECK(shell.hasArticulatedGripper());
+    // Two extra base pieces per arm on top of the 70 the single-piece model carries.
+    std::cout << "multi-piece geoms=" << shell.numGeometries() << "\n";
+    RB_CHECK(shell.numGeometries() == 74);
+
+    auto minBasePair = [](CollisionMonitor& m, const JointArray& l, const JointArray& r) {
+        const CollisionVerdict v = m.evalOnce(l, r);
+        double best = std::numeric_limits<double>::infinity();
+        bool seen_piece_1 = false, seen_piece_2 = false;
+        for (const auto& p : v.near) {
+            const bool a = p.name_a.find("pika_gripper_base") != std::string::npos;
+            const bool b = p.name_b.find("pika_gripper_base") != std::string::npos;
+            if (a && b) best = std::min(best, p.d_m);
+            for (const std::string* n : {&p.name_a, &p.name_b}) {
+                seen_piece_1 |= n->find("pika_gripper_base_1") != std::string::npos;
+                seen_piece_2 |= n->find("pika_gripper_base_2") != std::string::npos;
+            }
+        }
+        return std::make_tuple(best, seen_piece_1, seen_piece_2);
+    };
+    // A RECORDED pose, not a guessed one: servo_log_20260917_154112.csv, one of the 681
+    // ticks where the left<->right pika_gripper_base barrier was braking (median
+    // headroom). At kInitPose the two grippers are far apart and the pair never enters
+    // the near list at all, so the comparison would have nothing to compare.
+    const JointArray L = {-91.5603, 47.4223, 102.6035, -4.3772, -150.4285, 11.8912};
+    const JointArray R = {54.3387, -73.8441, -107.3952, 34.2658, 82.6443, -123.3438};
+    for (auto* m : {&truth, &single, &shell}) {
+        m->setGripperOpenPercent(ArmId::Left, 0.0);
+        m->setGripperOpenPercent(ArmId::Right, 0.0);
+    }
+    const auto [d_truth, t1, t2] = minBasePair(truth, L, R);
+    const auto [d_single, s1, s2] = minBasePair(single, L, R);
+    const auto [d_shell, p1, p2] = minBasePair(shell, L, R);
+    (void)t1; (void)t2; (void)s1; (void)s2;
+    // Indexed names only appear when the shell is multi-piece.
+    RB_CHECK(p1 && p2);
+    RB_CHECK(std::isfinite(d_truth) && std::isfinite(d_single) && std::isfinite(d_shell));
+    // Refinement: never optimistic about the real part.
+    RB_CHECK(d_shell <= d_truth + 1e-9);
+    // ...and strictly tighter than the hull it replaces.
+    RB_CHECK(d_shell > d_single + 1e-4);
+    std::cout << "gripper base<->base at the recorded braking pose: one hull " << d_single * 1000.0
+              << " mm, three pieces " << d_shell * 1000.0 << " mm, true mesh "
+              << d_truth * 1000.0 << " mm\n";
     return true;
 }
 
@@ -1548,6 +1638,10 @@ int main() {
     }
     if (!runArticulatedGripper()) {
         std::cerr << "test_collision_monitor (articulated gripper) FAILED\n";
+        return 1;
+    }
+    if (!runMultiPieceGripperBase()) {
+        std::cerr << "test_collision_monitor (multi-piece gripper base) FAILED\n";
         return 1;
     }
     if (!runGroundPlane()) {

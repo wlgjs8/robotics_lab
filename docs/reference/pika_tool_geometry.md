@@ -111,6 +111,96 @@ overclose command) needs re-deriving: it was scaled through a 94.04 mm full-open
 and the real full scale is 98.0 mm, so the percent a given width maps to moves by
 **4.2 %**, not by a fixed offset.
 
+## The LM guide, and why the collision model was wrong there (2026-09-18)
+
+![LM guide sections](pika_lm_guide_sections.png)
+
+Regenerate with `rb_servo_server/tools/plot_pika_lm_guide.py`.
+
+Sectioning `pika_gripper_base.STL` by connected component isolates the guide as its own
+part. **Every number below was confirmed against the hardware by the operator.**
+
+| part | dimensions | position (Z from the flange) |
+| --- | --- | --- |
+| LM guide rail | **215.00 × 7.00 × 4.80 mm** — an MGN7 profile | Z 137.30..142.10, ends at \|X\| **107.50** |
+| carriages ×2 | 30.80 × 17.00 × 6.50 (MGN7H) | Z 138.80..145.30, outer end \|X\| 103.92 |
+| carriage plates ×2 | X 17.68..85.02 | Z 123.80..135.50 |
+| housing | \|X\| <= 58.46 | Z 63..138 |
+
+**The guide is the only part of the tool with a 107.5 mm radius.** Everything else lives
+within ~40 mm of the tool axis, and unlike the fingers the guide does not move: closing
+the jaw pulls the fingers in to \|X\| 58.84 while the guide stays at 103.92..107.50, so the
+tool's footprint never shrinks. The rail sticks out **48.66 mm per side** beyond every
+other part of a closed gripper.
+
+That is why the gripper<->gripper barrier engages there and nowhere else. Replaying the
+`q_sent` of the 341 ticks in the 2026-09-17 15:41/16:08 runs where the left<->right
+`pika_gripper_base` pair was braking: the two tool origins are **162 mm** apart (TCP to
+TCP 145 mm) against a baseline of 354 mm, and 107.5 + 107.5 = 215 > 162, so at the
+separation the task needs, the two guides ALWAYS overlap laterally and nothing else ever
+does. The rails sit ~85° to each other there, so one gripper's rail tip faces the other's
+housing flank.
+
+### The single hull, and the three that replaced it
+
+The monitor checked ONE convex hull of the whole base. That is the worst possible shape
+for a single hull: the widest feature (the 215 mm rail, at the top) and the narrowest (the
+Ø70 flange, at the bottom) are at opposite ends, so the hull claims the entire cone
+between them — **1653.2 cm³ for a 397.7 cm³ part, 4.16x**, median 11.8 mm and up to
+**44.5 mm** of phantom, worst on the flanks at Z≈89.
+
+Which is exactly where the guide puts the other gripper's rail tip. Broken down by which
+feature is truly closest (`tools/probe_gripper_hull_phantom.py`):
+
+| true witness pair | n | true | one hull reported | phantom | three pieces |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| housing +y <-> housing +y | 175 | 6.8 mm | 4.5 | 2.3 | 6.8 |
+| **LM guide <-> housing flank** | **144** | **13.9 mm** | **4.9** | **8.2** | **12.6** |
+| LM guide <-> LM guide | 22 | 8.7 mm | 4.6 | 4.1 | 6.5 |
+
+So the guide-related holds were mostly an artifact: 13.9 mm of real clearance read as
+4.9 mm and pinned the pair to the 5 mm force-covered floor. 184 of the 192 sub-5 mm ticks
+were truly above it.
+
+`make_pika_tool_meshes.py` now emits the base as **three convex pieces**, split BY
+CONNECTED COMPONENT on the base's own structure (never a cutting plane, which would sever
+parts — the same rule the visual split follows), and asserts that their union contains
+every vertex of the source mesh, so this is a refinement of the old hull and never a hole
+in it:
+
+| piece | geometry name | contents | Z |
+| --- | --- | --- | --- |
+| `pika_gripper_base_hull_flange.STL` | `<prefix>pika_gripper_base_0` | adapters + RFT64 | 0..63 |
+| `pika_gripper_base_hull_housing.STL` | `..._base_1` | the housing | 57..138 |
+| `pika_gripper_base_hull_guide.STL` | `..._base_2` | plates, rail, carriages | 114..145 |
+
+![before/after sections](pika_base_hull_before_after.png)
+
+Regenerate with `rb_servo_server/tools/plot_gripper_hull_before_after.py`. The right-hand
+panels are a real cut through one of those recorded contacts, taken on the plane that
+passes through both true witness points and contains the gap direction, so the distances
+in the picture are the ones the solver measured: **one hull 4.86 mm, three pieces
+13.67 mm, truth 14.71 mm**, against a 5 mm force-covered floor.
+
+Result on those same poses: shell 1653.2 → 1062.2 cm³, phantom p50 5.4 → **0.3 mm**,
+p95 9.8 → 2.6, max 10.0 → 5.5. Geometry objects 70 → 74, collision pairs 1404 → 1668;
+`selfcol_eval_ms` was mean 1.42 / max 3.62 ms against a 50 ms `max_staleness_s`.
+
+**No barrier margin moved.** `d_hard_m`, `d_slow_m` and `gripper_gripper.covered_d_hard_m`
+are untouched — the model simply stopped claiming volume the tool does not occupy. Do not
+"compensate" for the split by widening a floor. The config key is
+`safety.self_collision.mesh.pika_gripper_base_meshes` (a sequence); the old singular
+`pika_gripper_base_mesh` is REFUSED at load rather than silently kept, because a config
+left on it would quietly restore the fat hull.
+
+### Still open: the carriages are baked at full open
+
+The two MGN7H carriages are inside the STATIC base, frozen at the vendor CAD's full-open
+pose (X 73.12..103.92). They physically travel with the fingers, and the moving finger
+hull already covers 98.4 % of their volume (max protrusion 1.80 mm), so moving them with
+the jaw — or dropping them from the static shell entirely — is worth about 1 mm more and
+removes a real lie in the model. Not done: it is a separate change from the hull split.
+
 ## Why the picture is here
 
 The sections are the evidence that `pika_gripper.STL`'s origin is the flange and not

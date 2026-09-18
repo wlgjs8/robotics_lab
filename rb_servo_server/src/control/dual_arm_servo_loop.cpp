@@ -2172,7 +2172,7 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.unified_urdf = m.unified_urdf;
         collision_monitor_cfg_.package_dirs = m.package_dirs;
         collision_monitor_cfg_.pika_gripper_mesh = m.pika_gripper_mesh;
-        collision_monitor_cfg_.pika_gripper_base_mesh = m.pika_gripper_base_mesh;
+        collision_monitor_cfg_.pika_gripper_base_meshes = m.pika_gripper_base_meshes;
         collision_monitor_cfg_.pika_finger_left_mesh = m.pika_finger_left_mesh;
         collision_monitor_cfg_.pika_finger_right_mesh = m.pika_finger_right_mesh;
         collision_monitor_cfg_.gripper_finger_travel_m = m.gripper_finger_travel_m;

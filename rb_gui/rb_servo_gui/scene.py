@@ -485,6 +485,7 @@ _SELF_COLLISION_CHECK_RGBA = (0.27, 0.62, 1.0, 0.38)
 # only the groups the violating pair actually names — an arm folding onto the stand
 # must not look the same as two grippers touching. The split is the server's own:
 # collision_monitor.cpp attaches the Pika hulls by name ("<prefix>pika_gripper_base",
+# or "<prefix>pika_gripper_base_0..N-1" for a multi-piece base shell,
 # "<prefix>pika_finger_left/right", legacy single "<prefix>pika_gripper") on top of
 # the prefixed arm links, and everything without an arm prefix is stand/world
 # geometry (stand hulls, ground_plane, external_box_*).
@@ -2638,10 +2639,14 @@ def _attach_checkgeom_gripper(scene_handles: dict[str, Any], overlay: Any, manif
     def _exists(p: Any) -> bool:
         return isinstance(p, str) and bool(p) and Path(p).exists()
 
-    base_path = manifest.get("pika_gripper_base_mesh")
+    # The base shell is a LIST of convex pieces (server 2026-09-18) — drawing only the
+    # first would show the operator a thinner gripper than the one the guard checks.
+    raw_bases = manifest.get("pika_gripper_base_meshes")
+    base_paths = ([p for p in raw_bases if _exists(p)]
+                  if isinstance(raw_bases, (list, tuple)) else [])
     fl_path = manifest.get("pika_finger_left_mesh")
     fr_path = manifest.get("pika_finger_right_mesh")
-    articulated = _exists(base_path) and _exists(fl_path) and _exists(fr_path)
+    articulated = bool(base_paths) and _exists(fl_path) and _exists(fr_path)
     hull_path = manifest.get("pika_gripper_mesh")
     if not articulated and not _exists(hull_path):
         return
@@ -2668,7 +2673,7 @@ def _attach_checkgeom_gripper(scene_handles: dict[str, Any], overlay: Any, manif
         )
         handles: list[Any] = []
         if articulated:
-            base_mesh = _load(base_path, True)
+            base_meshes = [_load(p, True) for p in base_paths]
             fl_mesh = _load(fl_path, True)
             fr_mesh = _load(fr_path, True)
             ident = _pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, 0.0))  # no Z+90 for base/fingers
@@ -2677,10 +2682,13 @@ def _attach_checkgeom_gripper(scene_handles: dict[str, Any], overlay: Any, manif
                 frame = _find_frame(prefix)
                 if frame is None:
                     continue
-                base_h = server.scene.add_mesh_simple(
-                    f"{frame.name}/pika_gripper_base", vertices=base_mesh.vertices,
-                    faces=base_mesh.faces, color=rgb, opacity=opacity, wxyz=ident,
-                    position=(0.0, 0.0, 0.0), visible=False)
+                base_hs = [
+                    server.scene.add_mesh_simple(
+                        f"{frame.name}/pika_gripper_base"
+                        + ("" if len(base_meshes) == 1 else f"_{i}"),
+                        vertices=m.vertices, faces=m.faces, color=rgb, opacity=opacity,
+                        wxyz=ident, position=(0.0, 0.0, 0.0), visible=False)
+                    for i, m in enumerate(base_meshes)]
                 lh = server.scene.add_mesh_simple(
                     f"{frame.name}/pika_finger_left", vertices=fl_mesh.vertices,
                     faces=fl_mesh.faces, color=rgb, opacity=opacity, wxyz=ident,
@@ -2689,7 +2697,7 @@ def _attach_checkgeom_gripper(scene_handles: dict[str, Any], overlay: Any, manif
                     f"{frame.name}/pika_finger_right", vertices=fr_mesh.vertices,
                     faces=fr_mesh.faces, color=rgb, opacity=opacity, wxyz=ident,
                     position=(0.0, 0.0, 0.0), visible=False)
-                handles.extend((base_h, lh, rh))
+                handles.extend((*base_hs, lh, rh))
                 fingers_by_arm[arm_name] = {"left": lh, "right": rh}
             scene_handles["checkgeom_gripper_fingers"] = fingers_by_arm
             scene_handles["checkgeom_finger_travel"] = float(

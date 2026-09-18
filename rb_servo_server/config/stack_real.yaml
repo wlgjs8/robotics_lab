@@ -917,7 +917,38 @@ safety:
       # read 125 mm at a pose where the true clearance was ~21 mm), silently disabling the
       # gripper<->gripper self-collision guard. The arm/stand link*_hull/stand_hull meshes
       # are already convex; only the gripper meshes were raw. (See selfcollision memory.)
-      pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_base_hull.STL"
+      # 2026-09-18: the base is THREE convex pieces, not one hull. One hull over the whole
+      # base has to span the 215.00 mm LM guide rail (Z 137.3..142.1, the only part of the
+      # tool that reaches |X| > 85) and the Ø70 flange at Z 0, so it claims the cone
+      # between them: 1653.2 cm3 for a 397.7 cm3 part, 4.16x.
+      #
+      # MEASURED on the 341 ticks of the 2026-09-17 15:41/16:08 runs where the
+      # left<->right pika_gripper_base barrier was braking, by replaying q_sent through
+      # coal (tools/probe_gripper_hull_phantom.py): the monitor reported p50 4.6 mm where
+      # the true mesh-to-mesh clearance was p50 9.9 mm. The phantom is worst on exactly the
+      # contact family the guide creates -- at those poses the two tool origins are 162 mm
+      # apart and the rails sit ~85 deg to each other, so one gripper's rail tip faces the
+      # other's housing flank at Z~89, which is where a single hull is fattest: true 13.9 mm
+      # reported as 4.9, i.e. pinned to the 5 mm force-covered floor on 8.2 mm of material
+      # that is not there. 275 of the 287 sub-5 mm ticks come back above the floor with the
+      # split; phantom p50 5.4 -> 0.3, max 10.0 -> 5.5 mm; shell 1653.2 -> 1062.2 cm3.
+      #
+      # NO MARGIN MOVED. d_hard/d_slow/covered_d_hard below are untouched -- this only
+      # stops the model claiming volume the tool does not occupy. Do not "compensate" for
+      # it by widening a floor.
+      #
+      # The pieces come from make_pika_tool_meshes.py, split BY CONNECTED COMPONENT (never
+      # a cutting plane, which would sever parts) on the base's own structure, and their
+      # union is asserted to contain every vertex of pika_gripper_base.STL -- a refinement
+      # of the old hull, never a hole in it. Order is flange -> housing -> guide and the
+      # monitor names them <prefix>pika_gripper_base_0/_1/_2 in that order:
+      #   _0 flange  Z   0..63   adapters + RFT64 F/T sensor
+      #   _1 housing Z  57..138  the gripper housing
+      #   _2 guide   Z 114..145  carriage plates, the MGN7 rail, both carriages
+      pika_gripper_base_meshes:
+        - "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_base_hull_flange.STL"
+        - "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_base_hull_housing.STL"
+        - "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_base_hull_guide.STL"
       pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_finger_left_hull.STL"
       pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_finger_right_hull.STL"
       # 2026-09-04: 0.047 -> 0.049, MEASURED. The full-open gap between the two TPU tip

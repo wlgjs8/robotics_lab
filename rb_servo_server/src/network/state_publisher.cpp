@@ -636,7 +636,7 @@ nlohmann::json selfCollisionManifestJson(
         // Articulated gripper meshes (when set, the monitor checks a static base hull +
         // two movable finger hulls instead of the single hull above). The GUI checkgeom
         // overlay mirrors this and moves the fingers by the live jaw percent.
-        {"pika_gripper_base_mesh", m.pika_gripper_base_mesh},
+        {"pika_gripper_base_meshes", stringArrayJson(m.pika_gripper_base_meshes)},
         {"pika_finger_left_mesh", m.pika_finger_left_mesh},
         {"pika_finger_right_mesh", m.pika_finger_right_mesh},
         {"gripper_finger_travel_m", m.gripper_finger_travel_m},

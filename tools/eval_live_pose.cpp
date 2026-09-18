@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     printf("=== mesh variant: %s ===\n", raw ? "RAW (non-convex, tests step-2 guard)"
                                              : "HULL (production fix)");
     c.pika_gripper_mesh = tool + "pika_gripper_hull.STL";
-    c.pika_gripper_base_mesh = tool + "pika_gripper_base" + sfx;
+    c.pika_gripper_base_meshes = {tool + "pika_gripper_base" + sfx};
     c.pika_finger_left_mesh = tool + "pika_finger_left" + sfx;
     c.pika_finger_right_mesh = tool + "pika_finger_right" + sfx;
     c.gripper_finger_travel_m = 0.047;

@@ -54,13 +54,17 @@ struct CollisionMonitorConfig {
     std::vector<std::string> package_dirs;  // resolve mesh "../../../meshes" paths
     std::string pika_gripper_mesh;        // optional; attached as a convex hull
     // ARTICULATED gripper collision (optional). When base + both finger meshes are set,
-    // the gripper is modeled as a STATIC base hull + two MOVABLE finger hulls (convex
+    // the gripper is modeled as a STATIC base shell + two MOVABLE finger hulls (convex
     // hulls of the visual STLs) attached at <prefix>attachment_site, mirroring
     // rb3_730e_pika_articulated.urdf: identity placement (no +90° Z), fingers translate
     // along the local +X (jaw axis) by setGripperOpenPercent so the checked gripper jaw
     // tracks the live open percent. Takes precedence over pika_gripper_mesh (single
     // static hull) when all three are present; otherwise the single-hull path is used.
-    std::string pika_gripper_base_mesh;
+    // The base shell is a LIST of convex pieces, each attached as its own geometry
+    // object: one piece keeps the historical name "<prefix>pika_gripper_base", several
+    // become "<prefix>pika_gripper_base_0..N-1" (pinocchio's own multi-mesh convention,
+    // the same one link2_0..2 already uses in every log line).
+    std::vector<std::string> pika_gripper_base_meshes;
     std::string pika_finger_left_mesh;
     std::string pika_finger_right_mesh;
     double gripper_finger_travel_m = 0.047;  // per-finger jaw travel open(0)->closed

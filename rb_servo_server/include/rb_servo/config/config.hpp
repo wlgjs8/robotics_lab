@@ -593,11 +593,16 @@ struct SelfCollisionConfig {
         std::string unified_urdf;        // stand+both-arms URDF (e.g. dual_rb3_730e_ver3.urdf)
         std::vector<std::string> package_dirs;  // resolve mesh "../../../meshes" paths
         std::string pika_gripper_mesh;   // optional; attached as a convex hull per arm
-        // Optional ARTICULATED gripper collision: a static base hull + two movable
+        // Optional ARTICULATED gripper collision: a static base shell + two movable
         // finger hulls (convex hulls of the visual STLs) attached at attachment_site,
         // the fingers tracking the live jaw open percent (mirrors the articulated URDF).
         // When all three are set they take precedence over the single pika_gripper_mesh.
-        std::string pika_gripper_base_mesh;
+        // The base is a LIST of convex pieces (2026-09-18): one hull over the whole base
+        // has to span the 215 mm LM guide rail and the Ø70 flange at opposite ends, and
+        // fills the cone between them -- 4.16x the part's volume, and p50 5.4 / max 10.0 mm
+        // of phantom right where the two grippers meet. See docs/reference/
+        // pika_tool_geometry.md and tools/probe_gripper_hull_phantom.py.
+        std::vector<std::string> pika_gripper_base_meshes;
         std::string pika_finger_left_mesh;
         std::string pika_finger_right_mesh;
         double gripper_finger_travel_m = 0.047;  // per-finger jaw travel open(0)->closed

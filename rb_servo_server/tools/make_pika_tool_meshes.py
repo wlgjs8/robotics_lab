@@ -175,6 +175,38 @@ BASE_GROUP_OUTPUT = {
     "gripper": "pika_gripper_body.STL",
 }
 
+# ---- The COLLISION hulls -------------------------------------------------------------
+# The monitor used to check ONE convex hull of the whole base, and the base is the worst
+# possible shape for that: its widest feature (the 215.00 mm LM guide rail, Z 137.3..142.1)
+# sits at the opposite end from its narrowest (the Ø70 flange at Z 0), so the hull fills
+# the cone between them -- 1653.2 cm3 for 397.7 cm3 of part, 4.16x.
+#
+# Measured cost, 2026-09-18, on the 341 ticks of the 2026-09-17 15:41/16:08 runs where the
+# left<->right `pika_gripper_base` barrier was braking (tools/probe_gripper_hull_phantom.py):
+# the monitor reported p50 4.6 mm where the true mesh-to-mesh clearance was p50 9.9 mm.
+# Phantom p50 5.4 / p95 9.8 / max 10.0 mm, and it is worst exactly on the contact family
+# the guide creates -- one gripper's rail tip against the other's housing flank at Z~89,
+# where the hull is fattest: true 13.9 mm reported as 4.9, i.e. sitting on the 5 mm
+# force-covered floor on 8.2 mm of material that is not there.
+#
+# Three hulls instead of one takes that to p50 0.3 / p95 2.6 / max 5.5 mm and lifts 275 of
+# the 287 ticks back above the 5 mm floor. NO safety margin moved: d_hard/d_slow are
+# untouched, the model just stopped claiming volume the tool does not occupy.
+#
+# Split BY CONNECTED COMPONENT like the visual split above, not by a cutting plane, so no
+# part is severed; the boundaries are the base's own structure:
+#   Z   0..63    flange adapters + the RFT64 F/T sensor (r <= 43.91)
+#   Z  57..138   the gripper housing (|X| <= 58.46)
+#   Z 114..145   the guide assembly: carriage plates, the MGN7 rail, both carriages
+# The union of the three is asserted to contain every vertex of the source mesh, so this
+# is a REFINEMENT of the old hull, never a hole in it.
+COLLISION_GROUP_BOUNDS_MM = ((0.0, "flange"), (63.0, "housing"), (123.8, "guide"))
+COLLISION_GROUP_OUTPUT = {
+    "flange": "pika_gripper_base_hull_flange.STL",
+    "housing": "pika_gripper_base_hull_housing.STL",
+    "guide": "pika_gripper_base_hull_guide.STL",
+}
+
 # Invariants asserted after building, all from pika_gripper_base.STL (the vendor CAD's
 # own carriage), in the URDF tool frame. Tolerance covers section/tessellation noise.
 CARRIAGE_SEAT_Z_MM = 145.30
@@ -276,18 +308,23 @@ def _assert_mounts_on_carriage(finger: trimesh.Trimesh, side: str) -> None:
                 f"carriage pattern |X| {CARRIAGE_M2_ABS_X_MM} Y +/-{CARRIAGE_M2_ABS_Y_MM}")
 
 
-def _split_base_by_material(base: trimesh.Trimesh) -> dict[str, trimesh.Trimesh]:
-    """Partition pika_gripper_base.STL into mount / ft_sensor / gripper submeshes."""
+def _split_base(base: trimesh.Trimesh, bounds, groups) -> dict[str, trimesh.Trimesh]:
+    """Partition pika_gripper_base.STL by connected component and Z centroid.
+
+    `bounds` is ((lower_mm, group), ...) ascending; a component lands in the last group
+    whose lower bound its area-weighted Z centroid clears. Components stay whole, so the
+    result is an exact partition of the source faces (asserted).
+    """
     components = trimesh.graph.connected_components(
         base.face_adjacency, nodes=np.arange(len(base.faces)))
-    masks: dict[str, list[int]] = {name: [] for name in BASE_GROUP_OUTPUT}
+    masks: dict[str, list[int]] = {name: [] for name in groups}
     for faces in components:
         faces = np.asarray(faces)
         areas = base.area_faces[faces]
         z = base.triangles[faces][:, :, 2].mean(axis=1)
         centroid = float(np.average(z, weights=areas)) if areas.sum() > 0 else float(z.mean())
-        group = BASE_GROUP_BOUNDS_MM[0][1]
-        for lower, name in BASE_GROUP_BOUNDS_MM:
+        group = bounds[0][1]
+        for lower, name in bounds:
             if centroid >= lower:
                 group = name
         masks[group].extend(faces.tolist())
@@ -300,6 +337,36 @@ def _split_base_by_material(base: trimesh.Trimesh) -> dict[str, trimesh.Trimesh]
             raise SystemExit(f"base split: group {name} came out empty")
         out[name] = base.submesh([sorted(faces)], append=True)
     return out
+
+
+def _split_base_by_material(base: trimesh.Trimesh) -> dict[str, trimesh.Trimesh]:
+    """Partition pika_gripper_base.STL into mount / ft_sensor / gripper submeshes."""
+    return _split_base(base, BASE_GROUP_BOUNDS_MM, BASE_GROUP_OUTPUT)
+
+
+def _collision_hulls(base: trimesh.Trimesh) -> dict[str, trimesh.Trimesh]:
+    """The piecewise-convex collision shell for the static gripper base.
+
+    Asserts the property the monitor depends on: the union of the pieces CONTAINS the
+    source mesh, so replacing the single hull can only ever remove phantom volume, never
+    open a hole the guard would miss.
+    """
+    hulls = {name: _hull(mesh, COLLISION_GROUP_OUTPUT[name])
+             for name, mesh in _split_base(base, COLLISION_GROUP_BOUNDS_MM,
+                                           COLLISION_GROUP_OUTPUT).items()}
+    vertices = np.asarray(base.vertices)
+    covered = np.zeros(len(vertices), dtype=bool)
+    for hull in hulls.values():
+        covered |= trimesh.proximity.ProximityQuery(hull).signed_distance(vertices) >= -1e-6
+    if not covered.all():
+        raise SystemExit(f"collision hulls miss {int((~covered).sum())} base vertices; the "
+                         "pieces must cover the source mesh")
+    single = base.convex_hull.volume
+    total = sum(h.volume for h in hulls.values())
+    if total >= single:
+        raise SystemExit(f"collision hulls are not tighter than the single hull "
+                         f"({total / 1000:.1f} vs {single / 1000:.1f} cm3)")
+    return hulls
 
 
 def build() -> dict[str, bytes]:
@@ -350,6 +417,21 @@ def build() -> dict[str, bytes]:
         lo, hi = mesh.bounds[0][2], mesh.bounds[1][2]
         print(f"  base/{group:<9} {len(mesh.faces):>6} faces  Z {lo:7.2f}..{hi:7.2f}")
         out[BASE_GROUP_OUTPUT[group]] = mesh.export(file_type="stl")
+
+    # The collision shell. pika_gripper_base_hull.STL (the whole-base single hull) is still
+    # emitted: it is the shape the guard used until 2026-09-18 and the one the legacy
+    # single-mesh attach path would take, so keeping it reproducible keeps the comparison
+    # honest -- but no tracked config points at it any more.
+    out["pika_gripper_base_hull.STL"] = base.convex_hull.export(file_type="stl")
+    collision = _collision_hulls(base)
+    for group, hull in collision.items():
+        b = hull.bounds
+        print(f"  hull/{group:<8} {len(hull.faces):>5} faces  Z {b[0][2]:7.2f}..{b[1][2]:7.2f}  "
+              f"|X| <= {max(abs(b[0][0]), abs(b[1][0])):7.2f}  {hull.volume / 1000:7.1f} cm3")
+        out[COLLISION_GROUP_OUTPUT[group]] = hull.export(file_type="stl")
+    print(f"  collision shell   : {sum(h.volume for h in collision.values()) / 1000:.1f} cm3 "
+          f"in {len(collision)} pieces vs {base.convex_hull.volume / 1000:.1f} cm3 as one hull "
+          f"(true part {base.volume / 1000:.1f})")
 
     whole = trimesh.util.concatenate([base, fingers["left"], fingers["right"]])
     whole.apply_transform(_rz(-90.0))
